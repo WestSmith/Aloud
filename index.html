@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.1.1">
+<meta name="aloud-version" content="v6.2.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -126,6 +126,22 @@
   }
   #home .hint { margin-top: 26px; font-size: 12.5px; color: var(--text-dim); max-width: 460px; line-height: 1.6; }
   .ver-line { margin-top: 18px; font-size: 11.5px; color: var(--text-dim); opacity: .7; font-variant-numeric: tabular-nums; letter-spacing: .3px; }
+  #recent-list { margin-top: 22px; width: 100%; max-width: 460px; }
+  .recent-row { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border: 1px solid var(--border);
+    border-radius: 12px; margin-bottom: 8px; cursor: pointer; background: var(--bg-elev); text-align: left; transition: border-color .15s; }
+  .recent-row:hover { border-color: var(--accent); }
+  .rr-play { color: var(--accent); flex: none; }
+  .rr-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+  .rr-name mark { background: var(--accent-soft); color: var(--accent-strong); border-radius: 3px; padding: 0 1px; }
+  .rr-pct { color: var(--text-dim); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
+  .rr-x { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 13px; padding: 4px; flex: none; }
+  .rr-x:hover { color: var(--text); }
+  #btn-sleep.sleep-on { color: var(--accent-strong); font-size: 12px !important; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #search-input { width: 100%; box-sizing: border-box; padding: 11px 14px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--bg-elev2); color: var(--text); font-size: 15px; margin-bottom: 12px; outline: none; }
+  #search-input:focus { border-color: var(--accent); }
+  #search-results, #bm-list { max-height: 45vh; overflow-y: auto; }
+  #search-results .rr-name, #bm-list .rr-name { white-space: normal; line-height: 1.45; font-size: 13.5px; }
 
   /* ---------- Reader ---------- */
   #reader { display: none; padding: calc(74px + env(safe-area-inset-top)) 0 190px; }
@@ -452,6 +468,9 @@
   <div id="chapter-row">
     <select id="chapter-select" aria-label="Chapter"></select>
   </div>
+  <button class="iconbtn doc-btn" id="btn-search" title="Search in document (/)" aria-label="Search in document" style="display:none;font-size:15px">🔍</button>
+  <button class="iconbtn doc-btn" id="btn-bm" title="Bookmarks (B to add)" aria-label="Bookmarks" style="display:none;font-size:15px">🔖</button>
+  <button class="iconbtn doc-btn" id="btn-sleep" title="Sleep timer" aria-label="Sleep timer" style="display:none;font-size:15px">🌙</button>
   <button class="iconbtn" id="btn-rsvp" title="RSVP speed-reader (R)" aria-label="RSVP speed-reader" style="font-size:15px">⚡</button>
   <button class="iconbtn" id="btn-view" title="Switch view" aria-label="Switch view" style="display:none;font-size:15px;font-weight:700">📄</button>
   <button class="iconbtn" id="btn-open" title="Open a file" aria-label="Open a file">
@@ -487,6 +506,7 @@
     <div class="t2">Everything stays on your device — nothing is uploaded.</div>
     <div class="fmt-chips"><span>EPUB</span><span>PDF</span><span>HTML</span><span>TXT / MD</span></div>
   </div>
+  <div id="recent-list"></div>
   <div class="hint">
     <b>Two voice engines:</b> instant device voices, or the <b>Kokoro neural voice</b> (open-source, runs in your browser). PDFs open as real pages with highlighting right on them. Double-tap any word to fix its pronunciation.
   </div>
@@ -569,6 +589,14 @@
     <div class="switch on" id="senthl-switch"></div>
   </div>
   <div class="set-row">
+    <div class="lbl">Skim mode<small>Read only the first sentence of each paragraph</small></div>
+    <div class="switch" id="skim-switch"></div>
+  </div>
+  <div class="set-row">
+    <div class="lbl">Skip URLs &amp; code blocks<small>Don't read web addresses or code out loud</small></div>
+    <div class="switch on" id="skipcode-switch"></div>
+  </div>
+  <div class="set-row">
     <div class="lbl">Read small print (PDF)<small>Footnotes, margin notes, superscript markers</small></div>
     <div class="switch" id="smallprint-switch"></div>
   </div>
@@ -577,6 +605,27 @@
     <div id="dict-list"></div>
   </div>
   <div class="ver-line" id="settings-version" style="text-align:center"></div>
+</div>
+
+<div class="sheet" id="sleep-sheet">
+  <div class="grab"></div>
+  <h3>Sleep timer</h3>
+  <div class="chips" id="sleep-chips"></div>
+  <div class="voice-note">Playback fades out and pauses when the timer ends. Your place is always saved.</div>
+</div>
+
+<div class="sheet" id="bm-sheet">
+  <div class="grab"></div>
+  <h3>Bookmarks</h3>
+  <button class="chip" id="bm-add" style="margin-bottom:12px">＋ Bookmark current sentence (B)</button>
+  <div id="bm-list"></div>
+</div>
+
+<div class="sheet" id="search-sheet">
+  <div class="grab"></div>
+  <h3>Search</h3>
+  <input type="search" id="search-input" placeholder="Find in this document…" autocomplete="off" spellcheck="false">
+  <div id="search-results"></div>
 </div>
 
 <div id="toast"></div>
@@ -697,6 +746,10 @@ const S = {
   fastEnds: 0,
   breather: store.get('breather', 1),   // pause/breather intensity multiplier (0 = off)
   breatherToken: 0,                     // cancels a pending inter-paragraph gap
+  skim: store.get('skim', false),       // read only the first sentence of each paragraph
+  skipCode: store.get('skipCode', true),// don't voice URLs / code blocks
+  sleep: { mode: null, until: 0, iv: null, preset: 0 },   // sleep timer
+  costCum: null, costGen: 0,            // per-sentence cumulative speech-time (honest ETA)
   rsvp: {
     open: false,
     mode: store.get('rsvpMode', 'voice'),   // 'voice' (TTS-synced) | 'silent' (timer)
@@ -738,7 +791,9 @@ function coreOf(tok) {
 }
 
 /* what the TTS engine should actually say for a display token */
+const URL_TOKEN_RE = /(?:https?:\/\/|www\.)\S/i;
 function spokenFor(tok) {
+  if (S.skipCode && URL_TOKEN_RE.test(tok)) return '';   // don't read web addresses aloud
   const lower = tok.toLowerCase();
   if (BUILTIN_SPOKEN[lower]) return BUILTIN_SPOKEN[lower];
   const { pre, core, post } = coreOf(tok);
@@ -866,6 +921,7 @@ function syllables(tok) {
   return Math.max(1, n);
 }
 function wordCostMs(spokenTok) {
+  if (!spokenTok || !spokenTok.trim()) return 30;        // skipped token (e.g. URL)
   const ph = phonemeCache.get(spokenTok.toLowerCase());
   let base = (ph && ph.v != null)
     ? 62 + ph.v * 116 + ph.c * 40                                // vowels carry the time
@@ -953,6 +1009,7 @@ async function openFile(file, opts = {}) {
       if (!blocks.length) throw new Error('No readable text found in this file.');
       renderFlow(blocks, chapters, opts);
     }
+    rememberFile(file).then(renderRecents);   // library: enable one-tap Continue next launch
   } catch (err) {
     console.error(err);
     toast('⚠️ ' + (err.message || 'Could not open that file.'), 5000);
@@ -1022,11 +1079,19 @@ function parseHtmlString(html, isXhtml = false) {
       const TAG = (child.tagName || '').toUpperCase();
       if (SKIP_TAGS.has(TAG)) continue;
       if (BLOCK_TAGS.has(TAG)) {
-        const text = (child.textContent || '').replace(/\s+/g, ' ').trim();
+        /* footnote markers & screen-reader-hidden bits aren't for listening
+           (mirrors what the native HTML view already does) */
+        let src = child;
+        if (child.querySelector('sup, [aria-hidden="true"]')) {
+          src = child.cloneNode(true);
+          src.querySelectorAll('sup, [aria-hidden="true"]').forEach(n => n.remove());
+        }
+        const text = (src.textContent || '').replace(/\s+/g, ' ').trim();
         if (text) {
           let tag = TAG.toLowerCase();
+          const code = tag === 'pre';
           if (['h5','h6','dd','dt','figcaption','td','caption','pre'].includes(tag)) tag = tag.startsWith('h') ? 'h4' : 'p';
-          blocks.push({ tag, text });
+          blocks.push({ tag, text, code });
         }
       } else {
         walk(child);
@@ -1388,8 +1453,10 @@ function renderHtmlNative(htmlText, opts = {}) {
   const tokens = [], wordEls = [];
   for (const node of textNodes) {
     const p = node.parentElement;
-    /* footnote markers (superscripts) stay visible but aren't read aloud */
+    /* footnote markers (superscripts) stay visible but aren't read aloud;
+       same for code when "Skip URLs & code blocks" is on */
     if (p.closest('sup, [aria-hidden="true"]')) continue;
+    if (S.skipCode && p.closest('pre, code, samp, kbd')) continue;
     try { if (p.checkVisibility && !p.checkVisibility()) continue; } catch {}
     const frag = document.createDocumentFragment();
     for (const part of node.nodeValue.split(/(\s+)/)) {
@@ -1480,7 +1547,7 @@ function renderFlow(blocks, chapters, opts = {}) {
         if (ti < tokens.length - 1) sentSpan.appendChild(document.createTextNode(' '));
         S.words.push({ el: w, text: tok, sent: sentIdx });
       });
-      S.sentences.push({ start, end: S.words.length, text: sentText, span: sentSpan, block: bi });
+      S.sentences.push({ start, end: S.words.length, text: sentText, span: sentSpan, block: bi, code: !!block.code });
       el.appendChild(sentSpan);
       el.appendChild(document.createTextNode(' '));
     }
@@ -1502,6 +1569,7 @@ function finishOpen(opts = {}) {
   $('reader').style.display = 'block';
   $('player').style.display = 'block';
   $('logo-text').style.display = 'none';
+  document.querySelectorAll('.doc-btn').forEach(b => { b.style.display = 'grid'; });
   const native = S.mode !== 'flow';
   $('btn-view').textContent = native ? '¶' : '📄';
   $('btn-view').title = native ? 'Switch to plain text view' : 'Switch to original layout';
@@ -1523,6 +1591,7 @@ function finishOpen(opts = {}) {
   setSentence(sIdx);
   if (startWord > 0) setTimeout(() => maybeScroll(S.words[startWord]?.el, true), 120);
   updateProgress();
+  buildCostIndex();            // honest time-left estimate
   loadPhonemizer();            // pre-warm the G2P engine for precise timing
   warmPhonemes(sIdx);
 }
@@ -1559,7 +1628,10 @@ function setSentence(sIdx, keepWord = false) {
   highlightWord(S.curWord);
   maybeScroll(S.words[S.curWord]?.el);
   updateProgress();
-  if (S.docKey) store.set(S.docKey, { word: S.curWord });
+  if (S.docKey) store.set(S.docKey, {
+    word: S.curWord,
+    pct: S.sentences.length ? Math.round(100 * sIdx / Math.max(1, S.sentences.length - 1)) : 0,
+  });
 }
 function maybeScroll(el, force = false) {
   if ((!S.autoScroll && !force) || !el) return;
@@ -1571,10 +1643,42 @@ function maybeScroll(el, force = false) {
 function updateProgress() {
   const pct = S.sentences.length ? Math.round(100 * S.curSent / Math.max(1, S.sentences.length - 1)) : 0;
   $('progress-fill').style.width = pct + '%';
-  const wordsLeft = S.words.length - (S.sentences[S.curSent]?.start ?? 0);
-  const effWpm = rsvpSilentActive() ? S.rsvp.wpm : 170 * S.rate;
-  const minLeft = Math.ceil(wordsLeft / effWpm);
+  let minLeft;
+  if (rsvpSilentActive()) {
+    const wordsLeft = S.words.length - (S.sentences[S.curSent]?.start ?? 0);
+    minLeft = Math.ceil(wordsLeft / S.rsvp.wpm);
+  } else if (S.costCum && S.costCum.length === S.sentences.length + 1) {
+    /* honest estimate: phoneme-weighted timeline of every remaining word */
+    let msLeft = (S.costCum[S.costCum.length - 1] - S.costCum[Math.max(0, S.curSent)]) / S.rate;
+    if (S.engine === 'device') msLeft *= calibFactor('d:' + (S.deviceVoice?.voiceURI || 'default') + '@' + S.rate);
+    minLeft = Math.ceil(msLeft / 60000);
+  } else {
+    const wordsLeft = S.words.length - (S.sentences[S.curSent]?.start ?? 0);
+    minLeft = Math.ceil(wordsLeft / (170 * S.rate));
+  }
   $('progress-label').textContent = pct + '% · ' + (minLeft > 59 ? Math.floor(minLeft / 60) + 'h ' + (minLeft % 60) + 'm' : minLeft + 'm') + ' left';
+}
+
+/* build the cumulative speech-time index for the honest time-left estimate.
+   Chunked so a 200k-word book never janks the UI. */
+function buildCostIndex() {
+  const gen = ++S.costGen;
+  S.costCum = null;
+  const cum = new Float64Array(S.sentences.length + 1);
+  let t = 0, si = 0;
+  const chunk = () => {
+    if (gen !== S.costGen) return;                       // a new document took over
+    const deadline = performance.now() + 12;
+    while (si < S.sentences.length && performance.now() < deadline) {
+      const s = S.sentences[si];
+      for (let wi = s.start; wi < s.end; wi++)
+        t += wordCostMs(spokenFor(S.words[wi].text)) + pauseAfterMs(S.words[wi].text, false);
+      cum[++si] = t;
+    }
+    if (si < S.sentences.length) setTimeout(chunk, 30);
+    else { S.costCum = cum; updateProgress(); }
+  };
+  setTimeout(chunk, 200);
 }
 
 /* ====================================================================
@@ -2125,6 +2229,7 @@ function rsvpPlay(fromWord) {
   S.neuralGenToken++;
   if (S.audio) S.audio.pause();
   let w = Math.max(0, fromWord ?? S.curWord);
+  const startSent = S.words[w]?.sent ?? -1;   // never skip the sentence the user started in
   warmPhonemes(S.curSent, 8);
   const step = () => {
     if (token !== S.rsvp.token || !S.playing) return;
@@ -2133,8 +2238,20 @@ function rsvpPlay(fromWord) {
       toast('🏁 Finished! That’s the end of the document.');
       return;
     }
-    const sIdx = S.words[w].sent;
-    if (sIdx !== S.curSent) { setSentence(sIdx, true); warmPhonemes(sIdx, 8); }
+    let sIdx = S.words[w].sent;
+    if (sIdx !== startSent && sentSkipped(sIdx)) {          // hop over code blocks / skim-skipped
+      const j = seekPlayable(sIdx, 1);
+      if (j === -1) { pauseAll(); toast('🏁 Finished! That’s the end of the document.'); return; }
+      w = S.sentences[j].start; sIdx = j;
+    }
+    if (sIdx !== S.curSent) {
+      if (S.sleep.mode === 'chapter' && chapterOf(sIdx) !== chapterOf(S.curSent)) {
+        setSentence(sIdx); pauseAll(); sleepClear();
+        toast('🌙 End of chapter — pausing here. Good night.');
+        return;
+      }
+      setSentence(sIdx, true); warmPhonemes(sIdx, 8);
+    }
     highlightWord(w);
     maybeScroll(S.words[w].el);
     const tok = S.words[w].text;
@@ -2226,6 +2343,29 @@ function stopAll() {
   S.curSent = -1; S.curWord = -1;
 }
 
+/* ---- sentence-level playability: skim mode & code-block skipping ---- */
+function firstOfBlock(sIdx) {
+  const s = S.sentences[sIdx], p = S.sentences[sIdx - 1];
+  if (!s || s.block == null) return true;    // PDF token streams: no paragraph info
+  return !p || p.block !== s.block;
+}
+function sentSkipped(i) {
+  const s = S.sentences[i];
+  return !!(s && ((S.skipCode && s.code) || (S.skim && !firstOfBlock(i))));
+}
+function seekPlayable(from, dir) {
+  let i = from;
+  while (i >= 0 && i < S.sentences.length && sentSkipped(i)) i += dir;
+  return (i >= 0 && i < S.sentences.length) ? i : -1;
+}
+function chapterOf(sIdx) {
+  const b = S.sentences[sIdx]?.block;
+  if (b == null || !S.chapters.length) return -1;
+  let c = -1;
+  for (let i = 0; i < S.chapters.length; i++) { if (S.chapters[i].blockIndex <= b) c = i; else break; }
+  return c;
+}
+
 /* true when the next sentence starts a new paragraph/block */
 function paraBreakAfter(sIdx) {
   const a = S.sentences[sIdx], b = S.sentences[sIdx + 1];
@@ -2247,7 +2387,11 @@ function advanceAfterBreather() {
 }
 
 function advanceSentence(dir, keepPlaying) {
-  const next = S.curSent + dir;
+  let next = S.curSent + dir;
+  if (next >= 0 && next < S.sentences.length) {
+    const p = seekPlayable(next, dir);           // hop over code blocks / skim-skipped sentences
+    next = (p === -1) ? (dir > 0 ? S.sentences.length : 0) : p;
+  }
   if (next >= S.sentences.length) {
     pauseAll();
     setSentence(S.sentences.length - 1);
@@ -2255,6 +2399,13 @@ function advanceSentence(dir, keepPlaying) {
     return;
   }
   if (next < 0) { setSentence(0); if (keepPlaying && S.playing) playCurrent(); return; }
+  /* sleep timer: "end of chapter" */
+  if (S.sleep.mode === 'chapter' && keepPlaying && S.playing && dir > 0 && chapterOf(next) !== chapterOf(S.curSent)) {
+    setSentence(next);
+    pauseAll(); sleepClear();
+    toast('🌙 End of chapter — pausing here. Good night.');
+    return;
+  }
   setSentence(next);
   if (keepPlaying && S.playing) playCurrent();
 }
@@ -2516,6 +2667,18 @@ $('theme-toggle').addEventListener('click', () => {
   store.set('theme', document.body.dataset.theme);
 });
 $('autoscroll-switch').addEventListener('click', e => { S.autoScroll = !S.autoScroll; e.target.classList.toggle('on', S.autoScroll); store.set('autoScroll', S.autoScroll); });
+$('skim-switch').addEventListener('click', e => {
+  S.skim = !S.skim;
+  e.target.classList.toggle('on', S.skim);
+  store.set('skim', S.skim);
+  toast(S.skim ? '⏭️ Skim mode — first sentence of each paragraph only.' : 'Skim mode off — reading everything.');
+});
+$('skipcode-switch').addEventListener('click', e => {
+  S.skipCode = !S.skipCode;
+  e.target.classList.toggle('on', S.skipCode);
+  store.set('skipCode', S.skipCode);
+  try { clearNeuralCache(); } catch {}   // spoken text changed — regenerate audio
+});
 $('smallprint-switch').addEventListener('click', async e => {
   const on = !store.get('pdfSmallPrint', false);
   store.set('pdfSmallPrint', on);
@@ -2545,6 +2708,8 @@ document.addEventListener('keydown', e => {
   else if (e.code === 'ArrowRight') $('btn-next').click();
   else if (e.code === 'ArrowLeft') $('btn-prev').click();
   else if (e.code === 'KeyR') setRsvpOpen(!S.rsvp.open);
+  else if (e.code === 'KeyB' && S.sentences.length) addBookmark();
+  else if (e.key === '/' && S.sentences.length) { e.preventDefault(); $('btn-search').click(); }
   else if (e.code === 'Escape') { if (S.rsvp.open) setRsvpOpen(false); else closeSheets(); }
 });
 
@@ -2622,6 +2787,8 @@ const savedTheme = store.get('theme', 'dark');
 document.body.dataset.theme = savedTheme;
 $('theme-toggle').textContent = savedTheme === 'light' ? '☀️ Light' : '🌙 Dark';
 if (!store.get('autoScroll', true)) $('autoscroll-switch').classList.remove('on');
+if (store.get('skim', false)) $('skim-switch').classList.add('on');
+if (!store.get('skipCode', true)) $('skipcode-switch').classList.remove('on');
 S.autoScroll = store.get('autoScroll', true);
 if (!store.get('sentHl', true)) $('senthl-switch').classList.remove('on');
 S.sentHl = store.get('sentHl', true);
@@ -2631,6 +2798,211 @@ setEngine(S.engine === 'neural' ? 'neural' : 'device');
 applyFont();
 
 /* PWA: register the service worker when served over http(s) */
+/* ====================================================================
+   LIBRARY — keep opened files (in the browser's private IndexedDB, never
+   uploaded anywhere) so the home screen can offer one-tap Continue.
+   ==================================================================== */
+const idb = {
+  open() {
+    return this._p ||= new Promise((res, rej) => {
+      const r = indexedDB.open('aloud', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('files');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async put(key, val) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('files', 'readwrite'); t.objectStore('files').put(val, key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  async get(key) { const db = await this.open(); return new Promise((res, rej) => { const q = db.transaction('files').objectStore('files').get(key); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
+  async del(key) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('files', 'readwrite'); t.objectStore('files').delete(key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  async keys() { const db = await this.open(); return new Promise((res, rej) => { const q = db.transaction('files').objectStore('files').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
+};
+const RECENT_MAX = 5;
+async function rememberFile(file) {
+  try {
+    const key = file.name + '|' + file.size;
+    const rec = [{ key, name: file.name, title: S.docTitle, at: Date.now() },
+                 ...store.get('recent', []).filter(r => r.key !== key)].slice(0, RECENT_MAX);
+    store.set('recent', rec);
+    await idb.put(key, file);
+    const keep = new Set(rec.map(r => r.key));
+    for (const k of await idb.keys()) if (!keep.has(k)) idb.del(k).catch(() => {});
+  } catch (e) { console.warn('library', e); }   // private mode etc. — Continue just won't appear
+}
+function renderRecents() {
+  const box = $('recent-list');
+  box.innerHTML = '';
+  for (const r of store.get('recent', [])) {
+    const pos = store.get('pos.' + r.key, null);
+    const row = document.createElement('div');
+    row.className = 'recent-row';
+    row.innerHTML = `<span class="rr-play">▶</span><span class="rr-name"></span><span class="rr-pct">${pos?.pct != null ? pos.pct + '%' : ''}</span><button class="rr-x" title="Remove from this list">✕</button>`;
+    row.querySelector('.rr-name').textContent = (r.title || r.name);
+    row.querySelector('.rr-x').addEventListener('click', ev => {
+      ev.stopPropagation();
+      store.set('recent', store.get('recent', []).filter(x => x.key !== r.key));
+      idb.del(r.key).catch(() => {});
+      renderRecents();
+    });
+    row.addEventListener('click', async () => {
+      try {
+        const f = await idb.get(r.key);
+        if (!f) { toast('⚠️ That file is no longer stored — open it again once and it will come back.'); return; }
+        openFile(f);
+      } catch { toast('⚠️ Could not reopen that file.'); }
+    });
+    box.appendChild(row);
+  }
+}
+renderRecents();
+
+/* ====================================================================
+   SLEEP TIMER
+   ==================================================================== */
+const SLEEP_PRESETS = [[0, 'Off'], [15, '15 min'], [30, '30 min'], [45, '45 min'], [60, '60 min'], ['chapter', 'End of chapter']];
+function sleepClear() {
+  S.sleep.mode = null; S.sleep.until = 0; S.sleep.preset = 0;
+  clearInterval(S.sleep.iv); S.sleep.iv = null;
+  updateSleepBtn();
+}
+function setSleep(v) {
+  clearInterval(S.sleep.iv); S.sleep.iv = null;
+  S.sleep.preset = v;
+  if (v === 0) { sleepClear(); toast('Sleep timer off.'); }
+  else if (v === 'chapter') {
+    S.sleep.mode = 'chapter'; S.sleep.until = 0;
+    toast(S.chapters.length ? '🌙 Pausing at the end of this chapter.' : '🌙 This document has no chapters — pausing at the end.');
+  } else {
+    S.sleep.mode = 'timer'; S.sleep.until = Date.now() + v * 60000;
+    S.sleep.iv = setInterval(sleepTick, 1000);
+    toast(`🌙 Sleep timer: ${v} minutes.`);
+  }
+  updateSleepBtn(); renderSleepSheet();
+}
+function sleepTick() {
+  if (S.sleep.mode !== 'timer') return;
+  if (Date.now() >= S.sleep.until) {
+    sleepClear();
+    if (S.playing) fadeOutAndPause(); else updateSleepBtn();
+    return;
+  }
+  updateSleepBtn();
+}
+function fadeOutAndPause() {
+  const a = S.engine === 'neural' ? S.audio : null;
+  if (a && !a.paused) {
+    const v0 = a.volume; let t = 0;
+    const iv = setInterval(() => {
+      t += 0.1;
+      a.volume = Math.max(0, v0 * (1 - t / 4));
+      if (t >= 4 || a.paused) { clearInterval(iv); pauseAll(); a.volume = v0; toast('🌙 Sleep timer — paused. Good night.'); }
+    }, 100);
+  } else { pauseAll(); toast('🌙 Sleep timer — paused. Good night.'); }
+}
+function updateSleepBtn() {
+  const b = $('btn-sleep');
+  if (S.sleep.mode === 'timer') {
+    b.textContent = Math.max(1, Math.ceil((S.sleep.until - Date.now()) / 60000)) + 'm';
+    b.classList.add('sleep-on');
+  } else if (S.sleep.mode === 'chapter') { b.textContent = '🌙'; b.classList.add('sleep-on'); }
+  else { b.textContent = '🌙'; b.classList.remove('sleep-on'); }
+}
+function renderSleepSheet() {
+  const box = $('sleep-chips');
+  box.innerHTML = '';
+  SLEEP_PRESETS.forEach(([v, label]) => {
+    const b = document.createElement('button');
+    const on = S.sleep.mode ? v === S.sleep.preset : v === 0;
+    b.className = 'chip' + (on ? ' on' : '');
+    b.textContent = label;
+    b.addEventListener('click', () => setSleep(v));
+    box.appendChild(b);
+  });
+}
+$('btn-sleep').addEventListener('click', () => { renderSleepSheet(); openSheet('sleep-sheet'); });
+
+/* ====================================================================
+   BOOKMARKS (per document, saved locally)
+   ==================================================================== */
+function bmKey() { return 'bm.' + (S.docKey || 'none'); }
+function addBookmark() {
+  if (!S.sentences.length) return;
+  const s = S.sentences[S.curSent];
+  const l = store.get(bmKey(), []);
+  if (l.some(b => b.sent === S.curSent)) { toast('🔖 Already bookmarked.'); return; }
+  l.unshift({
+    sent: S.curSent,
+    text: s.text.slice(0, 110),
+    pct: Math.round(100 * S.curSent / Math.max(1, S.sentences.length - 1)),
+    at: Date.now(),
+  });
+  store.set(bmKey(), l.slice(0, 100));
+  toast('🔖 Bookmarked. Tap 🔖 up top to jump back anytime.');
+}
+function renderBmList() {
+  const box = $('bm-list');
+  const l = store.get(bmKey(), []);
+  box.innerHTML = '';
+  if (!l.length) { box.innerHTML = '<div class="voice-note">No bookmarks in this document yet.</div>'; return; }
+  l.forEach((b, i) => {
+    const row = document.createElement('div');
+    row.className = 'recent-row';
+    row.innerHTML = `<span class="rr-play">🔖</span><span class="rr-name"></span><span class="rr-pct">${b.pct}%</span><button class="rr-x" title="Delete">✕</button>`;
+    row.querySelector('.rr-name').textContent = b.text;
+    row.querySelector('.rr-x').addEventListener('click', ev => {
+      ev.stopPropagation();
+      const cur = store.get(bmKey(), []); cur.splice(i, 1); store.set(bmKey(), cur);
+      renderBmList();
+    });
+    row.addEventListener('click', () => {
+      closeSheets();
+      setSentence(b.sent);
+      maybeScroll(S.words[S.curWord]?.el, true);
+      if (S.playing) playCurrent();
+    });
+    box.appendChild(row);
+  });
+}
+$('bm-add').addEventListener('click', () => { addBookmark(); renderBmList(); });
+$('btn-bm').addEventListener('click', () => { renderBmList(); openSheet('bm-sheet'); });
+
+/* ====================================================================
+   IN-DOCUMENT SEARCH
+   ==================================================================== */
+let searchDeb;
+function runSearch() {
+  const q = $('search-input').value.trim().toLowerCase();
+  const box = $('search-results');
+  box.innerHTML = '';
+  if (q.length < 2) { box.innerHTML = '<div class="voice-note">Type at least two characters.</div>'; return; }
+  let hits = 0;
+  for (let i = 0; i < S.sentences.length && hits < 80; i++) {
+    const t = S.sentences[i].text, li = t.toLowerCase().indexOf(q);
+    if (li === -1) continue;
+    hits++;
+    const from = Math.max(0, li - 40);
+    const row = document.createElement('div');
+    row.className = 'recent-row';
+    const name = document.createElement('span'); name.className = 'rr-name';
+    name.append((from > 0 ? '…' : '') + t.slice(from, li));
+    const mk = document.createElement('mark'); mk.textContent = t.slice(li, li + q.length); name.appendChild(mk);
+    name.append(t.slice(li + q.length, li + q.length + 70));
+    const pct = document.createElement('span'); pct.className = 'rr-pct';
+    pct.textContent = Math.round(100 * i / Math.max(1, S.sentences.length - 1)) + '%';
+    row.append(name, pct);
+    row.addEventListener('click', () => {
+      closeSheets();
+      setSentence(i);
+      maybeScroll(S.words[S.curWord]?.el, true);
+      if (S.playing) playCurrent();
+    });
+    box.appendChild(row);
+  }
+  if (!hits) box.innerHTML = '<div class="voice-note">No matches.</div>';
+  else if (hits >= 80) { const d = document.createElement('div'); d.className = 'voice-note'; d.textContent = 'Showing the first 80 matches.'; box.appendChild(d); }
+}
+$('search-input').addEventListener('input', () => { clearTimeout(searchDeb); searchDeb = setTimeout(runSearch, 180); });
+$('btn-search').addEventListener('click', () => { openSheet('search-sheet'); runSearch(); setTimeout(() => $('search-input').focus(), 200); });
+
 /* ---- version display: single source of truth is the aloud-version meta ---- */
 const APP_VERSION = document.querySelector('meta[name="aloud-version"]')?.content || '?';
 $('home-version').textContent = 'Aloud ' + APP_VERSION;
