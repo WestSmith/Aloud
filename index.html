@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.2.1">
+<meta name="aloud-version" content="v6.2.2">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -703,6 +703,24 @@ https://github.com/nodeca/pako/blob/main/LICENSE
    pronunciation dictionary, saved settings & reading position.
    ==================================================================== */
 'use strict';
+
+/* ====================================================================
+   HARD RESET ESCAPE HATCH — visit .../Aloud/?reset to wipe ALL local
+   state (stored files, caches, service worker, settings) and reload
+   clean. Recovery path if a bad cached file/blob ever crash-loops the
+   app on a device. Runs before anything else touches storage.
+   ==================================================================== */
+const RESETTING = /[?&]reset\b/i.test(location.search);
+if (RESETTING) {
+  (async () => {
+    try { localStorage.clear(); } catch {}
+    try { if (window.caches) { for (const k of await caches.keys()) await caches.delete(k); } } catch {}
+    try { await new Promise(r => { const d = indexedDB.deleteDatabase('aloud'); d.onsuccess = d.onerror = d.onblocked = r; }); } catch {}
+    try { if (navigator.serviceWorker) { for (const reg of await navigator.serviceWorker.getRegistrations()) await reg.unregister(); } } catch {}
+    try { document.body && (document.body.innerHTML = '<div style="color:#a09db4;font:15px system-ui;position:fixed;inset:0;display:grid;place-items:center;text-align:center;padding:24px">Aloud has been reset.<br>Reloading a clean copy…</div>'); } catch {}
+    setTimeout(() => location.replace(location.origin + location.pathname), 400);
+  })();
+}
 
 /* ---------------- safe storage (works standalone; silently in-memory elsewhere) ---------------- */
 const _mem = {};
@@ -2820,7 +2838,7 @@ const RECENT_MAX = 5;
 /* One-time migration: v6.2.0 could stash oversized PDF blobs that crash iOS
    on reopen. Wipe the store once so no pre-fix monster survives; positions
    (kept separately under pos.*) are untouched, so resume still works. */
-if (store.get('lib.v', 0) < 2) {
+if (!RESETTING && store.get('lib.v', 0) < 2) {
   idb.keys().then(ks => ks.forEach(k => idb.del(k).catch(() => {}))).catch(() => {});
   store.set('recent', store.get('recent', []).map(r => ({ ...r, noBlob: true })));
   store.set('lib.v', 2);
@@ -3034,7 +3052,7 @@ const APP_VERSION = document.querySelector('meta[name="aloud-version"]')?.conten
 $('home-version').textContent = 'Aloud ' + APP_VERSION;
 $('settings-version').textContent = 'Aloud ' + APP_VERSION;
 
-if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+if (!RESETTING && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(e => console.warn('sw', e));
   /* the SW skipWaiting()s on install, so a controllerchange after first load
      means a new version just took over — offer a one-tap reload */
