@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.2.5">
+<meta name="aloud-version" content="v6.2.6">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1365,6 +1365,14 @@ function isSmallScreen() {
      check is a fallback for touch laptops or when matchMedia is unavailable.
      Keyed on width, not height — laptops are often <820px tall. */
   try { if (matchMedia('(pointer: coarse)').matches) return true; } catch {}
+  /* iPadOS in "desktop" mode reports as a Mac and, with a trackpad, a fine
+     pointer — so it can slip past the check above and get the desktop (fp32/
+     webgpu) model, which would OOM it. A real Mac has no touch points; an iPad
+     does. Catch iPad here so it always takes the memory-safe mobile path. */
+  try {
+    const ua = navigator.userAgent || '';
+    if (navigator.maxTouchPoints > 1 && (/iPad|iPhone|iPod/.test(ua) || navigator.platform === 'MacIntel')) return true;
+  } catch {}
   return window.innerWidth < 700;
 }
 
