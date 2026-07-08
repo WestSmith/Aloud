@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.0.0">
+<meta name="aloud-version" content="v6.1.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -540,6 +540,9 @@
   <input type="range" id="speed-range" min="0.5" max="4" step="0.05" value="1" aria-label="Playback speed">
   <div class="chips" id="speed-chips"></div>
   <div class="voice-note">The ✨ Neural voice holds perfect karaoke sync at any speed and changes speed instantly. Device voices restart the sentence on change, and many cap out near 2× no matter what you ask for.</div>
+  <h3 style="margin-top:18px">Breathers</h3>
+  <div class="chips" id="breather-chips"></div>
+  <div class="voice-note">How long the reader rests at commas, sentence ends, and new paragraphs — in the speed-reader panel and between spoken paragraphs. Speed itself is unchanged.</div>
 </div>
 
 <div class="sheet" id="settings-sheet">
@@ -689,6 +692,8 @@ const S = {
   pdfViewPref: store.get('pdfView', 'pdf'),
   htmlViewPref: store.get('htmlView', 'native'),
   fastEnds: 0,
+  breather: store.get('breather', 1),   // pause/breather intensity multiplier (0 = off)
+  breatherToken: 0,                     // cancels a pending inter-paragraph gap
   rsvp: {
     open: false,
     mode: store.get('rsvpMode', 'voice'),   // 'voice' (TTS-synced) | 'silent' (timer)
@@ -859,8 +864,25 @@ function syllables(tok) {
 }
 function wordCostMs(spokenTok) {
   const ph = phonemeCache.get(spokenTok.toLowerCase());
-  if (ph && ph.v != null) return 62 + ph.v * 116 + ph.c * 40;   // vowels carry the time
-  return 85 + syllables(spokenTok) * 168;
+  let base = (ph && ph.v != null)
+    ? 62 + ph.v * 116 + ph.c * 40                                // vowels carry the time
+    : 85 + syllables(spokenTok) * 168;
+  /* numbers & acronyms are disproportionately slow to grab (and to say):
+     "1,234" is four spoken words; "FBI" is three letters read aloud.
+     These floors also feed buildTimeline, so voice-mode karaoke predicts
+     them better too. */
+  const digits = (spokenTok.match(/\d/g) || []).length;
+  if (digits) {
+    base = Math.max(base, 150 + digits * 200);
+  } else {
+    const core = spokenTok.replace(/[^\p{L}]/gu, '');
+    if (core.length >= 2 && core.length <= 8 && /[A-Z]/.test(core) && core === core.toUpperCase()) {
+      base = Math.max(base, /[AEIOUY]/.test(core) && core.length > 3
+        ? 100 + core.length * 110      // pronounceable acronym (NASA) — mild linger
+        : 120 + core.length * 185);    // spelled-out (FBI, HTML) — letter-by-letter
+    }
+  }
+  return base;
 }
 function pauseAfterMs(tok, isLast) {
   if (isLast) return 180;
@@ -1220,7 +1242,7 @@ function buildFromTokenStream(tokens, wordEls) {
     const text = tokens.slice(start, end).join(' ');
     const idx = S.sentences.length;
     for (let i = start; i < end; i++) S.words.push({ el: wordEls[i], text: tokens[i], sent: idx });
-    S.sentences.push({ start, end, text, span: null });
+    S.sentences.push({ start, end, text, span: null, block: null });  // PDF token stream: no paragraph info
     start = end;
   };
   for (let i = 0; i < tokens.length; i++) {
@@ -1455,7 +1477,7 @@ function renderFlow(blocks, chapters, opts = {}) {
         if (ti < tokens.length - 1) sentSpan.appendChild(document.createTextNode(' '));
         S.words.push({ el: w, text: tok, sent: sentIdx });
       });
-      S.sentences.push({ start, end: S.words.length, text: sentText, span: sentSpan });
+      S.sentences.push({ start, end: S.words.length, text: sentText, span: sentSpan, block: bi });
       el.appendChild(sentSpan);
       el.appendChild(document.createTextNode(' '));
     }
@@ -1667,7 +1689,7 @@ function speakDevice(sentIdx, fromWord) {
       S.fastEnds = 0;
       if (!S.boundarySeen) updateCalib(voiceKey, tl.total / S.rate, wall);  // learn this voice's real speed
     }
-    advanceSentence(1, true);
+    advanceAfterBreather();
   };
   u.onerror = (e) => {
     if (token !== S.utterToken) return;
@@ -2046,7 +2068,7 @@ async function speakNeural(sentIdx, fromWord) {
     if (!audio.paused && !audio.ended) requestAnimationFrame(tick);
   };
   audio.addEventListener('play', () => { syncClock(); requestAnimationFrame(tick); });
-  audio.addEventListener('ended', () => { if (S.audio === audio) advanceSentence(1, true); });
+  audio.addEventListener('ended', () => { if (S.audio === audio) advanceAfterBreather(); });
   audio.addEventListener('error', () => { if (S.audio === audio && S.playing) advanceSentence(1, true); });
   try { await audio.play(); } catch (e) { console.warn(e); }
   highlightWord(startFrom);
@@ -2117,8 +2139,10 @@ function rsvpPlay(fromWord) {
     /* phoneme-weighted flash duration: long words linger, short ones snap */
     let dur = msPerWord * Math.min(2.6, Math.max(0.55, wordCostMs(spokenFor(tok)) / 330));
     const pause = pauseAfterMs(tok, w === S.words.length - 1);
-    if (pause >= 300) dur += msPerWord * 1.9;        // sentence end: breathe
-    else if (pause > 0) dur += msPerWord * 0.9;       // clause break
+    if (pause >= 300) dur += msPerWord * 1.9 * S.breather;        // sentence end: breathe
+    else if (pause > 0) dur += msPerWord * 0.9 * S.breather;      // clause break
+    if (w === S.sentences[sIdx].end - 1 && paraBreakAfter(sIdx))
+      dur += msPerWord * 1.5 * S.breather;                        // new paragraph: breathe deeper
     w++;
     S.rsvp.timer = setTimeout(step, dur);
   };
@@ -2166,6 +2190,7 @@ function renderRsvpMode() {
 
 function playCurrent(fromWord) {
   if (!S.sentences.length) return;
+  S.breatherToken++;          // manual (re)start cancels any pending paragraph gap
   S.playing = true;
   setPlayIcon(true);
   if (S.curSent < 0) setSentence(0);
@@ -2187,6 +2212,7 @@ function pauseAll() {
   S.neuralGenToken++;
   if (S.audio) S.audio.pause();
   S.rsvp.token++;
+  S.breatherToken++;
   clearTimeout(S.rsvp.timer);
 }
 
@@ -2195,6 +2221,26 @@ function stopAll() {
   clearWordHl();
   if (S.curSent >= 0) sentClass(S.sentences[S.curSent], false);
   S.curSent = -1; S.curWord = -1;
+}
+
+/* true when the next sentence starts a new paragraph/block */
+function paraBreakAfter(sIdx) {
+  const a = S.sentences[sIdx], b = S.sentences[sIdx + 1];
+  return !!(a && b && a.block != null && b.block != null && a.block !== b.block);
+}
+
+/* voice modes: sentence audio finished — breathe before a new paragraph.
+   Scaled by the breather setting and playback rate; cancelled by any
+   pause/seek/manual skip via the token. */
+function advanceAfterBreather() {
+  const gapMs = S.breather > 0 && paraBreakAfter(S.curSent)
+    ? Math.round(440 * S.breather / Math.max(0.6, S.rate)) : 0;
+  if (gapMs > 0 && S.playing) {
+    const tok = ++S.breatherToken;
+    setTimeout(() => { if (tok === S.breatherToken && S.playing) advanceSentence(1, true); }, gapMs);
+  } else {
+    advanceSentence(1, true);
+  }
 }
 
 function advanceSentence(dir, keepPlaying) {
@@ -2362,7 +2408,21 @@ function renderSpeedSheet() {
     b.addEventListener('click', () => { setRate(v); renderSpeedSheet(); });
     box.appendChild(b);
   });
+  const bbox = $('breather-chips');
+  bbox.innerHTML = '';
+  BREATHER_PRESETS.forEach(([v, label]) => {
+    const b = document.createElement('button');
+    b.className = 'chip' + (v === S.breather ? ' on' : '');
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      S.breather = v; store.set('breather', v);
+      renderSpeedSheet();
+      toast(v === 0 ? 'Breathers off — every word gets equal time.' : `Breathers: ${label.toLowerCase()}.`);
+    });
+    bbox.appendChild(b);
+  });
 }
+const BREATHER_PRESETS = [[0, 'Off'], [0.6, 'Subtle'], [1, 'Normal'], [1.5, 'Extra'], [2.2, 'Max']];
 $('btn-speed').addEventListener('click', () => { renderSpeedSheet(); openSheet('speed-sheet'); });
 $('speed-range').addEventListener('input', e => {
   const v = Math.round(+e.target.value * 20) / 20;
