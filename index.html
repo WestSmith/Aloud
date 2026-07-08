@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.2.6">
+<meta name="aloud-version" content="v6.3.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -596,6 +596,10 @@
     <div class="lbl">Skip URLs &amp; code blocks<small>Don't read web addresses or code out loud</small></div>
     <div class="switch on" id="skipcode-switch"></div>
   </div>
+  <div class="set-row" style="display:block">
+    <div class="lbl">✨ Neural voice quality<small>Bigger models sound better but use more memory. Auto picks a safe size for your device — phones/iPads get the light model. Higher tiers may crash on phones.</small></div>
+    <div class="chips" id="nq-chips" style="margin-top:10px"></div>
+  </div>
   <div class="set-row">
     <div class="lbl">Read small print (PDF)<small>Footnotes, margin notes, superscript markers</small></div>
     <div class="switch" id="smallprint-switch"></div>
@@ -765,6 +769,7 @@ const S = {
   pdf: null,           // {doc, pages:[{page,vp,div,canvas,rendered}], scale}
   pdfViewPref: store.get('pdfView', null),   // null = user hasn't chosen; default resolves per-device
   htmlViewPref: store.get('htmlView', 'native'),
+  neuralQuality: store.get('neuralQuality', 'auto'),   // 'auto'|'lite'|'standard'|'high'
   fastEnds: 0,
   breather: store.get('breather', 1),   // pause/breather intensity multiplier (0 = off)
   breatherToken: 0,                     // cancels a pending inter-paragraph gap
@@ -1944,16 +1949,60 @@ function initKokoroWorker() {
   });
 }
 
-/* Pick the model precision.
-   - Phones: FORCE q4 (~40MB) on wasm. Never WebGPU here — iOS WebGPU is
-     immature, and fp32 (~330MB) or even q8 (~82MB) overruns iOS's per-tab
-     memory and crashes the app.
-   - Desktop with WebGPU: full fp32.
-   - Desktop without: q8 on wasm. */
+/* Pick the model precision. The user can force a tier in Settings ('lite' q4 /
+   'standard' q8 / 'high' fp32); 'auto' (default) chooses a safe size per device:
+   - Phones/iPads: q4 (~40MB) on wasm. Never WebGPU here — iOS WebGPU is immature
+     and larger dtypes overrun iOS's per-tab memory and crash the app.
+   - Desktop with WebGPU: full fp32. Desktop without: q8 on wasm. */
+const NQ_DTYPE = { lite: 'q4', standard: 'q8', high: 'fp32' };
 function kokoroConfig() {
+  const q = S.neuralQuality || 'auto';
+  if (q !== 'auto') {
+    // explicit user choice: honor the dtype; use GPU only where it's sound
+    const gpu = !!navigator.gpu && !isSmallScreen();
+    return { dtype: NQ_DTYPE[q] || 'q4', device: gpu ? 'webgpu' : 'wasm' };
+  }
   if (isSmallScreen()) return { dtype: 'q4', device: 'wasm' };
   if (navigator.gpu) return { dtype: 'fp32', device: 'webgpu' };
   return { dtype: 'q8', device: 'wasm' };
+}
+
+/* fully tear down the neural engine so a different model can load */
+function resetNeuralEngine() {
+  try { S.kokoro.worker?.terminate(); } catch {}
+  S.kokoro.worker = null; S.kokoro.workerGenerate = null;
+  S.kokoro.tts = null; S.kokoro.state = 'idle'; S.kokoro.progress = 0;
+  clearNeuralCache();
+}
+
+const NQ_PRESETS = [['auto', 'Auto'], ['lite', 'Lite · 40MB'], ['standard', 'Standard · 82MB'], ['high', 'High · 330MB']];
+function setNeuralQuality(q) {
+  if (q === (S.neuralQuality || 'auto')) return;
+  S.neuralQuality = q; store.set('neuralQuality', q);
+  const cfg = kokoroConfig();
+  const heavyWarn = isSmallScreen() && cfg.dtype !== 'q4';
+  const wasPlaying = S.playing && S.engine === 'neural';
+  if (wasPlaying) pauseAll();
+  resetNeuralEngine();
+  renderNeuralQuality();
+  const tail = heavyWarn ? ' ⚠️ This is a larger model and may be too heavy for a phone/iPad — pick Lite or Auto if it crashes.' : '';
+  if (S.engine === 'neural') {
+    toast('Switching neural quality — the new model will download now.' + tail, heavyWarn ? 8000 : 3500);
+    loadKokoro().then(() => { if (wasPlaying) playCurrent(S.curWord); });
+  } else {
+    toast('Neural voice quality saved — it downloads next time you use the neural voice.' + tail, heavyWarn ? 8000 : 3500);
+  }
+}
+function renderNeuralQuality() {
+  const box = $('nq-chips'); if (!box) return;
+  box.innerHTML = '';
+  NQ_PRESETS.forEach(([v, label]) => {
+    const b = document.createElement('button');
+    b.className = 'chip' + (v === (S.neuralQuality || 'auto') ? ' on' : '');
+    b.textContent = label;
+    b.addEventListener('click', () => setNeuralQuality(v));
+    box.appendChild(b);
+  });
 }
 
 async function loadKokoroMainThread() {
@@ -2656,7 +2705,7 @@ $('speed-range').addEventListener('input', e => {
 $('speed-range').addEventListener('change', e => { setRate(+e.target.value); renderSpeedSheet(); });
 $('btn-engine').addEventListener('click', () => setEngine(S.engine === 'device' ? 'neural' : 'device'));
 $('btn-voice').addEventListener('click', () => { renderVoiceList(); openSheet('voice-sheet'); });
-$('btn-settings').addEventListener('click', () => { renderDictList(); openSheet('settings-sheet'); });
+$('btn-settings').addEventListener('click', () => { renderDictList(); renderNeuralQuality(); openSheet('settings-sheet'); });
 document.querySelectorAll('#engine-seg button').forEach(b => b.addEventListener('click', () => setEngine(b.dataset.engine)));
 
 /* tap a word → play from there; double-tap / long-press → fix pronunciation.
@@ -2856,6 +2905,7 @@ const savedTheme = store.get('theme', 'dark');
 document.body.dataset.theme = savedTheme;
 $('theme-toggle').textContent = savedTheme === 'light' ? '☀️ Light' : '🌙 Dark';
 if (!store.get('autoScroll', true)) $('autoscroll-switch').classList.remove('on');
+renderNeuralQuality();
 if (store.get('skim', false)) $('skim-switch').classList.add('on');
 if (!store.get('skipCode', true)) $('skipcode-switch').classList.remove('on');
 S.autoScroll = store.get('autoScroll', true);
