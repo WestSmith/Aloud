@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.2.0">
+<meta name="aloud-version" content="v6.2.1">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -2817,13 +2817,35 @@ const idb = {
   async keys() { const db = await this.open(); return new Promise((res, rej) => { const q = db.transaction('files').objectStore('files').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
 };
 const RECENT_MAX = 5;
+/* One-time migration: v6.2.0 could stash oversized PDF blobs that crash iOS
+   on reopen. Wipe the store once so no pre-fix monster survives; positions
+   (kept separately under pos.*) are untouched, so resume still works. */
+if (store.get('lib.v', 0) < 2) {
+  idb.keys().then(ks => ks.forEach(k => idb.del(k).catch(() => {}))).catch(() => {});
+  store.set('recent', store.get('recent', []).map(r => ({ ...r, noBlob: true })));
+  store.set('lib.v', 2);
+}
+/* Only keep a re-openable COPY of smallish files. Stashing a big PDF's blob
+   in IndexedDB while pdf.js already holds its arrayBuffer + page canvases can
+   push an iOS PWA tab past WebKit's memory ceiling and crash it. Above this
+   cap we still list the file for one-tap resume, but reopen via the picker
+   (position is saved by docKey, so the place is restored either way). */
+const MAX_STORE_BYTES = 18 * 1024 * 1024;
 async function rememberFile(file) {
   try {
     const key = file.name + '|' + file.size;
-    const rec = [{ key, name: file.name, title: S.docTitle, at: Date.now() },
+    const storable = file.size <= MAX_STORE_BYTES;
+    const rec = [{ key, name: file.name, title: S.docTitle, at: Date.now(), noBlob: !storable },
                  ...store.get('recent', []).filter(r => r.key !== key)].slice(0, RECENT_MAX);
     store.set('recent', rec);
-    await idb.put(key, file);
+    /* defer the copy to idle so it never competes with the render's memory
+       peak; big files skip the copy entirely */
+    if (storable) {
+      const doStore = () => idb.put(key, file).catch(e => console.warn('library', e));
+      (window.requestIdleCallback || (cb => setTimeout(cb, 800)))(doStore);
+    } else {
+      idb.del(key).catch(() => {});   // drop any stale copy from a prior version
+    }
     const keep = new Set(rec.map(r => r.key));
     for (const k of await idb.keys()) if (!keep.has(k)) idb.del(k).catch(() => {});
   } catch (e) { console.warn('library', e); }   // private mode etc. — Continue just won't appear
@@ -2845,10 +2867,14 @@ function renderRecents() {
     });
     row.addEventListener('click', async () => {
       try {
-        const f = await idb.get(r.key);
-        if (!f) { toast('⚠️ That file is no longer stored — open it again once and it will come back.'); return; }
+        const f = r.noBlob ? null : await idb.get(r.key);
+        if (!f) {
+          toast(`📂 Choose “${r.name}” again — your place is saved and will be restored.`, 5000);
+          $('file-input').click();
+          return;
+        }
         openFile(f);
-      } catch { toast('⚠️ Could not reopen that file.'); }
+      } catch { toast('⚠️ Could not reopen that file — tap Open to choose it again.'); }
     });
     box.appendChild(row);
   }
