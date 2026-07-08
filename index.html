@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.1.0">
+<meta name="aloud-version" content="v6.1.1">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -125,6 +125,7 @@
     background: var(--bg-elev2); color: var(--text-dim); border: 1px solid var(--border);
   }
   #home .hint { margin-top: 26px; font-size: 12.5px; color: var(--text-dim); max-width: 460px; line-height: 1.6; }
+  .ver-line { margin-top: 18px; font-size: 11.5px; color: var(--text-dim); opacity: .7; font-variant-numeric: tabular-nums; letter-spacing: .3px; }
 
   /* ---------- Reader ---------- */
   #reader { display: none; padding: calc(74px + env(safe-area-inset-top)) 0 190px; }
@@ -489,6 +490,7 @@
   <div class="hint">
     <b>Two voice engines:</b> instant device voices, or the <b>Kokoro neural voice</b> (open-source, runs in your browser). PDFs open as real pages with highlighting right on them. Double-tap any word to fix its pronunciation.
   </div>
+  <div class="ver-line" id="home-version"></div>
 </div>
 
 <div id="reader"><div id="content"></div></div>
@@ -574,6 +576,7 @@
     <div class="lbl">Pronunciations<small>Double-tap (or long-press) any word while reading to teach Aloud how to say it. Your fixes are saved and applied to both voice engines.</small></div>
     <div id="dict-list"></div>
   </div>
+  <div class="ver-line" id="settings-version" style="text-align:center"></div>
 </div>
 
 <div id="toast"></div>
@@ -2628,8 +2631,22 @@ setEngine(S.engine === 'neural' ? 'neural' : 'device');
 applyFont();
 
 /* PWA: register the service worker when served over http(s) */
+/* ---- version display: single source of truth is the aloud-version meta ---- */
+const APP_VERSION = document.querySelector('meta[name="aloud-version"]')?.content || '?';
+$('home-version').textContent = 'Aloud ' + APP_VERSION;
+$('settings-version').textContent = 'Aloud ' + APP_VERSION;
+
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(e => console.warn('sw', e));
+  /* the SW skipWaiting()s on install, so a controllerchange after first load
+     means a new version just took over — offer a one-tap reload */
+  let hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) { hadController = true; return; }   // first install, not an update
+    const t = $('toast');
+    toast('⬆️ Aloud just updated — tap here to load the new version.', 12000);
+    t.addEventListener('click', () => location.reload(), { once: true });
+  });
 }
 
 </script>
