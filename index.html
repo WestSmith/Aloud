@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.2.3">
+<meta name="aloud-version" content="v6.2.4">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -718,7 +718,11 @@ if (RESETTING) {
     try { await new Promise(r => { const d = indexedDB.deleteDatabase('aloud'); d.onsuccess = d.onerror = d.onblocked = r; }); } catch {}
     try { if (navigator.serviceWorker) { for (const reg of await navigator.serviceWorker.getRegistrations()) await reg.unregister(); } } catch {}
     try { document.body && (document.body.innerHTML = '<div style="color:#a09db4;font:15px system-ui;position:fixed;inset:0;display:grid;place-items:center;text-align:center;padding:24px">Aloud has been reset.<br>Reloading a clean copy…</div>'); } catch {}
-    setTimeout(() => location.replace(location.origin + location.pathname), 400);
+    /* redirect to a UNIQUE url so no stale cached copy (or old service worker)
+       can intercept the reload — this is what makes reset reliably fetch the
+       newest build */
+    const bust = Date.now().toString(36);
+    setTimeout(() => location.replace(location.origin + location.pathname + '?fresh=' + bust), 400);
   })();
 }
 
