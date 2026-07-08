@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.2.4">
+<meta name="aloud-version" content="v6.2.5">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1887,10 +1887,9 @@ self.onmessage = async (e) => {
     if (m.type === 'init') {
       const mod = await import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm');
       const K = mod.KokoroTTS || (mod.default && mod.default.KokoroTTS);
-      const hasGPU = !!self.navigator.gpu;
       tts = await K.from_pretrained(m.model, {
-        dtype: hasGPU ? 'fp32' : 'q8',
-        device: hasGPU ? 'webgpu' : 'wasm',
+        dtype: m.dtype,        // chosen on the main thread (q4 on phones to fit memory)
+        device: m.device,
         progress_callback: (p) => { if (p.status === 'progress' && p.total) self.postMessage({ type: 'progress', loaded: p.loaded, total: p.total }); },
       });
       self.postMessage({ type: 'ready' });
@@ -1931,20 +1930,33 @@ function initKokoroWorker() {
       pending.set(id, { resolve: res, reject: rej });
       worker.postMessage({ type: 'generate', id, text, voice });
     });
-    renderKokoroStatus('Downloading the voice model (~90 MB, one time — cached by your browser after this)…', 5);
-    worker.postMessage({ type: 'init', model: 'onnx-community/Kokoro-82M-v1.0-ONNX' });
+    renderKokoroStatus('Downloading the voice model (one time — cached by your browser after this)…', 5);
+    const cfg = kokoroConfig();
+    worker.postMessage({ type: 'init', model: 'onnx-community/Kokoro-82M-v1.0-ONNX', dtype: cfg.dtype, device: cfg.device });
   });
+}
+
+/* Pick the model precision.
+   - Phones: FORCE q4 (~40MB) on wasm. Never WebGPU here — iOS WebGPU is
+     immature, and fp32 (~330MB) or even q8 (~82MB) overruns iOS's per-tab
+     memory and crashes the app.
+   - Desktop with WebGPU: full fp32.
+   - Desktop without: q8 on wasm. */
+function kokoroConfig() {
+  if (isSmallScreen()) return { dtype: 'q4', device: 'wasm' };
+  if (navigator.gpu) return { dtype: 'fp32', device: 'webgpu' };
+  return { dtype: 'q8', device: 'wasm' };
 }
 
 async function loadKokoroMainThread() {
   const mod = await import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm');
   const KokoroTTS = mod.KokoroTTS || mod.default?.KokoroTTS;
   if (!KokoroTTS) throw new Error('kokoro-js loaded but KokoroTTS not found');
-  const hasWebGPU = !!navigator.gpu;
-  renderKokoroStatus('Downloading the voice model (~90 MB, one time — cached by your browser after this)…', 5);
+  const cfg = kokoroConfig();
+  renderKokoroStatus('Downloading the voice model (one time — cached by your browser after this)…', 5);
   S.kokoro.tts = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
-    dtype: hasWebGPU ? 'fp32' : 'q8',
-    device: hasWebGPU ? 'webgpu' : 'wasm',
+    dtype: cfg.dtype,
+    device: cfg.device,
     progress_callback: (p) => {
       if (p.status === 'progress' && p.total) {
         const pct = Math.round(5 + 92 * (p.loaded / p.total));
@@ -2486,6 +2498,10 @@ function setEngine(engine) {
   if (engine === 'neural') {
     pill.textContent = '✨ Neural voice';
     pill.classList.add('engine-neural');
+    if (isSmallScreen() && !store.get('neuralMobileWarned', false)) {
+      store.set('neuralMobileWarned', true);
+      toast('✨ The neural voice runs a large AI model in your browser — great on desktop, but it can be too heavy for some phones. If it ever crashes, switch back to the ⚡ device voice (iOS voices sound excellent).', 8000);
+    }
     if (S.kokoro.state === 'idle' || S.kokoro.state === 'error') loadKokoro();
   } else {
     pill.textContent = '⚡ Device voice';
