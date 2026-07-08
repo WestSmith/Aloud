@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.2.2">
+<meta name="aloud-version" content="v6.2.3">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -759,7 +759,7 @@ const S = {
   calib: store.get('calib', {}),      // voiceURI -> speed factor EMA
   lastFile: null,
   pdf: null,           // {doc, pages:[{page,vp,div,canvas,rendered}], scale}
-  pdfViewPref: store.get('pdfView', 'pdf'),
+  pdfViewPref: store.get('pdfView', null),   // null = user hasn't chosen; default resolves per-device
   htmlViewPref: store.get('htmlView', 'native'),
   fastEnds: 0,
   breather: store.get('breather', 1),   // pause/breather intensity multiplier (0 = off)
@@ -1007,8 +1007,18 @@ async function openFile(file, opts = {}) {
     S.docTitle = file.name.replace(/\.[^.]+$/, '');
     if (name.endsWith('.pdf') || file.type === 'application/pdf') {
       $('btn-view').style.display = 'grid';
-      if ((opts.view || S.pdfViewPref) === 'pdf') { await openPdfNative(file, opts); }
-      else { const blocks = await parsePdfText(file); renderFlow(blocks, [], opts); }
+      /* Page view rasterizes every PDF page to a canvas — on phones that can
+         exhaust iOS's per-tab memory and kill the app. Default phones to the
+         light text view; the 📄 button still opts into page view. */
+      const pref = opts.view || S.pdfViewPref || (isSmallScreen() ? 'text' : 'pdf');
+      if (pref === 'pdf') { await openPdfNative(file, opts); }
+      else {
+        const blocks = await parsePdfText(file); renderFlow(blocks, [], opts);
+        if (!S.pdfViewPref && isSmallScreen() && !store.get('pdfTextTipSeen', false)) {
+          store.set('pdfTextTipSeen', true);
+          setTimeout(() => toast('📄 Opened as text for speed. Tap 📄 up top for the original page layout.', 6000), 800);
+        }
+      }
     } else if (/\.(html?|xhtml)$/.test(name) || file.type === 'text/html') {
       $('btn-view').style.display = 'grid';
       if ((opts.view || S.htmlViewPref) === 'native') { renderHtmlNative(await file.text(), opts); }
@@ -1344,6 +1354,16 @@ function buildFromTokenStream(tokens, wordEls) {
   pushSent(tokens.length);
 }
 
+/* phones/tablets: coarse pointer or a narrow viewport. Used to keep PDF page
+   rendering within iOS's tight per-tab memory budget. */
+function isSmallScreen() {
+  /* touch devices (phones/tablets) have a coarse primary pointer; the width
+     check is a fallback for touch laptops or when matchMedia is unavailable.
+     Keyed on width, not height — laptops are often <820px tall. */
+  try { if (matchMedia('(pointer: coarse)').matches) return true; } catch {}
+  return window.innerWidth < 700;
+}
+
 /* lazy page rendering with a small LRU of canvases */
 function setupPdfLazyRender() {
   const io = new IntersectionObserver((entries) => {
@@ -1360,7 +1380,10 @@ async function renderPdfPage(i) {
   if (!pg || pg.rendered || pg.rendering) return;
   pg.rendering = true;
   try {
-    const out = Math.min(window.devicePixelRatio || 1, 2);
+    /* cap resolution harder on phones — a full-DPR canvas per page is what
+       pushes iOS over its memory limit */
+    const mobile = isSmallScreen();
+    const out = Math.min(window.devicePixelRatio || 1, mobile ? 1.5 : 2);
     pg.canvas.width = Math.floor(pg.vp.width * out);
     pg.canvas.height = Math.floor(pg.vp.height * out);
     await pg.page.render({
@@ -1370,7 +1393,7 @@ async function renderPdfPage(i) {
     }).promise;
     pg.rendered = true;
     S.pdf.renderedOrder.push(i);
-    if (S.pdf.renderedOrder.length > 14) {
+    if (S.pdf.renderedOrder.length > (mobile ? 5 : 14)) {
       // release the rendered page farthest from this one
       let far = -1, fd = -1;
       for (const j of S.pdf.renderedOrder) {
