@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.6.0">
+<meta name="aloud-version" content="v6.6.1">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1778,8 +1778,11 @@ function finishOpen(opts = {}) {
 function clearWordHl() {
   if (S.curWord >= 0 && S.words[S.curWord]) S.words[S.curWord].el.classList.remove('speaking');
 }
-function highlightWord(wIdx) {
-  if (wIdx === S.curWord) return;
+function highlightWord(wIdx, force = false) {
+  /* `force` repaints even when wIdx is already current — needed at sentence
+     transitions, where setSentence assigns S.curWord BEFORE calling here, so
+     the guard used to swallow the first word (no .speaking, no RSVP flash) */
+  if (wIdx === S.curWord && !force) return;
   clearWordHl();
   S.curWord = wIdx;
   const w = S.words[wIdx];
@@ -1800,7 +1803,7 @@ function setSentence(sIdx, keepWord = false) {
   if (!sent) return;
   if (S.sentHl) sentClass(sent, true);
   if (!keepWord) S.curWord = sent.start;
-  highlightWord(S.curWord);
+  highlightWord(S.curWord, !keepWord);
   maybeScroll(S.words[S.curWord]?.el);
   updateProgress();
   if (S.docKey) store.set(S.docKey, {
@@ -3147,7 +3150,7 @@ content.addEventListener('click', e => {
   primeAudioGesture();
   pauseAll();
   setSentence(sIdx);
-  S.curWord = wIdx; highlightWord(wIdx);
+  highlightWord(wIdx);   /* no pre-assignment — assigning S.curWord first made the guard skip the tapped word */
   S.playing = true; setPlayIcon(true);
   playCurrent(wIdx);
 });
