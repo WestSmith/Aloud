@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.4.0">
+<meta name="aloud-version" content="v6.4.1">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1950,8 +1950,16 @@ function initKokoroWorker() {
     } catch (e) { return reject(e); }
     const pending = new Map();
     let nextId = 1, ready = false;
-    const fail = (err) => { try { worker.terminate(); } catch {} S.kokoro.worker = null; S.kokoro.workerGenerate = null; reject(err); };
-    worker.onerror = (e) => { if (!ready) fail(new Error(e.message || 'worker error')); };
+    /* every teardown path must settle in-flight generate promises — a promise
+       that never settles wedges the serial genTail queue FOREVER and bricks
+       the neural engine until reload */
+    const rejectAll = (err) => { pending.forEach(p => { clearTimeout(p.tm); p.reject(err); }); pending.clear(); };
+    S.kokoro.rejectPending = rejectAll;
+    const fail = (err) => { try { worker.terminate(); } catch {} rejectAll(err); S.kokoro.worker = null; S.kokoro.workerGenerate = null; S.kokoro.rejectPending = null; reject(err); };
+    worker.onerror = (e) => {
+      if (!ready) fail(new Error(e.message || 'worker error'));
+      else rejectAll(new Error(e.message || 'neural worker crashed'));   // post-ready crash: don't strand callers
+    };
     worker.onmessage = (e) => {
       const m = e.data;
       if (m.type === 'progress') {
@@ -1965,7 +1973,12 @@ function initKokoroWorker() {
     S.kokoro.worker = worker;
     S.kokoro.workerGenerate = (text, voice) => new Promise((res, rej) => {
       const id = nextId++;
-      pending.set(id, { resolve: res, reject: rej });
+      /* watchdog: a silently-killed worker (phone OOM) fires no events at all —
+         without a timeout its generate promise would hang the queue for good */
+      const tm = setTimeout(() => {
+        if (pending.has(id)) { pending.delete(id); rej(new Error('neural generation timed out')); }
+      }, 120000);
+      pending.set(id, { resolve: (v) => { clearTimeout(tm); res(v); }, reject: (e) => { clearTimeout(tm); rej(e); }, tm });
       worker.postMessage({ type: 'generate', id, text, voice });
     });
     renderKokoroStatus('Downloading the voice model (one time — cached by your browser after this)…', 5);
@@ -1992,11 +2005,18 @@ function kokoroConfig() {
   return { dtype: 'q8', device: 'wasm' };
 }
 
-/* fully tear down the neural engine so a different model can load */
+/* fully tear down the neural engine so a different model can load.
+   Order matters: settle in-flight generate promises FIRST (terminating the
+   worker alone leaves them pending forever, which wedges genTail and bricks
+   the engine), then drop the worker, then flush the generation queue. */
 function resetNeuralEngine() {
+  try { S.kokoro.rejectPending?.(Object.assign(new Error('engine reset'), { name: 'EngineReset' })); } catch {}
   try { S.kokoro.worker?.terminate(); } catch {}
-  S.kokoro.worker = null; S.kokoro.workerGenerate = null;
+  S.kokoro.worker = null; S.kokoro.workerGenerate = null; S.kokoro.rejectPending = null;
   S.kokoro.tts = null; S.kokoro.state = 'idle'; S.kokoro.progress = 0;
+  S.neuralGenToken++;
+  S.neuralPending.clear();
+  genTail = Promise.resolve();
   clearNeuralCache();
 }
 
@@ -2051,6 +2071,10 @@ async function loadKokoroMainThread() {
 async function loadKokoro() {
   if (S.kokoro.state === 'ready' || S.kokoro.state === 'loading') return;
   S.kokoro.state = 'loading';
+  /* crash-loop guard: note that a load is in flight (and how heavy). If the
+     tab dies mid-load (phone OOM on a heavy tier), the sentinel survives and
+     the next launch falls back to Auto instead of crashing at every boot. */
+  store.set('nqLoadGuard', { dtype: kokoroConfig().dtype, at: Date.now() });
   renderKokoroStatus('Loading the Kokoro neural voice engine…', 2);
   try {
     try {
@@ -2059,6 +2083,7 @@ async function loadKokoro() {
       console.warn('Kokoro worker unavailable, using main thread', workerErr);
       await loadKokoroMainThread();
     }
+    store.set('nqLoadGuard', null);
     S.kokoro.state = 'ready';
     renderKokoroStatus('✅ Neural voice ready — works offline from now on.', 100);
     setTimeout(() => { if (S.kokoro.state === 'ready') hideKokoroStatus(); }, 3500);
@@ -2067,6 +2092,7 @@ async function loadKokoro() {
     else neuralPump();
   } catch (err) {
     console.error(err);
+    store.set('nqLoadGuard', null);   // a caught failure isn't a crash — don't trip the guard
     S.kokoro.state = 'error';
     renderKokoroStatus('⚠️ Could not load the neural engine (it needs an internet connection the first time, and a fairly recent browser). Device voices still work.', 0);
     if (S.engine === 'neural') setEngine('device');
@@ -2264,6 +2290,7 @@ async function speakNeural(sentIdx, fromWord) {
   } catch (err) {
     console.error(err);
     $('btn-play').classList.remove('loading');
+    if (err && err.name === 'EngineReset') return;   // deliberate teardown (quality switch) — not a playback error
     toast('⚠️ Neural voice hiccup on that sentence — skipping.');
     if (S.playing) advanceSentence(1, true);
     return;
@@ -2953,6 +2980,20 @@ const savedTheme = store.get('theme', 'dark');
 document.body.dataset.theme = savedTheme;
 $('theme-toggle').textContent = savedTheme === 'light' ? '☀️ Light' : '🌙 Dark';
 if (!store.get('autoScroll', true)) $('autoscroll-switch').classList.remove('on');
+/* crash-loop guard (see loadKokoro): a leftover sentinel means the last neural
+   load never finished. On a phone with an explicit heavy tier that's almost
+   certainly an OOM crash — auto-loading the same model again would crash every
+   launch. Fall back to Auto (q4) and tell the user. */
+{
+  const guard = store.get('nqLoadGuard', null);
+  if (guard && guard.dtype && guard.dtype !== 'q4' && isSmallScreen() && (S.neuralQuality || 'auto') !== 'auto') {
+    S.neuralQuality = 'auto'; store.set('neuralQuality', 'auto');
+    store.set('nqLoadGuard', null);
+    setTimeout(() => toast('⚠️ The neural voice model didn’t finish loading last time, so quality is back on Auto to keep the app stable. You can re-pick a tier in Settings.', 8000), 700);
+  } else if (guard && guard.at && Date.now() - guard.at > 86400000) {
+    store.set('nqLoadGuard', null);   // stale sentinel (e.g. closed mid-download) — don't let it linger forever
+  }
+}
 renderNeuralQuality();
 if (store.get('skim', false)) $('skim-switch').classList.add('on');
 if (!store.get('skipCode', true)) $('skipcode-switch').classList.remove('on');
@@ -3211,7 +3252,11 @@ if (!RESETTING && 'serviceWorker' in navigator && location.protocol.startsWith('
     if (!hadController) { hadController = true; return; }   // first install, not an update
     const t = $('toast');
     toast('⬆️ Aloud just updated — tap here to load the new version.', 12000);
-    t.addEventListener('click', () => location.reload(), { once: true });
+    /* disarm with the toast: a lingering once-listener used to make a tap on
+       ANY later toast reload the app mid-read */
+    const onTap = () => location.reload();
+    t.addEventListener('click', onTap, { once: true });
+    setTimeout(() => t.removeEventListener('click', onTap), 12000);
   });
 }
 
