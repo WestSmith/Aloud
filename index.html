@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.6.1">
+<meta name="aloud-version" content="v6.6.2">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -2616,8 +2616,12 @@ function orpIndex(core) {
 
 function rsvpFlash(token) {
   const m = token.match(/^([^\p{L}\p{N}]*)([\p{L}\p{N}'’\-]*)(.*)$/u);
-  const pre0 = m ? m[1] : '', core = m && m[2] ? m[2] : token, post0 = m ? m[3] : '';
-  const oi = m && m[2] ? orpIndex(core) : 0;
+  /* punctuation-only tokens ("…”", a lone "."): the leading group already
+     captured the WHOLE token into pre0, so falling back to core=token used
+     to paint it twice (". ." / "…”…”") — show it once, as the core */
+  const hasCore = !!(m && m[2]);
+  const pre0 = hasCore ? m[1] : '', core = hasCore ? m[2] : token, post0 = hasCore ? m[3] : '';
+  const oi = hasCore ? orpIndex(core) : 0;
   $('rsvp-pre').textContent = pre0 + core.slice(0, oi);
   $('rsvp-orp').textContent = core.charAt(oi) || '·';
   $('rsvp-post').textContent = core.slice(oi + 1) + post0;
