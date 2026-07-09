@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.4.1">
+<meta name="aloud-version" content="v6.5.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -126,6 +126,26 @@
   }
   #home .hint { margin-top: 26px; font-size: 12.5px; color: var(--text-dim); max-width: 460px; line-height: 1.6; }
   .ver-line { margin-top: 18px; font-size: 11.5px; color: var(--text-dim); opacity: .7; font-variant-numeric: tabular-nums; letter-spacing: .3px; }
+  #btn-paste-open {
+    margin-top: 14px; font-size: 13.5px; font-weight: 600; color: var(--text-dim);
+    padding: 9px 16px; border-radius: 999px;
+    background: var(--bg-elev2); border: 1px solid var(--border);
+    transition: background .15s, color .15s;
+  }
+  #btn-paste-open:hover { background: var(--accent-soft); color: var(--text); }
+  #paste-input {
+    width: 100%; min-height: 150px; resize: vertical;
+    background: var(--bg-elev2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 13px;
+    padding: 12px 14px; font: 14.5px/1.55 var(--ui-font);
+    margin-bottom: 12px;
+  }
+  #paste-input:focus { outline: none; border-color: var(--accent); }
+  #paste-read {
+    width: 100%; padding: 12px; border-radius: 13px;
+    background: var(--accent); color: #fff; font-size: 15px; font-weight: 650;
+    margin-bottom: 12px;
+  }
   #recent-list { margin-top: 22px; width: 100%; max-width: 460px; }
   .recent-row { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border: 1px solid var(--border);
     border-radius: 12px; margin-bottom: 8px; cursor: pointer; background: var(--bg-elev); text-align: left; transition: border-color .15s; }
@@ -192,7 +212,7 @@
     display: none;
   }
   #progress-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-  #progress-wrap { flex: 1; height: 18px; display: flex; align-items: center; cursor: pointer; }
+  #progress-wrap { flex: 1; height: 18px; display: flex; align-items: center; cursor: pointer; touch-action: none; }
   #progress-track { position: relative; width: 100%; height: 4px; border-radius: 99px; background: var(--bg-elev2); overflow: visible; }
   #progress-fill {
     position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
@@ -517,6 +537,7 @@
     <div class="t2">Everything stays on your device — nothing is uploaded.</div>
     <div class="fmt-chips"><span>EPUB</span><span>PDF</span><span>HTML</span><span>TXT / MD</span></div>
   </div>
+  <button id="btn-paste-open">📋 Or paste text to listen to it</button>
   <div id="recent-list"></div>
   <div class="hint">
     <b>Two voice engines:</b> instant device voices, or the <b>Kokoro neural voice</b> (open-source, runs in your browser). PDFs open as real pages with highlighting right on them. Double-tap any word to fix its pronunciation.
@@ -553,6 +574,14 @@
 </div>
 
 <div class="sheet-backdrop" id="backdrop"></div>
+
+<div class="sheet" id="paste-sheet">
+  <div class="grab"></div>
+  <h3>Paste text</h3>
+  <textarea id="paste-input" placeholder="Paste or type anything — an article, an email, meeting notes…" aria-label="Text to read aloud"></textarea>
+  <button id="paste-read">▶ Read it aloud</button>
+  <div class="voice-note">Stays on your device, like everything else in Aloud. It's saved to your Continue list so you can pick it back up later.</div>
+</div>
 
 <div class="sheet" id="voice-sheet">
   <div class="grab"></div>
@@ -622,7 +651,7 @@
     <div class="switch on" id="skipcode-switch"></div>
   </div>
   <div class="set-row" style="display:block">
-    <div class="lbl">✨ Neural voice quality<small>Bigger models sound better but use more memory. Auto picks a safe size for your device — phones/iPads get the light model. Higher tiers may crash on phones.</small></div>
+    <div class="lbl">✨ Neural voice quality<small>Bigger models sound better but use more memory. Auto picks a safe size for your device — phones/iPads get the light model. Standard/High may crash on phones. Lite+ is an experimental variant that may use less memory than Lite.</small></div>
     <div class="chips" id="nq-chips" style="margin-top:10px"></div>
   </div>
   <div class="set-row">
@@ -785,6 +814,7 @@ const S = {
   estRAF: null,
   kokoro: { tts: null, state: 'idle', progress: 0 },
   audio: null,
+  audioPlay: null,     // current neural play: {segs:[{sentIdx,sentStart,t0,starts}], shownAbs, clock, batchUrl?}
   neuralCache: new Map(),
   neuralGenToken: 0,
   dict: store.get('dict', {}),        // lowercase word -> spoken replacement
@@ -1589,6 +1619,8 @@ function splitSentences(text) {
 
 function resetDocState() {
   S.words = []; S.sentences = []; S.curSent = -1; S.curWord = -1;
+  if (S.audioPlay?.batchUrl) URL.revokeObjectURL(S.audioPlay.batchUrl);
+  S.audioPlay = null;
   S.neuralCache.forEach(c => URL.revokeObjectURL(c.url));
   S.neuralCache.clear();
   if (S.pdf) { try { S.pdf.io?.disconnect(); S.pdf.doc.destroy?.(); } catch {} S.pdf = null; }
@@ -1657,6 +1689,20 @@ function finishOpen(opts = {}) {
   $('btn-view').textContent = native ? '¶' : '📄';
   $('btn-view').title = native ? 'Switch to plain text view' : 'Switch to original layout';
   window.scrollTo(0, 0);
+
+  /* lock screen / control center: show what's being read */
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: S.docTitle || 'Aloud',
+        artist: 'Aloud',
+        artwork: [
+          { src: 'icon-192.png', sizes: '192x192', type: 'image/png' },
+          { src: 'icon-512.png', sizes: '512x512', type: 'image/png' },
+        ],
+      });
+    } catch {}
+  }
 
   let startWord = 0;
   if (typeof opts.resumeWord === 'number') {
@@ -1992,7 +2038,7 @@ function initKokoroWorker() {
    - Phones/iPads: q4 (~40MB) on wasm. Never WebGPU here — iOS WebGPU is immature
      and larger dtypes overrun iOS's per-tab memory and crash the app.
    - Desktop with WebGPU: full fp32. Desktop without: q8 on wasm. */
-const NQ_DTYPE = { lite: 'q4', standard: 'q8', high: 'fp32' };
+const NQ_DTYPE = { lite: 'q4', liteplus: 'q4f16', standard: 'q8', high: 'fp32' };
 function kokoroConfig() {
   const q = S.neuralQuality || 'auto';
   if (q !== 'auto') {
@@ -2020,12 +2066,14 @@ function resetNeuralEngine() {
   clearNeuralCache();
 }
 
-const NQ_PRESETS = [['auto', 'Auto'], ['lite', 'Lite · 40MB'], ['standard', 'Standard · 82MB'], ['high', 'High · 330MB']];
+const NQ_PRESETS = [['auto', 'Auto'], ['lite', 'Lite · 40MB'], ['liteplus', 'Lite+ · q4f16 · exp.'], ['standard', 'Standard · 82MB'], ['high', 'High · 330MB']];
 function setNeuralQuality(q) {
   if (q === (S.neuralQuality || 'auto')) return;
   S.neuralQuality = q; store.set('neuralQuality', q);
   const cfg = kokoroConfig();
-  const heavyWarn = isSmallScreen() && cfg.dtype !== 'q4';
+  /* q4f16 is phone-sized (4-bit weights, fp16 activations) — experimental,
+     but not a "too heavy" tier; only q8/fp32 get the crash warning */
+  const heavyWarn = isSmallScreen() && cfg.dtype !== 'q4' && cfg.dtype !== 'q4f16';
   const wasPlaying = S.playing && S.engine === 'neural';
   if (wasPlaying) pauseAll();
   resetNeuralEngine();
@@ -2274,6 +2322,101 @@ async function generateNeuralNow(sentIdx, key) {
   return entry;
 }
 
+/* ====================================================================
+   NEURAL PLAYBACK — one persistent <audio> element, reused for every
+   sentence. Two reasons this is an element-for-life and not per-sentence:
+   (1) iOS autoplay: play() must trace back to a user gesture, but neural
+       playback starts seconds later (after generation). An element that
+       already played (a silent clip) inside the tap keeps its right to
+       play programmatically; a fresh element does not.
+   (2) Lock screen: with the screen off, iOS won't start a brand-new
+       media element between sentences. While the app is hidden we stitch
+       the pre-generated runway into ONE longer clip (see batchNext), so
+       listening continues through the lock screen.
+   Per-play state lives in S.audioPlay; the element's listeners are wired
+   exactly once and read that state, so nothing accumulates across plays.
+   ==================================================================== */
+const SILENT_WAV = 'data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YSADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
+let NA = null;              // the persistent neural <audio>
+let audioPrimed = false;
+
+function ensureNeuralAudio() {
+  if (NA) return NA;
+  NA = new Audio();
+  NA.preload = 'auto';
+  try { NA.preservesPitch = true; NA.webkitPreservesPitch = true; } catch {}
+  const syncClock = () => { const P = S.audioPlay; if (P) { P.clock.media = NA.currentTime; P.clock.wall = performance.now(); } };
+  NA.addEventListener('timeupdate', syncClock);
+  NA.addEventListener('seeked', () => { syncClock(); if (S.audioPlay) S.audioPlay.shownAbs = -1; });   // real seek → regression allowed
+  NA.addEventListener('play', () => { syncClock(); requestAnimationFrame(naTick); });
+  NA.addEventListener('ended', () => {
+    const P = S.audioPlay;
+    if (!P) return;                                   // prime clip / stale
+    if (P.batchUrl) URL.revokeObjectURL(P.batchUrl);
+    S.audioPlay = null;
+    if (!S.playing || S.engine !== 'neural') return;
+    /* with the screen off, rAF is frozen, so the tick never advanced
+       S.curSent through the batch — land on the batch's last sentence
+       explicitly or the next batch would replay the same run */
+    const lastSeg = P.segs[P.segs.length - 1];
+    if (lastSeg && lastSeg.sentIdx !== S.curSent) setSentence(lastSeg.sentIdx, true);
+    /* hidden (screen locked / app in background): stitch the generated
+       runway into one clip so playback survives without a fresh play() */
+    if (document.hidden && !rsvpSilentActive()) { batchNext(); return; }
+    advanceAfterBreather();
+  });
+  NA.addEventListener('error', () => {
+    const P = S.audioPlay;
+    if (!P) return;
+    if (P.batchUrl) URL.revokeObjectURL(P.batchUrl);
+    S.audioPlay = null;
+    if (S.playing && S.engine === 'neural') advanceSentence(1, true);
+  });
+  S.audio = NA;
+  return NA;
+}
+
+/* call from real user gestures: lets iOS bless the element so the delayed,
+   programmatic play() after generation is allowed */
+function primeAudioGesture() {
+  if (audioPrimed || S.audioPlay) return;
+  const na = ensureNeuralAudio();
+  audioPrimed = true;
+  try {
+    na.src = SILENT_WAV;
+    /* only pause if real playback hasn't taken the element over meanwhile */
+    na.play().then(() => { if (!S.audioPlay) na.pause(); }).catch(() => { audioPrimed = false; });
+  } catch { audioPrimed = false; }
+}
+
+/* browsers update audio.currentTime only ~4×/sec — far too coarse for word
+   karaoke. Extrapolate media position from the wall clock between timeupdate
+   events, capped so a stalled pipeline can't sprint ahead. */
+function naMediaPos(P) {
+  if (NA.paused || NA.ended) return NA.currentTime;
+  let est = P.clock.media + ((performance.now() - P.clock.wall) / 1000) * NA.playbackRate;
+  est = Math.min(est, P.clock.media + 1.5);
+  return isFinite(NA.duration) ? Math.min(est, NA.duration) : est;
+}
+
+function naTick() {
+  const P = S.audioPlay;
+  if (!P || !S.playing) return;
+  const ct = naMediaPos(P);
+  let seg = P.segs[0];
+  for (const g of P.segs) { if (g.t0 <= ct + 0.02) seg = g; else break; }
+  if (seg.sentIdx !== S.curSent) setSentence(seg.sentIdx, true);
+  let wi = 0;
+  for (let i = 0; i < seg.starts.length; i++) { if (seg.starts[i] <= ct + 0.02) wi = i; else break; }
+  /* clock resyncs can land a hair behind the extrapolation — hold rather
+     than visibly rewind a word */
+  let wIdx = seg.sentStart + wi;
+  if (wIdx < P.shownAbs) wIdx = P.shownAbs;
+  P.shownAbs = wIdx;
+  if (wIdx !== S.curWord) { highlightWord(wIdx); maybeScroll(S.words[wIdx]?.el); }
+  if (!NA.paused && !NA.ended) requestAnimationFrame(naTick);
+}
+
 async function speakNeural(sentIdx, fromWord) {
   if (S.kokoro.state !== 'ready') {
     $('btn-play').classList.add('loading');
@@ -2298,55 +2441,109 @@ async function speakNeural(sentIdx, fromWord) {
   if (genToken !== S.neuralGenToken || !S.playing || S.curSent !== sentIdx) return;
   $('btn-play').classList.remove('loading');
 
-  if (S.audio) { S.audio.pause(); S.audio.src = ''; }
-  const audio = new Audio(entry.url);
-  audio.playbackRate = S.rate;
-  try { audio.preservesPitch = true; audio.webkitPreservesPitch = true; } catch {}
-  S.audio = audio;
+  const na = ensureNeuralAudio();
+  na.pause();
+  if (S.audioPlay?.batchUrl) URL.revokeObjectURL(S.audioPlay.batchUrl);
+  const P = S.audioPlay = {
+    segs: [{ sentIdx, sentStart: sent.start, t0: 0, starts: entry.starts }],
+    shownAbs: -1,
+    clock: { media: 0, wall: performance.now() },
+  };
+  na.src = entry.url;
+  na.playbackRate = S.rate;
 
   const startFrom = Math.max(sent.start, Math.min(fromWord ?? sent.start, sent.end - 1));
   if (startFrom > sent.start) {
     const t = entry.starts[startFrom - sent.start];
-    audio.addEventListener('loadedmetadata', () => { audio.currentTime = Math.max(0, t - 0.05); });
+    na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) na.currentTime = Math.max(0, t - 0.05); }, { once: true });
   }
-
-  /* browsers update audio.currentTime only ~4×/sec — far too coarse for
-     word karaoke. Extrapolate media position from the wall clock between
-     timeupdate events for frame-accurate highlighting. */
-  const clock = { media: 0, wall: performance.now() };
-  let shownWi = -1;                    // monotonic word index for this audio
-  const syncClock = () => { clock.media = audio.currentTime; clock.wall = performance.now(); };
-  audio.addEventListener('timeupdate', syncClock);
-  audio.addEventListener('seeked', () => { syncClock(); shownWi = -1; });   // real seek → regression allowed
-  const mediaPos = () => {
-    if (audio.paused || audio.ended) return audio.currentTime;
-    let est = clock.media + ((performance.now() - clock.wall) / 1000) * audio.playbackRate;
-    /* if timeupdates stop (stalled pipeline, throttled tab), don't let the
-       extrapolation sprint ahead of the actual audio */
-    est = Math.min(est, clock.media + 1.5);
-    return isFinite(audio.duration) ? Math.min(est, audio.duration) : est;
-  };
-
-  const tick = () => {
-    if (S.audio !== audio || !S.playing) return;
-    const ct = mediaPos();
-    let wi = 0;
-    for (let i = 0; i < entry.starts.length; i++) { if (entry.starts[i] <= ct + 0.02) wi = i; else break; }
-    /* clock resyncs can land a hair behind the extrapolation — absorb the
-       correction by holding rather than visibly rewinding a word */
-    if (wi < shownWi) wi = shownWi;
-    shownWi = wi;
-    const wIdx = sent.start + wi;
-    if (wIdx !== S.curWord) { highlightWord(wIdx); maybeScroll(S.words[wIdx].el); }
-    if (!audio.paused && !audio.ended) requestAnimationFrame(tick);
-  };
-  audio.addEventListener('play', () => { syncClock(); requestAnimationFrame(tick); });
-  audio.addEventListener('ended', () => { if (S.audio === audio) advanceAfterBreather(); });
-  audio.addEventListener('error', () => { if (S.audio === audio && S.playing) advanceSentence(1, true); });
-  try { await audio.play(); } catch (e) { console.warn(e); }
+  try { await na.play(); } catch (e) { console.warn(e); }
   highlightWord(startFrom);
 
   neuralPump();   // keep the runway of pre-generated sentences full
+}
+
+/* ---- lock-screen continuity: stitch the cached runway into one clip ---- */
+
+/* the contiguous run of playable sentences starting at the next one; only
+   the FIRST may need generating — the rest must already be in the cache
+   (we never wait on a long generation with the screen off) */
+function batchRun(from) {
+  const first = seekPlayable(from, 1);
+  if (first === -1) return [];
+  const run = [first];
+  const keyOf = i => i + '|' + S.neuralVoice + '|' + S.dictVersion;
+  for (let i = first + 1; run.length < 8 && i < S.sentences.length; i++) {
+    if (sentSkipped(i)) break;
+    if (S.sleep.mode === 'chapter' && chapterOf(i) !== chapterOf(first)) break;
+    if (!S.neuralCache.has(keyOf(i))) break;
+    run.push(i);
+  }
+  return run;
+}
+
+async function batchNext() {
+  const run = batchRun(S.curSent + 1);
+  /* end of document, or a chapter boundary under the sleep timer — let the
+     normal path handle its finish/goodnight messaging */
+  if (!run.length || (S.sleep.mode === 'chapter' && chapterOf(run[0]) !== chapterOf(S.curSent))) {
+    advanceSentence(1, true);
+    return;
+  }
+  if (run.length === 1) { setSentence(run[0]); if (S.playing) playCurrent(); return; }
+  try { await speakNeuralStitched(run); }
+  catch (e) {
+    console.warn('stitch failed, falling back to per-sentence', e);
+    setSentence(run[0]);
+    if (S.playing) playCurrent();
+  }
+}
+
+async function speakNeuralStitched(run) {
+  const genToken = ++S.neuralGenToken;
+  const entries = [];
+  for (const i of run) entries.push(await generateNeural(i));
+  if (genToken !== S.neuralGenToken || !S.playing) return;
+  /* decode each cached WAV back to samples (16-bit mono — our own format
+     from audioBlobParts, so a 44-byte header + PCM is a safe assumption) */
+  const parts = [];
+  let sr = 24000;
+  for (const en of entries) {
+    const buf = await (await fetch(en.url)).arrayBuffer();
+    const v = new DataView(buf);
+    sr = v.getUint32(24, true) || sr;
+    const n = Math.max(0, (buf.byteLength - 44) >> 1);
+    const f = new Float32Array(n);
+    for (let i = 0; i < n; i++) f[i] = v.getInt16(44 + i * 2, true) / 32768;
+    parts.push(f);
+  }
+  if (genToken !== S.neuralGenToken || !S.playing) return;
+  /* stitch with breather-scaled silence between sentences (playbackRate
+     scales the gaps along with the speech, like the live breathers) */
+  const gaps = run.map((si, k) => k === run.length - 1 ? 0
+    : Math.round(sr * (paraBreakAfter(si) ? 0.44 : 0.12) * Math.max(0, S.breather || 0)));
+  let total = 0;
+  parts.forEach((p, k) => { total += p.length + gaps[k]; });
+  const all = new Float32Array(total);
+  const segs = [];
+  let off = 0;
+  parts.forEach((p, k) => {
+    const t0 = off / sr;
+    segs.push({ sentIdx: run[k], sentStart: S.sentences[run[k]].start, t0, starts: entries[k].starts.map(s => s + t0) });
+    all.set(p, off);
+    off += p.length + gaps[k];
+  });
+  const url = audioBlobParts({ audio: all, sampling_rate: sr });
+
+  const na = ensureNeuralAudio();
+  na.pause();
+  if (S.audioPlay?.batchUrl) URL.revokeObjectURL(S.audioPlay.batchUrl);
+  S.audioPlay = { segs, batchUrl: url, shownAbs: -1, clock: { media: 0, wall: performance.now() } };
+  na.src = url;
+  na.playbackRate = S.rate;
+  setSentence(run[0]);
+  try { await na.play(); } catch (e) { console.warn(e); }
+  neuralPump();   // keep generating ahead while the batch plays
 }
 
 /* ====================================================================
@@ -2583,7 +2780,10 @@ function togglePlay() {
       S.playing = false; setPlayIcon(false); S.audio.pause(); $('btn-play').classList.remove('loading');
     } else pauseAll();
   } else {
-    if (S.engine === 'neural' && !rsvpSilentActive() && S.audio && S.audio.currentTime > 0 && !S.audio.ended && S.audio.src) {
+    primeAudioGesture();
+    /* resume mid-sentence only when there's a live play (S.audioPlay) — the
+       element also carries the silent prime clip, which must not "resume" */
+    if (S.engine === 'neural' && !rsvpSilentActive() && S.audioPlay && S.audio && S.audio.currentTime > 0 && !S.audio.ended && S.audio.src) {
       S.playing = true; setPlayIcon(true);
       S.audio.playbackRate = S.rate;
       S.audio.play().catch(() => playCurrent(S.curWord));
@@ -2596,6 +2796,7 @@ function togglePlay() {
 function setPlayIcon(playing) {
   $('ic-play').style.display = playing ? 'none' : 'block';
   $('ic-pause').style.display = playing ? 'block' : 'none';
+  if ('mediaSession' in navigator) { try { navigator.mediaSession.playbackState = playing ? 'playing' : 'paused'; } catch {} }
 }
 
 function setEngine(engine) {
@@ -2653,6 +2854,22 @@ $('backdrop').addEventListener('click', closeSheets);
 $('btn-open').addEventListener('click', () => $('file-input').click());
 $('dropzone').addEventListener('click', () => $('file-input').click());
 $('file-input').addEventListener('change', e => { openFile(e.target.files[0]); e.target.value = ''; });
+
+/* paste-to-listen: turn pasted text into a lightweight .txt "file" so the
+   whole pipeline (library, Continue, resume position) works unchanged */
+$('btn-paste-open').addEventListener('click', () => {
+  openSheet('paste-sheet');
+  setTimeout(() => $('paste-input').focus(), 250);
+});
+$('paste-read').addEventListener('click', () => {
+  const text = $('paste-input').value.trim();
+  if (!text) { toast('Paste some text in first.'); return; }
+  const firstLine = (text.split(/\n/).find(l => l.trim()) || '').trim().replace(/\s+/g, ' ');
+  const title = (firstLine.slice(0, 48) || 'Pasted text').replace(/[/\\]/g, ' ');
+  closeSheets();
+  $('paste-input').value = '';
+  openFile(new File([text], title + '.txt', { type: 'text/plain' }));
+});
 
 ['dragenter', 'dragover'].forEach(ev => document.addEventListener(ev, e => {
   e.preventDefault(); $('dropzone').classList.add('drag');
@@ -2755,10 +2972,10 @@ $('speed-range').addEventListener('input', e => {
   document.querySelectorAll('#speed-chips .chip').forEach(c => c.classList.toggle('on', parseFloat(c.textContent) === v));
 });
 $('speed-range').addEventListener('change', e => { setRate(+e.target.value); renderSpeedSheet(); });
-$('btn-engine').addEventListener('click', () => setEngine(S.engine === 'device' ? 'neural' : 'device'));
+$('btn-engine').addEventListener('click', () => { primeAudioGesture(); setEngine(S.engine === 'device' ? 'neural' : 'device'); });
 $('btn-voice').addEventListener('click', () => { renderVoiceList(); openSheet('voice-sheet'); });
 $('btn-settings').addEventListener('click', () => { renderDictList(); renderNeuralQuality(); openSheet('settings-sheet'); });
-document.querySelectorAll('#engine-seg button').forEach(b => b.addEventListener('click', () => setEngine(b.dataset.engine)));
+document.querySelectorAll('#engine-seg button').forEach(b => b.addEventListener('click', () => { primeAudioGesture(); setEngine(b.dataset.engine); }));
 
 /* tap a word → play from there; double-tap / long-press → fix pronunciation.
    composedPath() so this also works inside the HTML-view shadow root. */
@@ -2799,6 +3016,7 @@ content.addEventListener('click', e => {
   if (!w) return;
   const wIdx = +w.dataset.word;
   const sIdx = S.words[wIdx].sent;
+  primeAudioGesture();
   pauseAll();
   setSentence(sIdx);
   S.curWord = wIdx; highlightWord(wIdx);
@@ -2806,15 +3024,35 @@ content.addEventListener('click', e => {
   playCurrent(wIdx);
 });
 
-/* progress bar seek */
-$('progress-wrap').addEventListener('click', e => {
-  if (!S.sentences.length) return;
-  const r = $('progress-wrap').getBoundingClientRect();
-  const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-  const p = S.playing; pauseAll(); S.playing = p;
-  setSentence(Math.round(frac * (S.sentences.length - 1)));
-  if (p) playCurrent();
-});
+/* progress bar: tap to jump, or drag to scrub (seek happens on release) */
+{
+  const wrap = $('progress-wrap');
+  const fracFrom = (e) => {
+    const r = wrap.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  };
+  const preview = (frac) => {
+    $('progress-fill').style.width = Math.round(frac * 100) + '%';
+    $('progress-label').textContent = Math.round(frac * 100) + '% · drag to seek';
+  };
+  let scrub = null;
+  wrap.addEventListener('pointerdown', e => {
+    if (!S.sentences.length) return;
+    scrub = { wasPlaying: S.playing };
+    try { wrap.setPointerCapture(e.pointerId); } catch {}
+    preview(fracFrom(e));
+  });
+  wrap.addEventListener('pointermove', e => { if (scrub) preview(fracFrom(e)); });
+  wrap.addEventListener('pointerup', e => {
+    if (!scrub) return;
+    const wasPlaying = scrub.wasPlaying; scrub = null;
+    const frac = fracFrom(e);
+    pauseAll(); S.playing = wasPlaying;
+    setSentence(Math.round(frac * (S.sentences.length - 1)));
+    if (wasPlaying) playCurrent();
+  });
+  wrap.addEventListener('pointercancel', () => { scrub = null; updateProgress(); });
+}
 
 /* chapter select */
 $('chapter-select').addEventListener('change', e => {

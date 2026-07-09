@@ -1,6 +1,6 @@
 /* Aloud service worker — offline app shell + CDN module caching.
    Bump VERSION on each release to roll the cache. */
-const VERSION = 'aloud-v6.4.1';
+const VERSION = 'aloud-v6.5.0';
 const CORE = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
