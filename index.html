@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.5.0">
+<meta name="aloud-version" content="v6.6.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -419,6 +419,27 @@
   }
   [data-theme="light"] .html-host { box-shadow: 0 3px 18px rgba(40,30,90,.14); }
 
+  /* ---------- zoom bar (v6.6.0) — PDF & original-layout HTML on big screens ---------- */
+  #zoom-bar {
+    position: fixed; right: 12px; bottom: calc(158px + env(safe-area-inset-bottom));
+    z-index: 40; display: none; flex-direction: column; gap: 3px;
+    background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--border); border-radius: 14px;
+    padding: 5px; box-shadow: var(--shadow);
+  }
+  body.zoomable #zoom-bar { display: flex; }
+  @media (max-width: 699px) { #zoom-bar { display: none !important; } }
+  #zoom-bar button {
+    width: 38px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+    color: var(--text-dim); font-size: 18px; font-weight: 650; line-height: 1;
+  }
+  #zoom-bar button:hover { background: var(--bg-elev2); color: var(--text); }
+  #zoom-bar button.on { background: var(--accent); color: #fff; }
+  #zoom-bar button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  #zoom-pct { font-size: 10.5px !important; font-weight: 700 !important; font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
+  #zoom-bar .zsep { height: 1px; margin: 2px 4px; background: var(--border); }
+
   /* ---------- speed sheet ---------- */
   .speed-big { text-align: center; font-size: 36px; font-weight: 750; letter-spacing: -.5px; margin: 2px 0 8px; font-variant-numeric: tabular-nums; }
   #speed-range { width: 100%; accent-color: var(--accent); margin: 4px 0 10px; height: 28px; }
@@ -546,6 +567,15 @@
 </div>
 
 <div id="reader"><div id="content"></div></div>
+
+<div id="zoom-bar" role="group" aria-label="Zoom">
+  <button id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">+</button>
+  <button id="zoom-pct" title="Reset zoom to 100% (0)" aria-label="Reset zoom to 100%">100%</button>
+  <button id="zoom-out" title="Zoom out (−)" aria-label="Zoom out">−</button>
+  <div class="zsep" aria-hidden="true"></div>
+  <button id="zoom-fitw" title="Fit width (W)" aria-label="Fit width" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M4 5v14M20 5v14M8 12h8M8 12l2.6-2.6M8 12l2.6 2.6M16 12l-2.6-2.6M16 12l-2.6 2.6"/></svg></button>
+  <button id="zoom-fitp" title="Fit whole page (P)" aria-label="Fit whole page" aria-pressed="false"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M12 7.5v9M12 7.5 9.8 9.7M12 7.5l2.2 2.2M12 16.5l-2.2-2.2M12 16.5l2.2-2.2"/></svg></button>
+</div>
 
 <input type="file" id="file-input" accept=".epub,.pdf,.html,.htm,.xhtml,.txt,.md,.markdown,application/epub+zip,application/pdf,text/html,text/plain" hidden>
 
@@ -794,6 +824,7 @@ const store = {
 /* ---------------- state ---------------- */
 const S = {
   mode: 'flow',        // 'flow' | 'pdf'
+  zoom: { pct: 1, fit: 'none', applied: 1 },  // pdf/html view zoom (v6.6.0)
   words: [],           // [{el, text, sent}]
   sentences: [],       // [{start, end, text, span?}]
   curSent: -1,
@@ -1455,7 +1486,10 @@ async function renderPdfPage(i) {
     /* cap resolution harder on phones — a full-DPR canvas per page is what
        pushes iOS over its memory limit */
     const mobile = isSmallScreen();
-    const out = Math.min(window.devicePixelRatio || 1, mobile ? 1.5 : 2);
+    /* zoomed-in pages need more backing pixels to stay sharp — scale the
+       resolution with the applied zoom, capped harder on phones (memory) */
+    const zf = S.zoom?.applied || 1;
+    const out = Math.min((window.devicePixelRatio || 1) * Math.max(1, zf), mobile ? 1.5 : 3);
     pg.canvas.width = Math.floor(pg.vp.width * out);
     pg.canvas.height = Math.floor(pg.vp.height * out);
     await pg.page.render({
@@ -1465,7 +1499,7 @@ async function renderPdfPage(i) {
     }).promise;
     pg.rendered = true;
     S.pdf.renderedOrder.push(i);
-    if (S.pdf.renderedOrder.length > (mobile ? 5 : 14)) {
+    if (S.pdf.renderedOrder.length > (mobile ? 5 : (zf > 1.6 ? 8 : 14))) {
       // release the rendered page farthest from this one
       let far = -1, fd = -1;
       for (const j of S.pdf.renderedOrder) {
@@ -1626,6 +1660,9 @@ function resetDocState() {
   if (S.pdf) { try { S.pdf.io?.disconnect(); S.pdf.doc.destroy?.(); } catch {} S.pdf = null; }
   content.classList.remove('pdf-mode');
   content.classList.remove('html-mode');
+  content.style.zoom = '';
+  document.body.classList.remove('zoomable');
+  if (S.zoom) S.zoom.applied = 1;
   S.chapters = [];
 }
 
@@ -1689,6 +1726,15 @@ function finishOpen(opts = {}) {
   $('btn-view').textContent = native ? '¶' : '📄';
   $('btn-view').title = native ? 'Switch to plain text view' : 'Switch to original layout';
   window.scrollTo(0, 0);
+
+  /* zoom (v6.6.0): restore the saved zoom for this view mode */
+  if (S.mode === 'pdf' || S.mode === 'html') {
+    const zsaved = store.get(S.mode === 'pdf' ? 'zoomPdf' : 'zoomHtml', null);
+    S.zoom.fit = zsaved?.fit || 'none';
+    S.zoom.pct = Math.min(3, Math.max(0.5, zsaved?.pct || 1));
+    document.body.classList.add('zoomable');
+    applyZoom(false);
+  }
 
   /* lock screen / control center: show what's being read */
   if ('mediaSession' in navigator) {
@@ -2906,6 +2952,88 @@ $('btn-view').addEventListener('click', async () => {
   if (wasPlaying) playCurrent(S.curWord);
 });
 
+/* ====================================================================
+   ZOOM (v6.6.0) — PDF & original-layout HTML views.
+   CSS `zoom` on #content: it reflows layout (unlike transform), every
+   overlay span scales with its page, and getBoundingClientRect /
+   scrollIntoView keep working, so karaoke highlighting is untouched.
+   ==================================================================== */
+const ZOOM_MIN = 0.5, ZOOM_MAX = 3, ZOOM_STEP = 1.15;
+const clampZoom = z => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+function zoomable() { return S.mode === 'pdf' || S.mode === 'html'; }
+
+/* largest page, so mixed-size PDFs fit their widest/tallest page */
+function pdfBaseSize() {
+  let w = 0, h = 0;
+  for (const pg of S.pdf?.pages || []) { w = Math.max(w, pg.vp.width); h = Math.max(h, pg.vp.height); }
+  return { w: w || 1, h: h || 1 };
+}
+
+function effectiveZoom() {
+  if (S.zoom.fit === 'width') {
+    if (S.mode === 'pdf') return clampZoom((window.innerWidth - 28) / pdfBaseSize().w);
+    /* html view is capped at 920px — fit-width stretches it to the window.
+       Never below 1: narrower windows already use the full width. */
+    return clampZoom(Math.max(1, (window.innerWidth - 20) / 920));
+  }
+  if (S.zoom.fit === 'page' && S.mode === 'pdf') {
+    const b = pdfBaseSize();
+    const availW = window.innerWidth - 28;
+    const availH = window.innerHeight - ($('topbar')?.offsetHeight || 62)
+                 - ($('player')?.offsetHeight || 96) - 28;
+    return clampZoom(Math.min(availW / b.w, availH / b.h));
+  }
+  return clampZoom(S.zoom.pct);
+}
+
+let zoomRerenderT = 0;
+function applyZoom(save = true) {
+  if (!zoomable()) return;
+  const z = effectiveZoom();
+  S.zoom.applied = z;
+  content.style.zoom = Math.abs(z - 1) < 0.002 ? '' : String(z);
+  $('zoom-pct').textContent = Math.round(z * 100) + '%';
+  $('zoom-fitw').classList.toggle('on', S.zoom.fit === 'width');
+  $('zoom-fitp').classList.toggle('on', S.zoom.fit === 'page');
+  $('zoom-fitw').setAttribute('aria-pressed', S.zoom.fit === 'width');
+  $('zoom-fitp').setAttribute('aria-pressed', S.zoom.fit === 'page');
+  $('zoom-fitp').style.display = S.mode === 'pdf' ? '' : 'none';
+  if (save) store.set(S.mode === 'pdf' ? 'zoomPdf' : 'zoomHtml', { pct: S.zoom.pct, fit: S.zoom.fit });
+  /* PDF: re-render nearby pages at the new resolution (debounced so a
+     burst of +/+/+ redraws once). Far pages re-render lazily via the IO. */
+  if (S.mode === 'pdf' && S.pdf) {
+    clearTimeout(zoomRerenderT);
+    zoomRerenderT = setTimeout(() => {
+      if (!S.pdf) return;
+      S.pdf.pages.forEach(pg => { if (pg.rendered) pg.rendered = false; });
+      S.pdf.renderedOrder = [];
+      S.pdf.pages.forEach((pg, i) => {
+        const r = pg.div.getBoundingClientRect();
+        if (r.bottom > -1000 && r.top < window.innerHeight + 1000) renderPdfPage(i);
+      });
+    }, 260);
+  }
+}
+
+function zoomTo(pct) { S.zoom.fit = 'none'; S.zoom.pct = clampZoom(pct); applyZoom(); }
+function zoomToggleFit(mode) {
+  S.zoom.fit = S.zoom.fit === mode ? 'none' : mode;
+  if (S.zoom.fit === 'none') S.zoom.pct = 1;   // un-fitting returns to 100%
+  applyZoom();
+}
+$('zoom-in').addEventListener('click', () => zoomTo(S.zoom.applied * ZOOM_STEP));
+$('zoom-out').addEventListener('click', () => zoomTo(S.zoom.applied / ZOOM_STEP));
+$('zoom-pct').addEventListener('click', () => zoomTo(1));
+$('zoom-fitw').addEventListener('click', () => zoomToggleFit('width'));
+$('zoom-fitp').addEventListener('click', () => zoomToggleFit('page'));
+
+let zoomResizeT = 0;
+window.addEventListener('resize', () => {
+  if (!zoomable() || S.zoom.fit === 'none') return;
+  clearTimeout(zoomResizeT);
+  zoomResizeT = setTimeout(() => applyZoom(false), 180);
+});
+
 /* RSVP wiring */
 $('btn-rsvp').addEventListener('click', () => setRsvpOpen(!S.rsvp.open));
 $('rsvp-close').addEventListener('click', () => setRsvpOpen(false));
@@ -3141,6 +3269,12 @@ document.addEventListener('keydown', e => {
   else if (e.code === 'KeyR') setRsvpOpen(!S.rsvp.open);
   else if (e.code === 'KeyB' && S.sentences.length) addBookmark();
   else if (e.key === '/' && S.sentences.length) { e.preventDefault(); $('btn-search').click(); }
+  /* zoom (pdf/html views) — plain keys only; Ctrl/Cmd± stays browser zoom */
+  else if ((e.key === '+' || e.key === '=') && !e.ctrlKey && !e.metaKey && zoomable()) zoomTo(S.zoom.applied * ZOOM_STEP);
+  else if (e.key === '-' && !e.ctrlKey && !e.metaKey && zoomable()) zoomTo(S.zoom.applied / ZOOM_STEP);
+  else if (e.key === '0' && !e.ctrlKey && !e.metaKey && zoomable()) zoomTo(1);
+  else if (e.code === 'KeyW' && zoomable()) zoomToggleFit('width');
+  else if (e.code === 'KeyP' && S.mode === 'pdf') zoomToggleFit('page');
   else if (e.code === 'Escape') { if (S.rsvp.open) setRsvpOpen(false); else closeSheets(); }
 });
 
