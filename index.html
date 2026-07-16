@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.6.3">
+<meta name="aloud-version" content="v6.6.4">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1536,7 +1536,12 @@ async function renderPdfPage(i) {
 function stripCssBeacons(css) {
   return String(css || '')
     .replace(/@import\b[^;{]*(;|(?=\}))/gi, '')
-    .replace(/url\(\s*(['"]?)(?!\1?\s*data:)[^)]*\)/gi, 'none');
+    // v6.6.4: inspect each url()'s actual target — keep self-contained data:
+    // URIs (inline images), strip anything that would fetch off-device. The
+    // v6.6.3 regex used an optional-quote group that backtracked to empty and
+    // wrongly stripped QUOTED data: URLs too, dropping inline imagery.
+    .replace(/url\(\s*(['"]?)([^)]*?)\1\s*\)/gi, (m, q, inner) =>
+      /^\s*data:/i.test(inner) ? m : 'none');
 }
 function scopeDocCss(css) {
   return stripCssBeacons(css)
