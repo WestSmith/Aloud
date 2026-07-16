@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.6.2">
+<meta name="aloud-version" content="v6.6.3">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1247,7 +1247,12 @@ async function getPdfDoc(file) {
   const lib = window.pdfjsLib || window['pdfjs-dist/build/pdf'];
   if (!lib) throw new Error('PDF library failed to initialize.');
   const buf = await file.arrayBuffer();
-  return { lib, doc: await lib.getDocument({ data: buf }).promise };
+  /* v6.6.3 SECURITY: isEvalSupported:false — the embedded pdf.js 3.11.174 is
+     affected by CVE-2024-4367 (a malicious PDF's font matrix reaches eval()
+     and runs attacker JS in the page). With eval disabled pdf.js takes the
+     safe non-eval font path instead. Do NOT remove this flag if the embedded
+     pdf.js is ever upgraded — it's the documented hardening either way. */
+  return { lib, doc: await lib.getDocument({ data: buf, isEvalSupported: false }).promise };
 }
 
 async function parsePdfText(file) {
@@ -1524,8 +1529,17 @@ async function renderPdfPage(i) {
 
 /* document CSS is written against the page — retarget it at our shadow
    container so :root variables and body rules keep working */
+/* v6.6.3 SECURITY: CSS can fetch too — @import pulls whole stylesheets and
+   url() pulls fonts/backgrounds, either of which beacons an external server
+   the moment a "local" file is opened. Strip both (data: URLs stay: they're
+   self-contained). Applied to <style> blocks AND inline style="" attrs. */
+function stripCssBeacons(css) {
+  return String(css || '')
+    .replace(/@import\b[^;{]*(;|(?=\}))/gi, '')
+    .replace(/url\(\s*(['"]?)(?!\1?\s*data:)[^)]*\)/gi, 'none');
+}
 function scopeDocCss(css) {
-  return css
+  return stripCssBeacons(css)
     .replace(/:root\b/g, ':host')
     .replace(/(^|[\s,{}])html(?=[\s,{.:[>+~)]|$)/gm, '$1.aloud-html-root')
     .replace(/(^|[\s,{}])body(?=[\s,{.:[>+~)]|$)/gm, '$1.aloud-html-root');
@@ -1558,6 +1572,7 @@ function renderHtmlNative(htmlText, opts = {}) {
     for (const a of [...el.attributes]) {
       if (/^on/i.test(a.name)) el.removeAttribute(a.name);
       else if ((a.name === 'href' || a.name === 'src' || a.name === 'xlink:href') && /^\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
+      else if (a.name === 'style' && /url\s*\(/i.test(a.value)) el.setAttribute('style', stripCssBeacons(a.value));   /* v6.6.3: inline-style url() beacons */
     }
   }
 
@@ -1572,15 +1587,12 @@ function renderHtmlNative(htmlText, opts = {}) {
      (except .speaking, which is !important) — so the page looks like itself */
   st.textContent = KARAOKE_SHADOW_CSS + '\n' + scopeDocCss(docStyles);
   shadow.appendChild(st);
-  /* external stylesheets with absolute URLs still work when online */
-  doc.querySelectorAll('link[rel="stylesheet"][href]').forEach(l => {
-    const href = l.getAttribute('href');
-    if (/^https?:\/\//i.test(href)) {
-      const ln = document.createElement('link');
-      ln.rel = 'stylesheet'; ln.href = href;
-      shadow.appendChild(ln);
-    }
-  });
+  /* v6.6.3 SECURITY: external stylesheets are NOT loaded anymore. A "local"
+     HTML file could point <link rel=stylesheet>, @import, or url() at an
+     arbitrary server, so merely OPENING it leaked a request (a tracking
+     beacon that also exposes the reader's IP + reading time). Inline
+     <style> blocks still apply, so documents keep their own look; images
+     in the body remain visible content and still load as before. */
   const wrap = document.createElement('div');
   wrap.className = 'aloud-html-root';
   while (doc.body.firstChild) wrap.appendChild(doc.body.firstChild);
