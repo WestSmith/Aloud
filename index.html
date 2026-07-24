@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.10.0">
+<meta name="aloud-version" content="v6.10.1">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -431,6 +431,12 @@
 
   /* ---------- native HTML view ---------- */
   #content.html-mode { max-width: 920px; font-family: var(--ui-font); }
+  /* Fit width (v6.10.1): drop the reading-column cap so the document reflows
+     into the full window instead of being magnified at the same line length.
+     The side padding goes too — on a phone or an iPad in portrait the column
+     is ALREADY the full window, so without this the button would light up and
+     visibly do nothing at all. */
+  #content.html-mode.fit-wide { max-width: none; padding: 0; }
   .html-host {
     background: #fff; color: #111;
     border-radius: 12px; padding: 26px 26px 34px;
@@ -881,7 +887,7 @@ const S = {
   utterToken: 0,
   boundarySeen: false,
   estRAF: null,
-  kokoro: { tts: null, state: 'idle', progress: 0 },
+  kokoro: { tts: null, state: 'idle', progress: 0, progressAt: 0 },
   audio: null,
   audioPlay: null,     // current neural play: {segs:[{sentIdx,sentStart,t0,starts}], shownAbs, clock, batchUrl?}
   neuralCache: new Map(),
@@ -1627,6 +1633,8 @@ function scopeDocCss(css) {
     .replace(/(^|[\s,{}])body(?=[\s,{.:[>+~)]|$)/gm, '$1.aloud-html-root');
 }
 
+const SVGNS = 'http://www.w3.org/2000/svg';
+
 const KARAOKE_SHADOW_CSS = `
   :host { display: block; }
   .aloud-html-root { line-height: 1.65; -webkit-font-smoothing: antialiased; }
@@ -1635,6 +1643,8 @@ const KARAOKE_SHADOW_CSS = `
   .w:hover { background: rgba(124,108,246,.16); }
   .w.sent-on { background: rgba(124,108,246,.14); }
   .w.speaking { background: #7c6cf6 !important; color: #fff !important; text-shadow: none !important; }
+  /* SVG has no background box: a diagram label marks the spoken word by colour */
+  tspan.w.speaking { background: none !important; fill: #7c6cf6 !important; }
 `;
 
 /* ====================================================================
@@ -1693,6 +1703,7 @@ function ALOUD_LS_SHIM(saved) {
    scripts have already finished building. Serialized with toString(). */
 function ALOUD_FRAME_AGENT(cfg) {
   var CLS = 'aloud-w';
+  var SVGNS = 'http://www.w3.org/2000/svg';
   var els = [], toks = [];
 
   function post(m) { try { parent.postMessage(m, '*'); } catch (e) {} }
@@ -1713,16 +1724,23 @@ function ALOUD_FRAME_AGENT(cfg) {
     if (p.closest('sup,[aria-hidden="true"]')) continue;
     if (p.closest('button,input,[role="button"]')) continue;   // "Mark done" is UI, not prose
     if (cfg.skipCode && p.closest('pre,code,samp,kbd')) continue;
+    /* inside an <svg>, only <text>/<tspan>/<textPath> paint. The rest is
+       metadata (<title>, <desc>), which is not prose to read. */
+    if (p.namespaceURI === SVGNS && !/^(text|tspan|textPath)$/i.test(p.localName)) continue;
     nodes.push(n);
   }
   for (var i = 0; i < nodes.length; i++) {
     var node = nodes[i], parts = node.nodeValue.split(/(\s+)/), frag = document.createDocumentFragment();
+    /* a diagram label needs an SVG <tspan>: an HTML <span> inside <text> is
+       not an SVG text node, so the browser paints nothing and every label in
+       the figure silently disappears */
+    var svg = node.parentNode && node.parentNode.namespaceURI === SVGNS;
     for (var j = 0; j < parts.length; j++) {
       var part = parts[j];
       if (!part) continue;
       if (/^\s+$/.test(part) || /^[.·…]{2,}$/.test(part)) { frag.appendChild(document.createTextNode(part)); continue; }
-      var w = document.createElement('span');
-      w.className = CLS;
+      var w = svg ? document.createElementNS(SVGNS, 'tspan') : document.createElement('span');
+      w.setAttribute('class', CLS);   /* SVG className is a read-only SVGAnimatedString */
       w.textContent = part;
       w.setAttribute('data-w', String(toks.length));
       frag.appendChild(w);
@@ -1738,7 +1756,10 @@ function ALOUD_FRAME_AGENT(cfg) {
     '.' + CLS + '{border-radius:4px;cursor:pointer;padding:0 1px;margin:0 -1px;' +
       '-webkit-box-decoration-break:clone;box-decoration-break:clone}' +
     '.' + CLS + '.sent-on{background:rgba(124,108,246,.14)}' +
-    '.' + CLS + '.speaking{background:#7c6cf6!important;color:#fff!important;text-shadow:none!important}';
+    '.' + CLS + '.speaking{background:#7c6cf6!important;color:#fff!important;text-shadow:none!important}' +
+    /* SVG has no background box, so a diagram label marks the spoken word by
+       colour instead. Weight is left alone: it would reflow the figure. */
+    'tspan.' + CLS + '.speaking{background:none!important;fill:#7c6cf6!important}';
   document.head.appendChild(st);
 
   /* ---- auto-reveal ----------------------------------------------------
@@ -2129,16 +2150,21 @@ function renderHtmlNative(htmlText, opts = {}) {
        same for code when "Skip URLs & code blocks" is on */
     if (p.closest('sup, [aria-hidden="true"]')) continue;
     if (S.skipCode && p.closest('pre, code, samp, kbd')) continue;
+    /* inside an <svg> only text/tspan/textPath paint; the rest is metadata */
+    if (p.namespaceURI === SVGNS && !/^(text|tspan|textPath)$/i.test(p.localName)) continue;
     try { if (p.checkVisibility && !p.checkVisibility()) continue; } catch {}
     const frag = document.createDocumentFragment();
+    /* diagram labels need SVG tspans — an HTML span inside <text> paints
+       nothing, which blanks every label in the figure */
+    const inSvg = p.namespaceURI === SVGNS;
     for (const part of node.nodeValue.split(/(\s+)/)) {
       if (!part) continue;
       /* dot leaders stay visible but are not reading tokens */
       if (/^\s+$/.test(part) || /^[.·…]{2,}$/.test(part)) { frag.appendChild(document.createTextNode(part)); continue; }
-      const w = document.createElement('span');
-      w.className = 'w';
+      const w = inSvg ? document.createElementNS(SVGNS, 'tspan') : document.createElement('span');
+      w.setAttribute('class', 'w');   /* SVG className is read-only */
       w.textContent = part;
-      w.dataset.word = tokens.length;
+      w.setAttribute('data-word', tokens.length);
       frag.appendChild(w);
       tokens.push(part);
       wordEls.push(w);
@@ -2191,6 +2217,7 @@ function resetDocState() {
   }
   content.classList.remove('pdf-mode');
   content.classList.remove('html-mode');
+  content.classList.remove('fit-wide');
   content.style.zoom = '';
   document.body.classList.remove('zoomable');
   if (S.zoom) S.zoom.applied = 1;
@@ -2683,6 +2710,7 @@ function initKokoroWorker() {
     worker.onmessage = (e) => {
       const m = e.data;
       if (m.type === 'progress') {
+        S.kokoro.progressAt = Date.now();          // proof of life for the stall guard
         const pct = Math.round(5 + 92 * (m.loaded / m.total));
         if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}%`, pct); }
       } else if (m.type === 'ready') { ready = true; resolve(); }
@@ -2791,6 +2819,7 @@ async function loadKokoroMainThread() {
     device: cfg.device,
     progress_callback: (p) => {
       if (p.status === 'progress' && p.total) {
+        S.kokoro.progressAt = Date.now();          // proof of life for the stall guard
         const pct = Math.round(5 + 92 * (p.loaded / p.total));
         if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}%`, pct); }
       }
@@ -2804,21 +2833,48 @@ async function loadKokoroMainThread() {
   S.kokoro.tsCap = instrumentKokoroTTS(S.kokoro.tts);
 }
 
+/* Nothing in the load path has a timeout of its own: the module import, the
+   model download and from_pretrained can all stall indefinitely, and a worker
+   the OS kills under memory pressure (an iPad's favourite move) fires no
+   event at all — not even onerror. Any of those left the load promise
+   unsettled forever, so S.kokoro.state stuck on 'loading', the play button
+   pulsed for good, and loadKokoro's own "already loading" guard meant every
+   later tap was a no-op. Only a reload got you out.
+   So: watch for total silence. Every progress tick stamps progressAt, and if
+   nothing at all happens for KOKORO_STALL_MS we fail loudly, which lets the
+   existing catch fall back to the device voice and keep playing. */
+const KOKORO_STALL_MS = 60000;
+function kokoroStallGuard() {
+  return new Promise((_resolve, reject) => {
+    const tick = setInterval(() => {
+      if (S.kokoro.state !== 'loading') { clearInterval(tick); return; }   // settled: stand down
+      if (Date.now() - S.kokoro.progressAt > KOKORO_STALL_MS) {
+        clearInterval(tick);
+        reject(new Error('the neural voice stopped responding while loading'));
+      }
+    }, 5000);
+  });
+}
+
 async function loadKokoro() {
   if (S.kokoro.state === 'ready' || S.kokoro.state === 'loading') return;
   S.kokoro.state = 'loading';
+  S.kokoro.progressAt = Date.now();
   /* crash-loop guard: note that a load is in flight (and how heavy). If the
      tab dies mid-load (phone OOM on a heavy tier), the sentinel survives and
      the next launch falls back to Auto instead of crashing at every boot. */
   store.set('nqLoadGuard', { dtype: kokoroConfig().dtype, at: Date.now() });
   renderKokoroStatus('Loading the Kokoro neural voice engine…', 2);
   try {
-    try {
-      await initKokoroWorker();                   // preferred: off the main thread
-    } catch (workerErr) {
-      console.warn('Kokoro worker unavailable, using main thread', workerErr);
-      await loadKokoroMainThread();
-    }
+    await Promise.race([(async () => {
+      try {
+        await initKokoroWorker();                 // preferred: off the main thread
+      } catch (workerErr) {
+        console.warn('Kokoro worker unavailable, using main thread', workerErr);
+        S.kokoro.progressAt = Date.now();         // fresh start for the guard
+        await loadKokoroMainThread();
+      }
+    })(), kokoroStallGuard()]);
     store.set('nqLoadGuard', null);
     S.kokoro.state = 'ready';
     renderKokoroStatus('✅ Neural voice ready — works offline from now on.', 100);
@@ -2829,7 +2885,11 @@ async function loadKokoro() {
   } catch (err) {
     console.error(err);
     store.set('nqLoadGuard', null);   // a caught failure isn't a crash — don't trip the guard
+    /* a stalled load leaves a worker still chewing on a download; drop it so a
+       retry starts clean (this also resets state, so set 'error' after) */
+    try { resetNeuralEngine(); } catch {}
     S.kokoro.state = 'error';
+    $('btn-play').classList.remove('loading');   // stop the pulse: the tap is answered, one way or the other
     renderKokoroStatus('⚠️ Could not load the neural engine (it needs an internet connection the first time, and a fairly recent browser). Device voices still work.', 0);
     if (S.engine === 'neural') setEngine('device');
   }
@@ -3881,9 +3941,13 @@ function pdfBaseSize() {
 function effectiveZoom() {
   if (S.zoom.fit === 'width') {
     if (S.mode === 'pdf') return clampZoom((window.innerWidth - 28) / pdfBaseSize().w);
-    /* html view is capped at 920px — fit-width stretches it to the window.
-       Never below 1: narrower windows already use the full width. */
-    return clampZoom(Math.max(1, (window.innerWidth - 20) / 920));
+    /* v6.10.1: HTML reflows, so fit-width WIDENS the column (applyZoom drops
+       the 920px cap) instead of magnifying it. Scaling was the wrong tool
+       twice over: it gave bigger text at the same words-per-line, and on any
+       window under 920px — an iPad in portrait — Math.max(1, …) pinned it to
+       1, so the button lit up and absolutely nothing happened. Zoom stays
+       whatever the reader set with +/−. */
+    return clampZoom(S.zoom.pct);
   }
   if (S.zoom.fit === 'page' && S.mode === 'pdf') {
     const b = pdfBaseSize();
@@ -3901,6 +3965,8 @@ function applyZoom(save = true) {
   const z = effectiveZoom();
   S.zoom.applied = z;
   content.style.zoom = Math.abs(z - 1) < 0.002 ? '' : String(z);
+  /* fit-width for HTML: let the document reflow into the whole window */
+  content.classList.toggle('fit-wide', S.mode === 'html' && S.zoom.fit === 'width');
   $('zoom-pct').textContent = Math.round(z * 100) + '%';
   $('zoom-fitw').classList.toggle('on', S.zoom.fit === 'width');
   $('zoom-fitp').classList.toggle('on', S.zoom.fit === 'page');
@@ -3926,8 +3992,11 @@ function applyZoom(save = true) {
 
 function zoomTo(pct) { S.zoom.fit = 'none'; S.zoom.pct = clampZoom(pct); applyZoom(); }
 function zoomToggleFit(mode) {
+  const wasFit = S.zoom.fit;
   S.zoom.fit = S.zoom.fit === mode ? 'none' : mode;
-  if (S.zoom.fit === 'none') S.zoom.pct = 1;   // un-fitting returns to 100%
+  /* un-fitting returns to 100% — except HTML fit-width, which is now a width
+     change rather than a scale, so leaving it must not discard the +/− zoom */
+  if (S.zoom.fit === 'none' && !(S.mode === 'html' && wasFit === 'width')) S.zoom.pct = 1;
   applyZoom();
 }
 $('zoom-in').addEventListener('click', () => zoomTo(S.zoom.applied * ZOOM_STEP));
