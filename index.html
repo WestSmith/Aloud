@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.6.4">
+<meta name="aloud-version" content="v6.7.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -907,6 +907,7 @@ function coreOf(tok) {
 const URL_TOKEN_RE = /(?:https?:\/\/|www\.)\S/i;
 function spokenFor(tok) {
   if (S.skipCode && URL_TOKEN_RE.test(tok)) return '';   // don't read web addresses aloud
+  if (/^[.·…]{2,}$/.test(tok)) return '';                // dot leaders are layout, not speech
   const lower = tok.toLowerCase();
   if (BUILTIN_SPOKEN[lower]) return BUILTIN_SPOKEN[lower];
   const { pre, core, post } = coreOf(tok);
@@ -1056,9 +1057,22 @@ function wordCostMs(spokenTok) {
   }
   return base;
 }
+/* tokens that END in '.' but are not sentence stops: citation abbreviations
+   ("para.", "v.", "R.S.O."), initials ("S."), spelled acronyms ("U.S.C."),
+   and TOC dot leaders ("........"). The voice does not pause at these, so
+   predicting a pause here used to hand the aligner a phantom anchor that
+   warped the whole sentence's karaoke map on legal documents. */
+function falseStop(tok) {
+  const bare = tok.replace(/["”'’)\]]+$/, '');
+  return ABBREV.test(bare)
+    || /(^|[([“"'‘])\p{Lu}\.$/u.test(bare)     // initial: "S." "(S."
+    || /^(?:\p{Lu}\.){2,}$/u.test(bare)        // dotted acronym: "U.S.C."
+    || /^[.·…]+$/.test(bare);                  // dots only
+}
 function pauseAfterMs(tok, isLast) {
   if (isLast) return 180;
-  if (/[.!?…]["”'’)\]]*$/.test(tok)) return 330;
+  if (/^[.·…]{2,}$/.test(tok)) return 0;                              // dot leader
+  if (/[.!?…]["”'’)\]]*$/.test(tok)) return falseStop(tok) ? 40 : 330; // 40 stays below the pin threshold
   if (/[:;—–]["”'’)\]]*$/.test(tok)) return 230;
   if (/,["”'’)\]]*$/.test(tok)) return 165;
   return 0;
@@ -1297,7 +1311,12 @@ async function parsePdfText(file) {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].text.trim();
       if (!line) { flush(); continue; }
-      if (para && /[.!?:”"']$/.test(para.trim()) && /^[A-Z0-9“"']/.test(line) && i > 0 && (lines[i - 1].y - lines[i].y) > lines[i].h * 1.7) flush();
+      /* paragraph break on a big line gap — but not after an abbreviation
+         ("Blencoe v." at line end). Court documents are double-spaced, so
+         EVERY line clears the gap test and a mid-citation line ending used
+         to get flushed into its own paragraph (and thus a fake sentence). */
+      const lastTok = para.trim().split(/\s+/).pop() || '';
+      if (para && /[.!?:”"']$/.test(para.trim()) && !falseStop(lastTok) && /^[A-Z0-9“"']/.test(line) && i > 0 && (lines[i - 1].y - lines[i].y) > lines[i].h * 1.7) flush();
       if (/-$/.test(para) && /^[a-z]/.test(line)) para = para.replace(/-$/, '') + line;
       else para += (para ? ' ' : '') + line;
     }
@@ -1399,7 +1418,8 @@ async function openPdfNative(file, opts = {}) {
       } else {
         for (const part of run.str.split(/(\s+)/)) {
           if (!part) continue;
-          if (/^\s+$/.test(part)) { span.appendChild(document.createTextNode(part)); continue; }
+          /* dot leaders stay visible on the page but are not reading tokens */
+          if (/^\s+$/.test(part) || /^[.·…]{2,}$/.test(part)) { span.appendChild(document.createTextNode(part)); continue; }
           const w = document.createElement('span');
           w.className = 'w';
           w.textContent = part;
@@ -1429,8 +1449,12 @@ async function openPdfNative(file, opts = {}) {
   finishOpen(opts);
 }
 
-/* sentence segmentation over a flat token stream */
-const ABBREV = /\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e|Fig|No|Vol|Ch|pp?|approx|Inc|Ltd|Co|Corp|U\.S|U\.K)\.$/i;
+/* sentence segmentation over a flat token stream.
+   The list includes legal-citation abbreviations (para., ss., cl., R.S.O.,
+   O. Reg., "Ahmed v. King"…) — factums and judgments are dense with dotted
+   tokens that are NOT sentence ends, and every miss both fragments the
+   audio and fabricates a pause anchor for the karaoke aligner. */
+const ABBREV = /\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|v|etc|e\.g|i\.e|Fig|No|Nos|Vol|Ch|pp?|para|paras|approx|Inc|Ltd|Co|Corp|U\.S|U\.K|s|ss|sub|subs|cl|art|arts|Sch|Sched|Reg|Regs|Sec|Secs|Div|Dept|Hon|Ont|Alta|Sask|Que|R\.S\.[A-Z]|S\.[A-Z]|O\.\s?Reg|aff'?d|rev'?d|cert)\.$/i;
 function buildFromTokenStream(tokens, wordEls) {
   let start = 0;
   const pushSent = (end) => {
@@ -1625,7 +1649,8 @@ function renderHtmlNative(htmlText, opts = {}) {
     const frag = document.createDocumentFragment();
     for (const part of node.nodeValue.split(/(\s+)/)) {
       if (!part) continue;
-      if (/^\s+$/.test(part)) { frag.appendChild(document.createTextNode(part)); continue; }
+      /* dot leaders stay visible but are not reading tokens */
+      if (/^\s+$/.test(part) || /^[.·…]{2,}$/.test(part)) { frag.appendChild(document.createTextNode(part)); continue; }
       const w = document.createElement('span');
       w.className = 'w';
       w.textContent = part;
@@ -1683,6 +1708,13 @@ function resetDocState() {
   S.chapters = [];
 }
 
+/* TOC dot leaders ("OVERVIEW ......... 26", spaced or not) are layout, not
+   prose — drop runs of 4+ dots so they're neither shown as words nor voiced.
+   3-dot ellipses (quoted omissions, common in factums) are left alone. */
+function stripDotLeaders(text) {
+  return text.replace(/(?:[.·]\s+){3,}[.·]|\.{4,}/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 function renderFlow(blocks, chapters, opts = {}) {
   content.innerHTML = '';
   resetDocState();
@@ -1700,7 +1732,8 @@ function renderFlow(blocks, chapters, opts = {}) {
     }
     const el = document.createElement(block.tag === 'li' ? 'li' : block.tag);
     el.dataset.block = bi;
-    for (const sentText of splitSentences(block.text)) {
+    for (const sentText of splitSentences(stripDotLeaders(block.text))) {
+      if (!sentText) continue;
       const sentIdx = S.sentences.length;
       const sentSpan = document.createElement('span');
       sentSpan.className = 'sent';
@@ -2255,22 +2288,46 @@ function alignTimeline(displayTokens, wave, durationSec) {
   const segStartT = [speechStart];
   const segEndT = [];
 
-  /* pin punctuation pauses in the model to real pauses in the audio */
+  /* pin punctuation pauses in the model to real pauses in the audio.
+     v6.7.0: globally-optimal monotonic matching (small DP) instead of the
+     old greedy first-fit. Greedy let one phantom anchor (an abbreviation
+     dot the voice doesn't pause at) steal a real pause belonging to a
+     later stop, which shifted every word after it. The DP scores every
+     monotonic pairing and keeps the best total agreement; anchors that
+     match nothing simply interpolate instead of forcing a bad pin. */
   const punct = [];
   tl.spans.forEach((sp, i) => { if (sp.pause >= 150 && i < displayTokens.length - 1) punct.push({ i, frac: sp.t1 / tl.total }); });
   const usable = wave.pauses.filter(p => p.a > speechStart + 0.15 && p.b < speechEnd - 0.15);
   let pins = [];
   if (punct.length && usable.length) {
-    let ui = 0;
-    for (const pk of punct) {
-      let best = -1, bd = 0.12;
-      for (let k = ui; k < usable.length; k++) {
-        const fr = ((usable[k].a + usable[k].b) / 2 - speechStart) / (speechEnd - speechStart);
-        const d = Math.abs(fr - pk.frac);
-        if (d < bd) { bd = d; best = k; }
+    const TOL = 0.13;
+    const span = Math.max(0.001, speechEnd - speechStart);
+    const uf = usable.map(u => ((u.a + u.b) / 2 - speechStart) / span);
+    const nP = punct.length, nU = usable.length;
+    /* pair quality: closeness in relative position, weighted up for longer
+       (more reliable) silences; 0 = pairing not allowed */
+    const score = (i, k) => {
+      const d = Math.abs(uf[k] - punct[i].frac);
+      if (d >= TOL) return 0;
+      const len = usable[k].b - usable[k].a;
+      return (1 - d / TOL) * (0.6 + 0.4 * Math.min(1, len / 0.3));
+    };
+    const dp = Array.from({ length: nP + 1 }, () => new Float64Array(nU + 1));
+    const take = Array.from({ length: nP + 1 }, () => new Uint8Array(nU + 1));
+    for (let i = 1; i <= nP; i++) {
+      for (let k = 1; k <= nU; k++) {
+        let best = Math.max(dp[i - 1][k], dp[i][k - 1]), t = 0;
+        const sc = score(i - 1, k - 1);
+        if (sc > 0 && dp[i - 1][k - 1] + sc > best) { best = dp[i - 1][k - 1] + sc; t = 1; }
+        dp[i][k] = best; take[i][k] = t;
       }
-      if (best >= 0) { pins.push({ word: pk.i, pause: usable[best] }); ui = best + 1; }
     }
+    for (let i = nP, k = nU; i > 0 && k > 0; ) {
+      if (take[i][k]) { pins.push({ word: punct[i - 1].i, pause: usable[k - 1] }); i--; k--; }
+      else if (dp[i - 1][k] >= dp[i][k - 1]) i--;
+      else k--;
+    }
+    pins.reverse();
   }
   for (const pin of pins) {
     segEndsMs.push(tl.spans[pin.word].t1);
@@ -2370,7 +2427,11 @@ async function generateNeuralNow(sentIdx, key) {
   const tokens = [];
   for (let i = sent.start; i < sent.end; i++) tokens.push(S.words[i].text);
   const spokenText = tokens.map(spokenFor).join(' ');
-  try { await ensurePhonemes(tokens, 250); } catch {}   // don't stall generation waiting on the G2P download
+  /* wait for real G2P before timing the FIRST sentences — the promise settles
+     the moment the module is ready (or errors), so this only ever costs time
+     while the one-time download is genuinely in flight. 250ms used to lose
+     the race on first run and silently degrade timing to syllable guesses. */
+  try { await ensurePhonemes(tokens, 4000); } catch {}
   const raw = S.kokoro.workerGenerate
     ? await S.kokoro.workerGenerate(spokenText, S.neuralVoice)
     : await S.kokoro.tts.generate(spokenText, { voice: S.neuralVoice, speed: 1 });
