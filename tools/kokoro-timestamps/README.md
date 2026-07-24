@@ -173,8 +173,17 @@ the duration tensor can't be exposed; it should not be needed.
     worker reports nIds so a chunk that still comes back 512 is split in
     half and redone. Verified on the real backsheet blocks: 25.4s of
     truncated audio became 56.5s complete, 3/3 chunks exact.
-- Remaining: in-browser/device testing per "Acceptance checks" above
-  (all four tiers; WebGPU + wasm + iPhone q4), and the owner should
-  REVOKE the HF token now that the upload is done.
+  - v6.9.0: honest tier labels (measured downloads: q4 305MB, q4f16
+    155MB, q8 92MB, fp32 326MB — Lite downloads MORE than Standard but
+    is the phone-safe tier), and an opt-in "Show timing accuracy"
+    Settings toggle that badges the playing sentence exact / mixed /
+    estimated (entry.timing from generateNeuralNow's per-chunk result).
+- Owner tested on the factum through three feedback rounds (strict-guard
+  fallbacks → email expansion → context-window truncation) and signed
+  off; merged to main at their direction. Tier sweep on desktop and
+  iPhone was deferred by the owner — if a phone report comes in, start
+  at kokoroConfig()/the crash-loop guard.
+- The owner should REVOKE the HF token now that the upload is done
+  (reminded three times; not yet confirmed).
 - The owner is not a programmer: do every step for them, explain in
   plain language, and confirm before anything user-visible goes live.

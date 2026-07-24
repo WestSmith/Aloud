@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.8.3">
+<meta name="aloud-version" content="v6.9.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -357,6 +357,12 @@
   }
   #kokoro-float .bar { height: 4px; border-radius: 99px; background: var(--border); margin-top: 7px; overflow: hidden; }
   #kokoro-float .bar > div { height: 100%; width: 0%; background: linear-gradient(90deg,#8d7dff,#5f8bff); transition: width .2s; }
+  /* opt-in debug: which timing mode the playing sentence used */
+  #timing-badge {
+    position: fixed; right: 10px; bottom: calc(128px + env(safe-area-inset-bottom)); z-index: 78;
+    background: var(--bg-elev2); border: 1px solid var(--border); border-radius: 99px;
+    padding: 4px 10px; font-size: 11.5px; color: var(--text-dim); display: none;
+  }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
   #loading-overlay {
@@ -694,8 +700,12 @@
     <div class="switch on" id="skipcode-switch"></div>
   </div>
   <div class="set-row" style="display:block">
-    <div class="lbl">✨ Neural voice quality<small>Bigger models sound better but use more memory. Auto picks a safe size for your device — phones/iPads get the light model. Standard/High may crash on phones. Lite+ is an experimental variant that may use less memory than Lite.</small></div>
+    <div class="lbl">✨ Neural voice quality<small>Sizes are the one-time download for each tier. Auto picks a safe model for your device — phones/iPads get Lite, which downloads more than Standard but is the gentlest on memory while playing. Standard/High may crash on phones. Lite+ is an experimental middle ground.</small></div>
     <div class="chips" id="nq-chips" style="margin-top:10px"></div>
+  </div>
+  <div class="set-row">
+    <div class="lbl">Show timing accuracy<small>While the neural voice plays, show whether the karaoke timing is exact (read from the voice model) or estimated</small></div>
+    <div class="switch" id="timingdebug-switch"></div>
   </div>
   <div class="set-row">
     <div class="lbl">Read small print (PDF)<small>Footnotes, margin notes, superscript markers</small></div>
@@ -731,6 +741,7 @@
 
 <div id="toast"></div>
 <div id="kokoro-float"><span id="kokoro-float-text"></span><div class="bar"><div id="kokoro-float-bar"></div></div></div>
+<div id="timing-badge"></div>
 <div id="loading-overlay"><div><div class="spin"></div><div class="msg" id="loading-msg">Opening…</div></div></div>
 
 <script>/* --- inlined: JSZip 3.10.1 (MIT) --- */
@@ -875,6 +886,7 @@ const S = {
   breatherToken: 0,                     // cancels a pending inter-paragraph gap
   skim: store.get('skim', false),       // read only the first sentence of each paragraph
   skipCode: store.get('skipCode', true),// don't voice URLs / code blocks
+  timingDebug: store.get('timingDebug', false), // badge: exact vs estimated karaoke timing
   sleep: { mode: null, until: 0, iv: null, preset: 0 },   // sleep timer
   costCum: null, costGen: 0,            // per-sentence cumulative speech-time (honest ETA)
   rsvp: {
@@ -2225,7 +2237,8 @@ function initKokoroWorker() {
 
 /* Pick the model precision. The user can force a tier in Settings ('lite' q4 /
    'standard' q8 / 'high' fp32); 'auto' (default) chooses a safe size per device:
-   - Phones/iPads: q4 (~40MB) on wasm. Never WebGPU here — iOS WebGPU is immature
+   - Phones/iPads: q4 on wasm (~305MB download, but the gentlest runtime
+     memory — 4-bit weights). Never WebGPU here — iOS WebGPU is immature
      and larger dtypes overrun iOS's per-tab memory and crash the app.
    - Desktop with WebGPU: full fp32. Desktop without: q8 on wasm. */
 const NQ_DTYPE = { lite: 'q4', liteplus: 'q4f16', standard: 'q8', high: 'fp32' };
@@ -2250,13 +2263,20 @@ function resetNeuralEngine() {
   try { S.kokoro.worker?.terminate(); } catch {}
   S.kokoro.worker = null; S.kokoro.workerGenerate = null; S.kokoro.rejectPending = null;
   S.kokoro.tts = null; S.kokoro.tsCap = null; S.kokoro.state = 'idle'; S.kokoro.progress = 0;
+  try { hideTimingBadge(); } catch {}
   S.neuralGenToken++;
   S.neuralPending.clear();
   genTail = Promise.resolve();
   clearNeuralCache();
 }
 
-const NQ_PRESETS = [['auto', 'Auto'], ['lite', 'Lite · 40MB'], ['liteplus', 'Lite+ · q4f16 · exp.'], ['standard', 'Standard · 82MB'], ['high', 'High · 330MB']];
+/* download sizes measured from the hosted repo: q4 305MB, q4f16 155MB,
+   q8 92MB, fp32 326MB. Lite's download is BIGGER than Standard's — q4
+   only packs the matmul weights to 4-bit and keeps the rest fp32 — but
+   it's the tier that survives phone memory limits, which is why phones
+   get it. Label the real numbers; a "40MB" promise before a 305MB
+   download made the progress bar look broken. */
+const NQ_PRESETS = [['auto', 'Auto'], ['lite', 'Lite · 305MB'], ['liteplus', 'Lite+ · 155MB · exp.'], ['standard', 'Standard · 92MB'], ['high', 'High · 326MB']];
 function setNeuralQuality(q) {
   if (q === (S.neuralQuality || 'auto')) return;
   S.neuralQuality = q; store.set('neuralQuality', q);
@@ -2749,7 +2769,7 @@ async function generateNeuralNow(sentIdx, key) {
     for (const p of parts) { audio.set(p.audio, off); off += p.audio.length; }
   }
   const starts = new Array(tokens.length);
-  let off = 0;
+  let off = 0, exactChunks = 0, spokenChunks = 0;
   for (const p of parts) {
     const offSec = off / sr;
     const dSec = p.audio.length / sr;
@@ -2757,15 +2777,18 @@ async function generateNeuralNow(sentIdx, key) {
     let cs = null;
     if (p.silent) cs = ctoks.map(() => 0);
     else {
+      spokenChunks++;
       cs = p.pwords ? alignExactStarts(ctoks, p.pwords, dSec) : null;
-      if (!cs) cs = alignTimeline(ctoks, analyzeWave(p.audio, sr), dSec);
+      if (cs) exactChunks++;
+      else cs = alignTimeline(ctoks, analyzeWave(p.audio, sr), dSec);
     }
     for (let k = 0; k < ctoks.length; k++) starts[p.a + k] = cs[k] + offSec;
     off += p.audio.length;
   }
   const durationSec = total / sr;
   const url = audioBlobParts({ audio, sampling_rate: sr });
-  const entry = { url, starts, durationSec };
+  const timing = !spokenChunks || exactChunks === spokenChunks ? 'exact' : exactChunks ? 'mixed' : 'estimated';
+  const entry = { url, starts, durationSec, timing };
   S.neuralCache.set(key, entry);
   if (S.neuralCache.size > 24) {
     const oldest = S.neuralCache.keys().next().value;
@@ -2912,6 +2935,7 @@ async function speakNeural(sentIdx, fromWord) {
   }
   try { await na.play(); } catch (e) { console.warn(e); }
   highlightWord(startFrom);
+  showTimingBadge(entry.timing);
 
   neuralPump();   // keep the runway of pre-generated sentences full
 }
@@ -2995,6 +3019,8 @@ async function speakNeuralStitched(run) {
   na.src = url;
   na.playbackRate = S.rate;
   setSentence(run[0]);
+  const tms = entries.map(en => en.timing || 'estimated');
+  showTimingBadge(tms.every(t => t === 'exact') ? 'exact' : tms.every(t => t === 'estimated') ? 'estimated' : 'mixed');
   try { await na.play(); } catch (e) { console.warn(e); }
   neuralPump();   // keep generating ahead while the batch plays
 }
@@ -3649,6 +3675,12 @@ $('skipcode-switch').addEventListener('click', e => {
   store.set('skipCode', S.skipCode);
   try { clearNeuralCache(); } catch {}   // spoken text changed — regenerate audio
 });
+$('timingdebug-switch').addEventListener('click', e => {
+  S.timingDebug = !S.timingDebug;
+  e.target.classList.toggle('on', S.timingDebug);
+  store.set('timingDebug', S.timingDebug);
+  if (!S.timingDebug) hideTimingBadge();
+});
 $('smallprint-switch').addEventListener('click', async e => {
   const on = !store.get('pdfSmallPrint', false);
   store.set('pdfSmallPrint', on);
@@ -3718,6 +3750,18 @@ function renderKokoroStatus(text, pct) {
 }
 function hideKokoroStatus() { $('kokoro-status').style.display = 'none'; $('kokoro-float').style.display = 'none'; }
 
+/* opt-in Settings toggle: label the playing sentence with its timing mode
+   ('exact' = word starts read from the voice model's durations,
+   'estimated' = silence-pinned prediction — the stock-model/unmappable
+   fallback; 'mixed' = a long chunked sentence used both) */
+function showTimingBadge(timing) {
+  const el = $('timing-badge');
+  if (!S.timingDebug || !timing) { el.style.display = 'none'; return; }
+  el.textContent = timing === 'exact' ? '⏱ timing: exact' : timing === 'mixed' ? '⏱ timing: mixed' : '⏱ timing: estimated';
+  el.style.display = 'block';
+}
+function hideTimingBadge() { $('timing-badge').style.display = 'none'; }
+
 function avatarColor(i) {
   const cols = ['#8d7dff', '#5f8bff', '#4ecdc4', '#e78c5a', '#e0669d', '#7a9e5f', '#c96bd6', '#3aa0c9'];
   return cols[i % cols.length];
@@ -3750,7 +3794,7 @@ function renderVoiceList() {
       list.appendChild(b);
     });
   } else {
-    note.textContent = 'Kokoro-82M — an open-source (Apache-2.0) neural voice that runs entirely in your browser. One-time ~90 MB download, then it works offline. Karaoke timing is anchored to the audio itself and stays locked at any speed, up to 4×.';
+    note.textContent = 'Kokoro-82M — an open-source (Apache-2.0) neural voice that runs entirely in your browser. One-time download (92–326 MB depending on the quality tier in Settings), then it works offline. Karaoke timing is read directly from the voice model and stays locked at any speed, up to 4×.';
     if (S.kokoro.state === 'loading') renderKokoroStatus($('kokoro-status-text').textContent || 'Loading…', S.kokoro.progress);
     KOKORO_VOICES.forEach(v => {
       const b = document.createElement('button');
@@ -3789,6 +3833,7 @@ if (!store.get('autoScroll', true)) $('autoscroll-switch').classList.remove('on'
 renderNeuralQuality();
 if (store.get('skim', false)) $('skim-switch').classList.add('on');
 if (!store.get('skipCode', true)) $('skipcode-switch').classList.remove('on');
+if (store.get('timingDebug', false)) $('timingdebug-switch').classList.add('on');
 S.autoScroll = store.get('autoScroll', true);
 if (!store.get('sentHl', true)) $('senthl-switch').classList.remove('on');
 S.sentHl = store.get('sentHl', true);
