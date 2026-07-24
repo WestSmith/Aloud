@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.8.0">
+<meta name="aloud-version" content="v6.8.1">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -344,6 +344,19 @@
     box-shadow: var(--shadow); line-height: 1.45;
     opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s;
   }
+  /* neural-model download progress, visible from ANY screen — the copy of
+     this inside the voice sheet is invisible once the sheet is closed, and
+     a silent multi-hundred-MB download reads as "the app hung" */
+  #kokoro-float {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(172px + env(safe-area-inset-bottom)); z-index: 79;
+    background: var(--bg-elev2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 13px;
+    padding: 10px 14px; font-size: 13px; max-width: min(440px, 88vw);
+    box-shadow: var(--shadow); line-height: 1.4; display: none;
+  }
+  #kokoro-float .bar { height: 4px; border-radius: 99px; background: var(--border); margin-top: 7px; overflow: hidden; }
+  #kokoro-float .bar > div { height: 100%; width: 0%; background: linear-gradient(90deg,#8d7dff,#5f8bff); transition: width .2s; }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
   #loading-overlay {
@@ -717,6 +730,7 @@
 </div>
 
 <div id="toast"></div>
+<div id="kokoro-float"><span id="kokoro-float-text"></span><div class="bar"><div id="kokoro-float-bar"></div></div></div>
 <div id="loading-overlay"><div><div class="spin"></div><div class="msg" id="loading-msg">Opening…</div></div></div>
 
 <script>/* --- inlined: JSZip 3.10.1 (MIT) --- */
@@ -2069,36 +2083,42 @@ function clearNeuralCache() {
 const KOKORO_MODEL = 'shawnahmed/Kokoro-82M-v1.0-ONNX-timestamped';
 const KOKORO_MODEL_FALLBACK = 'onnx-community/Kokoro-82M-v1.0-ONNX';
 
-/* exact word-start times (sec) from the model's own durations. ids/dur are
-   per input token including the $ padding at both ends; spaceId tokens mark
-   word boundaries in the phoneme stream. Self-calibrating: samples-per-frame
-   comes from the audio length, so no magic constants — and generation is at
-   1×, so the times hold at every playbackRate. Shared by the worker (via
-   toString() below) and the main-thread fallback engine. */
-function kokoroWordStarts(ids, dur, spaceId, audioLen, sr) {
-  if (!ids || !dur || ids.length !== dur.length || ids.length < 3) return null;
+/* the spoken words of the phoneme stream, each with its exact onset time
+   (sec) read off the model's own durations. ids/dur are per input token
+   including the $ padding at both ends; idChar maps token id → phoneme
+   char, so spaces split words and punctuation survives for anchoring.
+   Self-calibrating: samples-per-frame comes from the audio length, so no
+   magic constants — and generation is at 1×, so the times hold at every
+   playbackRate. Shared by the worker (via toString() below) and the
+   main-thread fallback engine. */
+function kokoroSpokenWords(idChar, ids, dur, audioLen, sr) {
+  if (!idChar || !ids || !dur || ids.length !== dur.length || ids.length < 3) return null;
   let total = 0;
   for (let k = 0; k < dur.length; k++) total += dur[k];
   if (!(total > 0) || !(audioLen > 0)) return null;
   const spf = audioLen / total;              // samples per duration frame
-  const starts = [];
+  const words = [];
   let acc = dur[0] || 0;                     // leading $ = lead-in silence
-  let boundary = true;                       // next phoneme token opens a word
+  let cur = null;
   for (let k = 1; k < ids.length - 1; k++) {
-    if (ids[k] === spaceId) boundary = true;
-    else if (boundary) { starts.push((acc * spf) / sr); boundary = false; }
+    const ch = idChar[ids[k]];
+    if (ch === ' ' || ch == null) cur = null;
+    else {
+      if (!cur) { cur = { t: (acc * spf) / sr, ph: '' }; words.push(cur); }
+      cur.ph += ch;
+    }
     acc += dur[k];
   }
-  return starts.length ? starts : null;
+  return words.length ? words : null;
 }
 
 /* kokoro-js's generate() destructures only { waveform } from the model call,
    silently dropping the patched export's pred_dur. Wrap the model so each
-   call also captures (input ids, per-token durations); probe the tokenizer
-   for the space token id that separates words. On the stock model there is
-   no pred_dur and the capture simply stays null. */
+   call also captures (input ids, per-token durations), and lift the id→char
+   table out of the tokenizer's vocab so ids can be read back as phoneme
+   text. On the stock model there is no pred_dur and the capture stays null. */
 function instrumentKokoroTTS(tts) {
-  const st = { spaceId: -1, cap: null };
+  const st = { idChar: null, cap: null };
   try {
     const inner = tts.model;
     tts.model = async (inputs) => {
@@ -2108,8 +2128,11 @@ function instrumentKokoroTTS(tts) {
         : null;
       return out;
     };
-    const pd = Array.from(tts.tokenizer('a a', { truncation: true }).input_ids.data, Number);
-    st.spaceId = pd.length === 5 ? pd[2] : -1;   // [$, a, ␣, a, $]
+    const v = tts.tokenizer && tts.tokenizer.model && tts.tokenizer.model.vocab;
+    if (Array.isArray(v)) st.idChar = v;                                   // id-indexed
+    else if (v instanceof Map) { st.idChar = []; v.forEach((id, ch) => { st.idChar[id] = ch; }); }
+    else if (v && typeof v === 'object') { st.idChar = []; for (const ch of Object.keys(v)) st.idChar[v[ch]] = ch; }
+    if (st.idChar && st.idChar.indexOf(' ') < 0) st.idChar = null;         // sanity: a vocab with no space can't split words
   } catch {}
   return st;
 }
@@ -2118,8 +2141,8 @@ function instrumentKokoroTTS(tts) {
    main-thread inference was what froze the karaoke and made it "sprint" to
    catch up afterwards */
 const KOKORO_WORKER_SRC = `
-let tts = null, ts = { spaceId: -1, cap: null };
-${kokoroWordStarts.toString()}
+let tts = null, ts = { idChar: null, cap: null };
+${kokoroSpokenWords.toString()}
 ${instrumentKokoroTTS.toString()}
 self.onmessage = async (e) => {
   const m = e.data;
@@ -2142,10 +2165,10 @@ self.onmessage = async (e) => {
     } else if (m.type === 'generate') {
       ts.cap = null;
       const raw = await tts.generate(m.text, { voice: m.voice, speed: 1 });
-      const starts = (ts.cap && ts.spaceId >= 0)
-        ? kokoroWordStarts(ts.cap.ids, ts.cap.dur, ts.spaceId, raw.audio.length, raw.sampling_rate)
+      const pwords = ts.cap
+        ? kokoroSpokenWords(ts.idChar, ts.cap.ids, ts.cap.dur, raw.audio.length, raw.sampling_rate)
         : null;
-      self.postMessage({ type: 'result', id: m.id, audio: raw.audio, sr: raw.sampling_rate, starts }, [raw.audio.buffer]);
+      self.postMessage({ type: 'result', id: m.id, audio: raw.audio, sr: raw.sampling_rate, pwords }, [raw.audio.buffer]);
     }
   } catch (err) {
     self.postMessage({ type: m.type === 'init' ? 'initerror' : 'error', id: m.id, message: String((err && err.message) || err) });
@@ -2179,7 +2202,7 @@ function initKokoroWorker() {
         if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}%`, pct); }
       } else if (m.type === 'ready') { ready = true; resolve(); }
       else if (m.type === 'initerror') { if (!ready) fail(new Error(m.message)); }
-      else if (m.type === 'result') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ audio: m.audio, sampling_rate: m.sr, starts: m.starts || null }); } }
+      else if (m.type === 'result') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ audio: m.audio, sampling_rate: m.sr, pwords: m.pwords || null }); } }
       else if (m.type === 'error') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.reject(new Error(m.message)); } }
     };
     S.kokoro.worker = worker;
@@ -2440,6 +2463,98 @@ function alignTimeline(displayTokens, wave, durationSec) {
   return starts;
 }
 
+/* Exact per-word timeline from the model's own durations (patched export).
+   pwords are the spoken words of the phoneme stream, each with its exact
+   onset time. They rarely map 1:1 onto display tokens: kokoro-js's text
+   normalization expands numbers, currency and dates ("$5.30" → "5 dollars
+   and 30 cents") — which is most sentences of a citation-heavy document,
+   the very place estimation struggles. So align monotonically instead of
+   requiring equal counts:
+   - a token whose spoken form has no digits/currency consumes exactly its
+     word count (nothing in the normalizer splits plain words);
+   - digit/currency tokens may absorb extra spoken words;
+   - trailing-punctuation agreement anchors the pairing (the phonemizer
+     passes , . ; : ! ? through verbatim);
+   - silent tokens (dot leaders, skipped URLs) consume nothing;
+   - stray punctuation-only spoken words can be skipped.
+   Every display token's start is then the exact onset of its first spoken
+   word — sample-accurate even when a citation expands to many words.
+   Returns null when no confident alignment exists (caller falls back to
+   the silence-pinned aligner). */
+function alignExactStarts(displayTokens, pwords, durationSec) {
+  const n = displayTokens.length, m = pwords ? pwords.length : 0;
+  if (!n || !m) return null;
+  const exp = displayTokens.map(t => {
+    const parts = spokenFor(t).trim().split(/\s+/).filter(Boolean);
+    return { count: parts.length, flex: parts.some(w => /[\d$£]/.test(w)) };
+  });
+  const PUNCT = ',.;:!?…';
+  const tailOf = s => {
+    const t = String(s).replace(/[«»“”"'’‘)(\][}{]+$/u, '');
+    const c = t.slice(-1);
+    return PUNCT.includes(c) ? c : '';
+  };
+  const dTail = displayTokens.map(t => tailOf(spokenFor(t)));
+  const pTail = pwords.map(w => tailOf(w.ph));
+  const pOnly = pwords.map(w => !/[\p{L}\p{N}]/u.test(w.ph));
+  const FLEX_CAP = 40, BIG = 1e9;
+  /* dp[i][j]: best cost mapping the first i tokens onto the first j spoken
+     words. prevJ = j before token i's group; gs = index of the group's
+     first spoken word (-1 for silent tokens), kept separately so skipped
+     trailing punctuation doesn't shift a group's start. */
+  const dp = [], prevJ = [], gs = [];
+  for (let i = 0; i <= n; i++) {
+    dp.push(new Float64Array(m + 1).fill(BIG));
+    prevJ.push(new Int32Array(m + 1).fill(-1));
+    gs.push(new Int32Array(m + 1).fill(-1));
+  }
+  dp[0][0] = 0;
+  for (let j = 1; j <= m; j++)
+    if (pOnly[j - 1] && dp[0][j - 1] < BIG) dp[0][j] = dp[0][j - 1] + 0.02;
+  for (let i = 1; i <= n; i++) {
+    const e = exp[i - 1];
+    for (let j = 0; j <= m; j++) {
+      const base = dp[i - 1][j];
+      if (base >= BIG) continue;
+      if (!e.count) {                       // silent token: consume nothing
+        if (base < dp[i][j]) { dp[i][j] = base; prevJ[i][j] = j; gs[i][j] = -1; }
+        continue;
+      }
+      const maxW = Math.min(m - j, e.count + (e.flex ? FLEX_CAP : 0));
+      for (let w = e.count; w <= maxW; w++) {
+        const jj = j + w;
+        let cost = base + (w - e.count) * 0.08;
+        const dt = dTail[i - 1], pt = pTail[jj - 1];
+        cost += (dt && pt) ? (dt === pt ? -0.5 : 0.35) : ((dt || pt) ? 0.25 : -0.05);
+        if (cost < dp[i][jj]) { dp[i][jj] = cost; prevJ[i][jj] = j; gs[i][jj] = j; }
+      }
+    }
+    /* a spoken word that is pure punctuation may ride along after any
+       group (rare: an em-dash chunk the display shows attached) */
+    for (let j = 1; j <= m; j++) {
+      if (pOnly[j - 1] && dp[i][j - 1] + 0.02 < dp[i][j]) {
+        dp[i][j] = dp[i][j - 1] + 0.02;
+        prevJ[i][j] = prevJ[i][j - 1];
+        gs[i][j] = gs[i][j - 1];
+      }
+    }
+  }
+  if (dp[n][m] >= BIG) return null;
+  const starts = new Array(n);
+  for (let i = n, j = m; i >= 1; i--) {
+    starts[i - 1] = gs[i][j] >= 0 ? pwords[gs[i][j]].t : null;
+    j = prevJ[i][j];
+  }
+  /* silent tokens skim: same start as the next spoken token (the karaoke
+     tick prefers the later of equal starts), or the previous at the tail */
+  for (let i = n - 2; i >= 0; i--) if (starts[i] === null && starts[i + 1] !== null) starts[i] = starts[i + 1];
+  for (let i = 0; i < n; i++) if (starts[i] === null) starts[i] = i ? starts[i - 1] : 0;
+  for (let i = 0; i < n; i++) if (!isFinite(starts[i]) || starts[i] < 0) return null;
+  for (let i = 1; i < n; i++) if (starts[i] < starts[i - 1]) return null;
+  if (starts[n - 1] >= durationSec) return null;
+  return starts;
+}
+
 function audioBlobParts(raw) {
   const data = raw.audio, sr = raw.sampling_rate;
   const buf = new ArrayBuffer(44 + data.length * 2);
@@ -2505,30 +2620,22 @@ async function generateNeuralNow(sentIdx, key) {
      while the one-time download is genuinely in flight. 250ms used to lose
      the race on first run and silently degrade timing to syllable guesses. */
   try { await ensurePhonemes(tokens, 4000); } catch {}
-  let raw, exactStarts = null;
+  let raw, pwords = null;
   if (S.kokoro.workerGenerate) {
     raw = await S.kokoro.workerGenerate(spokenText, S.neuralVoice);
-    exactStarts = raw.starts || null;
+    pwords = raw.pwords || null;
   } else {
     const st = S.kokoro.tsCap;
     if (st) st.cap = null;
     raw = await S.kokoro.tts.generate(spokenText, { voice: S.neuralVoice, speed: 1 });
-    if (st && st.cap && st.spaceId >= 0) exactStarts = kokoroWordStarts(st.cap.ids, st.cap.dur, st.spaceId, raw.audio.length, raw.sampling_rate);
+    if (st && st.cap) pwords = kokoroSpokenWords(st.idChar, st.cap.ids, st.cap.dur, raw.audio.length, raw.sampling_rate);
   }
   const durationSec = raw.audio.length / raw.sampling_rate;
-  /* model-exact word timing when the patched export provided it AND it maps
-     1:1 onto this sentence's display tokens. The word count can legitimately
-     differ when kokoro-js's text normalization splits or merges words
-     ("$5.30" → "5 dollars and 30 cents"), so mismatches — and anything
-     non-monotonic or out of range — fall back to the silence-pinned
-     heuristic aligner, which remains fully supported (and is all the stock
-     model ever gets). */
-  let starts = null;
-  if (exactStarts && exactStarts.length === tokens.length && exactStarts[exactStarts.length - 1] < durationSec) {
-    let ok = true;
-    for (let i = 1; i < exactStarts.length; i++) if (!(exactStarts[i] >= exactStarts[i - 1])) { ok = false; break; }
-    if (ok && isFinite(exactStarts[0]) && exactStarts[0] >= 0) starts = exactStarts;
-  }
+  /* model-exact word timing when the patched export provided the spoken
+     words; the aligner absorbs kokoro-js's number/currency expansions and
+     returns null for anything it can't map confidently — then (and on the
+     stock fallback model) the silence-pinned heuristic aligner runs. */
+  let starts = pwords ? alignExactStarts(tokens, pwords, durationSec) : null;
   if (!starts) {
     const wave = analyzeWave(raw.audio, raw.sampling_rate);
     starts = alignTimeline(tokens, wave, durationSec);
@@ -3475,8 +3582,17 @@ function renderKokoroStatus(text, pct) {
   $('kokoro-status').style.display = 'block';
   $('kokoro-status-text').textContent = text;
   $('kokoro-bar').style.width = (pct || 0) + '%';
+  /* mirror into the floating pill so the download is visible even with the
+     voice sheet closed; it stays up through a load and auto-dismisses a few
+     seconds after terminal states (ready ✅ / error ⚠️) */
+  const f = $('kokoro-float');
+  f.style.display = 'block';
+  $('kokoro-float-text').textContent = text;
+  $('kokoro-float-bar').style.width = (pct || 0) + '%';
+  clearTimeout(f._h);
+  if (S.kokoro.state !== 'loading') f._h = setTimeout(() => { f.style.display = 'none'; }, 8000);
 }
-function hideKokoroStatus() { $('kokoro-status').style.display = 'none'; }
+function hideKokoroStatus() { $('kokoro-status').style.display = 'none'; $('kokoro-float').style.display = 'none'; }
 
 function avatarColor(i) {
   const cols = ['#8d7dff', '#5f8bff', '#4ecdc4', '#e78c5a', '#e0669d', '#7a9e5f', '#c96bd6', '#3aa0c9'];

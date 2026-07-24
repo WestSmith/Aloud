@@ -130,11 +130,22 @@ the duration tensor can't be exposed; it should not be needed.
     starts must map 1:1 onto display tokens, be monotonic and in range,
     else the old silence-pinned aligner runs (it also covers the stock
     fallback repo, which loads if the timestamped one is unreachable).
-  - Verified in Node with the real kokoro-js against the uploaded bytes:
-    prose sentences get exact 1:1 timings; citation/number-heavy ones
-    (kokoro-js normalization splits words: "$5.30" → five spoken words)
-    correctly fall back. This is expected: normalized sentences keep
-    v6.7.0-quality timing, everything else becomes sample-exact.
+  - v6.8.1 (owner feedback: no visible improvement on a real factum —
+    correct observation, the strict 1:1 word-count guard sent nearly every
+    citation/number sentence to the old aligner): replaced the guard with
+    a monotonic DP alignment (`alignExactStarts`). Spoken phoneme words
+    (exact onsets from pred_dur, decoded via the tokenizer vocab) map onto
+    display tokens; plain-word tokens consume exactly their word count,
+    digit/currency tokens absorb kokoro-js's normalization expansions
+    ("$5.30" → five spoken words), trailing punctuation (passed through
+    phonemization verbatim) anchors the pairing, silent tokens (dot
+    leaders, skipped URLs) consume nothing. Verified in Node against the
+    uploaded bytes on real factum sentences: 9/9 exact, incl.
+    "DC-26-00000035-00JR" (4 display tokens, 14 spoken words); every
+    onset lands on speech energy. Anything unmappable still returns null
+    → silence-pinned fallback. Also: model-download progress now shows in
+    a floating pill visible from any screen (was only inside the voice
+    sheet — looked like a hang).
 - Remaining: in-browser/device testing per "Acceptance checks" above
   (all four tiers; WebGPU + wasm + iPhone q4), and the owner should
   REVOKE the HF token now that the upload is done.
