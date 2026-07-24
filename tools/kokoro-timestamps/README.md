@@ -159,6 +159,20 @@ the duration tensor can't be exposed; it should not be needed.
     phoneme-length plausibility cost (via the existing phonemeCache) so
     "of" can't claim "percent". Node-verified: 14/14 exact incl. all
     prior regressions.
+  - v6.8.3 (owner feedback: "trips on the phone number"): root cause was
+    NOT the aligner — Kokoro's context window is 510 phoneme tokens and
+    kokoro-js silently truncates. The factum's service pages become
+    60-token run-on "sentences" (Aloud's PDF splitter safety cap) dense
+    with emails, dotted phone numbers ("416.864.7355" → "416 point
+    8 6 4 …") and LSO numbers: measured 800+ phonemes → ids hit 512 →
+    the AUDIO IS MISSING THE TAIL of the chunk while the timeline maps
+    all of it. Pre-existing bug (the old aligner had it too), newly
+    visible. Fix: kokoroChunkRanges() splits long sentences into ~300-
+    phoneme ranges (cut after trailing punctuation), each generated
+    separately and stitched; per-chunk exact alignment with offsets;
+    worker reports nIds so a chunk that still comes back 512 is split in
+    half and redone. Verified on the real backsheet blocks: 25.4s of
+    truncated audio became 56.5s complete, 3/3 chunks exact.
 - Remaining: in-browser/device testing per "Acceptance checks" above
   (all four tiers; WebGPU + wasm + iPhone q4), and the owner should
   REVOKE the HF token now that the upload is done.

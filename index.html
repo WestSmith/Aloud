@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.8.2">
+<meta name="aloud-version" content="v6.8.3">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -2168,7 +2168,8 @@ self.onmessage = async (e) => {
       const pwords = ts.cap
         ? kokoroSpokenWords(ts.idChar, ts.cap.ids, ts.cap.dur, raw.audio.length, raw.sampling_rate)
         : null;
-      self.postMessage({ type: 'result', id: m.id, audio: raw.audio, sr: raw.sampling_rate, pwords }, [raw.audio.buffer]);
+      const nIds = ts.cap ? ts.cap.ids.length : 0;   // 512 = context-limit truncation
+      self.postMessage({ type: 'result', id: m.id, audio: raw.audio, sr: raw.sampling_rate, pwords, nIds }, [raw.audio.buffer]);
     }
   } catch (err) {
     self.postMessage({ type: m.type === 'init' ? 'initerror' : 'error', id: m.id, message: String((err && err.message) || err) });
@@ -2202,7 +2203,7 @@ function initKokoroWorker() {
         if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}%`, pct); }
       } else if (m.type === 'ready') { ready = true; resolve(); }
       else if (m.type === 'initerror') { if (!ready) fail(new Error(m.message)); }
-      else if (m.type === 'result') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ audio: m.audio, sampling_rate: m.sr, pwords: m.pwords || null }); } }
+      else if (m.type === 'result') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ audio: m.audio, sampling_rate: m.sr, pwords: m.pwords || null, nIds: m.nIds || 0 }); } }
       else if (m.type === 'error') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.reject(new Error(m.message)); } }
     };
     S.kokoro.worker = worker;
@@ -2660,6 +2661,35 @@ async function neuralPump() {
   S.pumpBusy = false;
 }
 
+/* Kokoro's context window is 510 phoneme tokens and kokoro-js silently
+   truncates beyond it — the audio just STOPS mid-sentence while the
+   timeline maps the full text. PDF service pages are the worst case:
+   60-token run-on "sentences" dense with emails and phone numbers blow
+   far past the limit (a factum backsheet measures 800+ phonemes). Split
+   such sentences into ranges that each fit comfortably, preferring cuts
+   after trailing punctuation. Returns [start, end) index pairs. */
+function kokoroChunkRanges(tokens, cap = 300) {
+  const estOf = t => {
+    const e = phonemeCache.get(spokenFor(t).toLowerCase());
+    return (e ? e.v + e.c : Math.max(2, spokenFor(t).length)) + 1;
+  };
+  const ranges = [];
+  let i = 0;
+  while (i < tokens.length) {
+    let est = 0, cut = -1, j = i;
+    for (; j < tokens.length; j++) {
+      est += estOf(tokens[j]);
+      if (est > cap && j > i) break;
+      if (/[,.;:!?…]["”'’)\]]*$/.test(tokens[j])) cut = j + 1;
+    }
+    if (j >= tokens.length) { ranges.push([i, tokens.length]); break; }
+    const end = cut > i ? cut : j;
+    ranges.push([i, end]);
+    i = end;
+  }
+  return ranges;
+}
+
 async function generateNeuralNow(sentIdx, key) {
   /* always generate at 1× — playback speed comes from pitch-preserving
      playbackRate, so word timings stay exact at ANY speed and the cache
@@ -2669,33 +2699,72 @@ async function generateNeuralNow(sentIdx, key) {
   const sent = S.sentences[sentIdx];
   const tokens = [];
   for (let i = sent.start; i < sent.end; i++) tokens.push(S.words[i].text);
-  const spokenText = tokens.map(spokenFor).join(' ');
   /* wait for real G2P before timing the FIRST sentences — the promise settles
      the moment the module is ready (or errors), so this only ever costs time
      while the one-time download is genuinely in flight. 250ms used to lose
      the race on first run and silently degrade timing to syllable guesses. */
   try { await ensurePhonemes(tokens, 4000); } catch {}
-  let raw, pwords = null;
-  if (S.kokoro.workerGenerate) {
-    raw = await S.kokoro.workerGenerate(spokenText, S.neuralVoice);
-    pwords = raw.pwords || null;
-  } else {
-    const st = S.kokoro.tsCap;
-    if (st) st.cap = null;
-    raw = await S.kokoro.tts.generate(spokenText, { voice: S.neuralVoice, speed: 1 });
-    if (st && st.cap) pwords = kokoroSpokenWords(st.idChar, st.cap.ids, st.cap.dur, raw.audio.length, raw.sampling_rate);
+  /* generate in context-window-sized chunks (usually exactly one). If a
+     chunk still comes back truncated (512 ids — estimates can undershoot
+     espeak's expansions), split it in half and redo just that chunk. */
+  const pending = kokoroChunkRanges(tokens);
+  const parts = [];
+  while (pending.length) {
+    const [a, b] = pending.shift();
+    const ctoks = tokens.slice(a, b);
+    const text = ctoks.map(spokenFor).join(' ').trim();
+    if (!text) { parts.push({ a, b, audio: new Float32Array(3600), sr: 24000, pwords: null, silent: true }); continue; }
+    let raw, pwords = null, nIds = 0;
+    if (S.kokoro.workerGenerate) {
+      raw = await S.kokoro.workerGenerate(text, S.neuralVoice);
+      pwords = raw.pwords || null;
+      nIds = raw.nIds || 0;
+    } else {
+      const st = S.kokoro.tsCap;
+      if (st) st.cap = null;
+      raw = await S.kokoro.tts.generate(text, { voice: S.neuralVoice, speed: 1 });
+      if (st && st.cap) {
+        nIds = st.cap.ids.length;
+        pwords = kokoroSpokenWords(st.idChar, st.cap.ids, st.cap.dur, raw.audio.length, raw.sampling_rate);
+      }
+    }
+    if (nIds >= 510 && b - a > 1) {
+      const mid = a + Math.ceil((b - a) / 2);
+      pending.unshift([a, mid], [mid, b]);
+      continue;
+    }
+    parts.push({ a, b, audio: raw.audio, sr: raw.sampling_rate, pwords });
   }
-  const durationSec = raw.audio.length / raw.sampling_rate;
-  /* model-exact word timing when the patched export provided the spoken
-     words; the aligner absorbs kokoro-js's number/currency expansions and
-     returns null for anything it can't map confidently — then (and on the
-     stock fallback model) the silence-pinned heuristic aligner runs. */
-  let starts = pwords ? alignExactStarts(tokens, pwords, durationSec) : null;
-  if (!starts) {
-    const wave = analyzeWave(raw.audio, raw.sampling_rate);
-    starts = alignTimeline(tokens, wave, durationSec);
+  /* stitch chunks and time each one independently: model-exact word starts
+     when the patched export provided the spoken words (alignExactStarts
+     absorbs kokoro-js's number/currency expansions), the silence-pinned
+     heuristic per chunk otherwise — then offset into the joined clip */
+  const sr = parts[0].sr;
+  let total = 0;
+  for (const p of parts) total += p.audio.length;
+  let audio = parts[0].audio;
+  if (parts.length > 1) {
+    audio = new Float32Array(total);
+    let off = 0;
+    for (const p of parts) { audio.set(p.audio, off); off += p.audio.length; }
   }
-  const url = audioBlobParts(raw);
+  const starts = new Array(tokens.length);
+  let off = 0;
+  for (const p of parts) {
+    const offSec = off / sr;
+    const dSec = p.audio.length / sr;
+    const ctoks = tokens.slice(p.a, p.b);
+    let cs = null;
+    if (p.silent) cs = ctoks.map(() => 0);
+    else {
+      cs = p.pwords ? alignExactStarts(ctoks, p.pwords, dSec) : null;
+      if (!cs) cs = alignTimeline(ctoks, analyzeWave(p.audio, sr), dSec);
+    }
+    for (let k = 0; k < ctoks.length; k++) starts[p.a + k] = cs[k] + offSec;
+    off += p.audio.length;
+  }
+  const durationSec = total / sr;
+  const url = audioBlobParts({ audio, sampling_rate: sr });
   const entry = { url, starts, durationSec };
   S.neuralCache.set(key, entry);
   if (S.neuralCache.size > 24) {
