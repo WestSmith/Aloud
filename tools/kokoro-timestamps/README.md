@@ -106,3 +106,21 @@ in the same worker, off the realtime path. ~±20–50 ms/word, no model
 surgery, engine-agnostic — at the cost of an extra model download and
 per-sentence compute (gate it on capable devices). Only reach for this if
 the duration tensor can't be exposed; it should not be needed.
+
+## Status — 2026-07-24 (session handoff)
+
+- Phase 1 (heuristic timing fixes, v6.7.0) is committed on branch
+  `claude/aloud-karaoke-sync-41k0fd` and pushed. **No PR opened yet** —
+  the owner needs to approve/merge for it to go live.
+- Phase 2 (this kit) is ready to execute but was blocked in the prior
+  session: its environment could not reach huggingface.co. The owner has
+  a free HF account and a Write token (they will paste it in chat —
+  NEVER write it to a file or commit it).
+- Remaining, in order: (1) verify token via whoami; (2) run
+  export_timestamps.py for the four tiers; (3) create a model repo under
+  the owner's HF account, upload the full onnx-community repo layout with
+  patched onnx/ files; (4) wire the worker per "Step 3" above with
+  feature-detected fallback; (5) test in-browser; (6) remind the owner to
+  revoke the token.
+- The owner is not a programmer: do every step for them, explain in
+  plain language, and confirm before anything user-visible goes live.
