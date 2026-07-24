@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.7.0">
+<meta name="aloud-version" content="v6.8.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -2059,26 +2059,93 @@ function clearNeuralCache() {
   S.neuralCache.clear();
 }
 
+/* Kokoro model repos. The primary is a mirror of onnx-community's export
+   with ONE change: the model's internal per-token duration tensor is exposed
+   as an extra output 'pred_dur' (see tools/kokoro-timestamps/ — waveforms
+   are bit-identical). That output turns karaoke timing from "estimated
+   against detected silences" into "read off the model": exact word starts
+   at zero extra inference cost. The stock repo stays as a load-time
+   fallback; without pred_dur the old silence-pinned aligner still runs. */
+const KOKORO_MODEL = 'shawnahmed/Kokoro-82M-v1.0-ONNX-timestamped';
+const KOKORO_MODEL_FALLBACK = 'onnx-community/Kokoro-82M-v1.0-ONNX';
+
+/* exact word-start times (sec) from the model's own durations. ids/dur are
+   per input token including the $ padding at both ends; spaceId tokens mark
+   word boundaries in the phoneme stream. Self-calibrating: samples-per-frame
+   comes from the audio length, so no magic constants — and generation is at
+   1×, so the times hold at every playbackRate. Shared by the worker (via
+   toString() below) and the main-thread fallback engine. */
+function kokoroWordStarts(ids, dur, spaceId, audioLen, sr) {
+  if (!ids || !dur || ids.length !== dur.length || ids.length < 3) return null;
+  let total = 0;
+  for (let k = 0; k < dur.length; k++) total += dur[k];
+  if (!(total > 0) || !(audioLen > 0)) return null;
+  const spf = audioLen / total;              // samples per duration frame
+  const starts = [];
+  let acc = dur[0] || 0;                     // leading $ = lead-in silence
+  let boundary = true;                       // next phoneme token opens a word
+  for (let k = 1; k < ids.length - 1; k++) {
+    if (ids[k] === spaceId) boundary = true;
+    else if (boundary) { starts.push((acc * spf) / sr); boundary = false; }
+    acc += dur[k];
+  }
+  return starts.length ? starts : null;
+}
+
+/* kokoro-js's generate() destructures only { waveform } from the model call,
+   silently dropping the patched export's pred_dur. Wrap the model so each
+   call also captures (input ids, per-token durations); probe the tokenizer
+   for the space token id that separates words. On the stock model there is
+   no pred_dur and the capture simply stays null. */
+function instrumentKokoroTTS(tts) {
+  const st = { spaceId: -1, cap: null };
+  try {
+    const inner = tts.model;
+    tts.model = async (inputs) => {
+      const out = await inner(inputs);
+      st.cap = (out.pred_dur && inputs.input_ids)
+        ? { ids: Array.from(inputs.input_ids.data, Number), dur: Array.from(out.pred_dur.data, Number) }
+        : null;
+      return out;
+    };
+    const pd = Array.from(tts.tokenizer('a a', { truncation: true }).input_ids.data, Number);
+    st.spaceId = pd.length === 5 ? pd[2] : -1;   // [$, a, ␣, a, $]
+  } catch {}
+  return st;
+}
+
 /* generation runs in a Web Worker so inference can never freeze the page —
    main-thread inference was what froze the karaoke and made it "sprint" to
    catch up afterwards */
 const KOKORO_WORKER_SRC = `
-let tts = null;
+let tts = null, ts = { spaceId: -1, cap: null };
+${kokoroWordStarts.toString()}
+${instrumentKokoroTTS.toString()}
 self.onmessage = async (e) => {
   const m = e.data;
   try {
     if (m.type === 'init') {
       const mod = await import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm');
       const K = mod.KokoroTTS || (mod.default && mod.default.KokoroTTS);
-      tts = await K.from_pretrained(m.model, {
+      const opts = {
         dtype: m.dtype,        // chosen on the main thread (q4 on phones to fit memory)
         device: m.device,
         progress_callback: (p) => { if (p.status === 'progress' && p.total) self.postMessage({ type: 'progress', loaded: p.loaded, total: p.total }); },
-      });
+      };
+      try { tts = await K.from_pretrained(m.model, opts); }
+      catch (err) {
+        if (!m.fallbackModel) throw err;
+        tts = await K.from_pretrained(m.fallbackModel, opts);   // stock export: same audio, heuristic timing
+      }
+      ts = instrumentKokoroTTS(tts);
       self.postMessage({ type: 'ready' });
     } else if (m.type === 'generate') {
+      ts.cap = null;
       const raw = await tts.generate(m.text, { voice: m.voice, speed: 1 });
-      self.postMessage({ type: 'result', id: m.id, audio: raw.audio, sr: raw.sampling_rate }, [raw.audio.buffer]);
+      const starts = (ts.cap && ts.spaceId >= 0)
+        ? kokoroWordStarts(ts.cap.ids, ts.cap.dur, ts.spaceId, raw.audio.length, raw.sampling_rate)
+        : null;
+      self.postMessage({ type: 'result', id: m.id, audio: raw.audio, sr: raw.sampling_rate, starts }, [raw.audio.buffer]);
     }
   } catch (err) {
     self.postMessage({ type: m.type === 'init' ? 'initerror' : 'error', id: m.id, message: String((err && err.message) || err) });
@@ -2112,7 +2179,7 @@ function initKokoroWorker() {
         if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}%`, pct); }
       } else if (m.type === 'ready') { ready = true; resolve(); }
       else if (m.type === 'initerror') { if (!ready) fail(new Error(m.message)); }
-      else if (m.type === 'result') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ audio: m.audio, sampling_rate: m.sr }); } }
+      else if (m.type === 'result') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ audio: m.audio, sampling_rate: m.sr, starts: m.starts || null }); } }
       else if (m.type === 'error') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.reject(new Error(m.message)); } }
     };
     S.kokoro.worker = worker;
@@ -2128,7 +2195,7 @@ function initKokoroWorker() {
     });
     renderKokoroStatus('Downloading the voice model (one time — cached by your browser after this)…', 5);
     const cfg = kokoroConfig();
-    worker.postMessage({ type: 'init', model: 'onnx-community/Kokoro-82M-v1.0-ONNX', dtype: cfg.dtype, device: cfg.device });
+    worker.postMessage({ type: 'init', model: KOKORO_MODEL, fallbackModel: KOKORO_MODEL_FALLBACK, dtype: cfg.dtype, device: cfg.device });
   });
 }
 
@@ -2158,7 +2225,7 @@ function resetNeuralEngine() {
   try { S.kokoro.rejectPending?.(Object.assign(new Error('engine reset'), { name: 'EngineReset' })); } catch {}
   try { S.kokoro.worker?.terminate(); } catch {}
   S.kokoro.worker = null; S.kokoro.workerGenerate = null; S.kokoro.rejectPending = null;
-  S.kokoro.tts = null; S.kokoro.state = 'idle'; S.kokoro.progress = 0;
+  S.kokoro.tts = null; S.kokoro.tsCap = null; S.kokoro.state = 'idle'; S.kokoro.progress = 0;
   S.neuralGenToken++;
   S.neuralPending.clear();
   genTail = Promise.resolve();
@@ -2203,7 +2270,7 @@ async function loadKokoroMainThread() {
   if (!KokoroTTS) throw new Error('kokoro-js loaded but KokoroTTS not found');
   const cfg = kokoroConfig();
   renderKokoroStatus('Downloading the voice model (one time — cached by your browser after this)…', 5);
-  S.kokoro.tts = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
+  const opts = {
     dtype: cfg.dtype,
     device: cfg.device,
     progress_callback: (p) => {
@@ -2212,7 +2279,13 @@ async function loadKokoroMainThread() {
         if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}%`, pct); }
       }
     },
-  });
+  };
+  try { S.kokoro.tts = await KokoroTTS.from_pretrained(KOKORO_MODEL, opts); }
+  catch (err) {
+    console.warn('timestamped Kokoro repo unavailable, using stock', err);
+    S.kokoro.tts = await KokoroTTS.from_pretrained(KOKORO_MODEL_FALLBACK, opts);
+  }
+  S.kokoro.tsCap = instrumentKokoroTTS(S.kokoro.tts);
 }
 
 async function loadKokoro() {
@@ -2432,12 +2505,34 @@ async function generateNeuralNow(sentIdx, key) {
      while the one-time download is genuinely in flight. 250ms used to lose
      the race on first run and silently degrade timing to syllable guesses. */
   try { await ensurePhonemes(tokens, 4000); } catch {}
-  const raw = S.kokoro.workerGenerate
-    ? await S.kokoro.workerGenerate(spokenText, S.neuralVoice)
-    : await S.kokoro.tts.generate(spokenText, { voice: S.neuralVoice, speed: 1 });
+  let raw, exactStarts = null;
+  if (S.kokoro.workerGenerate) {
+    raw = await S.kokoro.workerGenerate(spokenText, S.neuralVoice);
+    exactStarts = raw.starts || null;
+  } else {
+    const st = S.kokoro.tsCap;
+    if (st) st.cap = null;
+    raw = await S.kokoro.tts.generate(spokenText, { voice: S.neuralVoice, speed: 1 });
+    if (st && st.cap && st.spaceId >= 0) exactStarts = kokoroWordStarts(st.cap.ids, st.cap.dur, st.spaceId, raw.audio.length, raw.sampling_rate);
+  }
   const durationSec = raw.audio.length / raw.sampling_rate;
-  const wave = analyzeWave(raw.audio, raw.sampling_rate);
-  const starts = alignTimeline(tokens, wave, durationSec);
+  /* model-exact word timing when the patched export provided it AND it maps
+     1:1 onto this sentence's display tokens. The word count can legitimately
+     differ when kokoro-js's text normalization splits or merges words
+     ("$5.30" → "5 dollars and 30 cents"), so mismatches — and anything
+     non-monotonic or out of range — fall back to the silence-pinned
+     heuristic aligner, which remains fully supported (and is all the stock
+     model ever gets). */
+  let starts = null;
+  if (exactStarts && exactStarts.length === tokens.length && exactStarts[exactStarts.length - 1] < durationSec) {
+    let ok = true;
+    for (let i = 1; i < exactStarts.length; i++) if (!(exactStarts[i] >= exactStarts[i - 1])) { ok = false; break; }
+    if (ok && isFinite(exactStarts[0]) && exactStarts[0] >= 0) starts = exactStarts;
+  }
+  if (!starts) {
+    const wave = analyzeWave(raw.audio, raw.sampling_rate);
+    starts = alignTimeline(tokens, wave, durationSec);
+  }
   const url = audioBlobParts(raw);
   const entry = { url, starts, durationSec };
   S.neuralCache.set(key, entry);

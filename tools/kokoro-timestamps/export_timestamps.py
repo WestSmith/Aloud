@@ -45,6 +45,42 @@ def load_model(args):
     return onnx.load(path), path
 
 
+def find_rounded_duration(model):
+    """Walk the graph for the StyleTTS2 duration chain:
+    Round -> (Clip) -> Cast -> Gather -> CumSum (alignment expansion).
+
+    Returns the tensor holding the rounded, min-clamped per-token frame
+    counts as float (the Clip output when present, else the Round output),
+    or None if the chain isn't found. This beats name/score heuristics: the
+    quantized exports bury 'dur'-named tensors inside dequant subgraphs
+    that are NOT the final durations.
+    """
+    consumers = {}
+    for node in model.graph.node:
+        for inp in node.input:
+            consumers.setdefault(inp, []).append(node)
+
+    def reaches_cumsum(tensor, hops):
+        if hops == 0:
+            return False
+        for n in consumers.get(tensor, []):
+            if n.op_type == "CumSum":
+                return True
+            if any(reaches_cumsum(o, hops - 1) for o in n.output):
+                return True
+        return False
+
+    for node in model.graph.node:
+        if node.op_type != "Round":
+            continue
+        out = node.output[0]
+        if not reaches_cumsum(out, 5):
+            continue
+        clips = [n for n in consumers.get(out, []) if n.op_type == "Clip"]
+        return clips[0].output[0] if clips else out
+    return None
+
+
 def duration_candidates(model):
     """Find tensors that plausibly carry per-token frame durations.
 
@@ -75,7 +111,7 @@ def duration_candidates(model):
     return cands
 
 
-def expose(model, tensor_name, out_path):
+def expose(model, tensor_name, out_path, out_name="pred_dur"):
     # borrow the tensor's type/shape from shape inference so the new graph
     # output is well-typed (required for the model checker to pass)
     inferred = shape_inference.infer_shapes(model)
@@ -87,12 +123,24 @@ def expose(model, tensor_name, out_path):
     if vi is None:
         vi = onnx.helper.make_tensor_value_info(tensor_name, onnx.TensorProto.FLOAT, None)
         print(f"warning: no inferred type for {tensor_name}; declaring untyped float")
+    if out_name != tensor_name:
+        # alias via Cast-to-float32, not Identity: the fp16 tiers carry the
+        # durations as float16 internally, and browsers can't reliably read
+        # float16 tensors (Float16Array is not everywhere yet). Cast makes
+        # every tier present the same float32 'pred_dur'; where the tensor
+        # is already float32 the Cast is a no-op passthrough. Values are
+        # small integers (frame counts), so fp16->fp32 is exact.
+        model.graph.node.add().CopyFrom(onnx.helper.make_node(
+            "Cast", [tensor_name], [out_name], name=f"expose_{out_name}",
+            to=onnx.TensorProto.FLOAT))
     out = model.graph.output.add()
     out.CopyFrom(vi)
-    out.name = tensor_name
+    out.name = out_name
+    if out_name != tensor_name:
+        out.type.tensor_type.elem_type = onnx.TensorProto.FLOAT
     onnx.checker.check_model(model, full_check=False)
     onnx.save(model, out_path)
-    print(f"saved {out_path} with extra output '{tensor_name}'")
+    print(f"saved {out_path} with extra output '{out_name}' (= {tensor_name})")
 
 
 def verify(orig_path, patched_path, tensor_name):
@@ -136,26 +184,31 @@ def main():
     ap.add_argument("--file", default="onnx/model_quantized.onnx")
     ap.add_argument("--model-path", help="local .onnx path (skips download)")
     ap.add_argument("--tensor", help="explicit tensor name to expose")
+    ap.add_argument("--as", dest="out_name", default="pred_dur",
+                    help="name for the new graph output (default: pred_dur)")
     ap.add_argument("--list", action="store_true", help="list candidates and exit")
     ap.add_argument("--out", default="model_timestamped.onnx")
     ap.add_argument("--verify", action="store_true")
     args = ap.parse_args()
 
     model, src_path = load_model(args)
-    cands = duration_candidates(model)
-    if args.list or not (args.tensor or cands):
+    chain = find_rounded_duration(model)
+    if args.list:
+        print(f"chain match (Round->Clip->...->CumSum): {chain or 'NOT FOUND'}")
+        cands = duration_candidates(model)
         print(f"{'score':>5}  {'op':<6} tensor  (consumers)")
         for score, name, op, cons in cands[:20]:
             print(f"{score:>5}  {op:<6} {name}  ({cons})")
-        if not cands:
-            print("no candidates found — inspect the graph in Netron and pass --tensor")
-        return 0 if cands else 1
+        return 0
 
-    tensor = args.tensor or cands[0][1]
-    print(f"exposing: {tensor}" + ("" if args.tensor else f"  (auto-picked, score {cands[0][0]} — check with --list)"))
-    expose(model, tensor, args.out)
+    tensor = args.tensor or chain
+    if not tensor:
+        print("duration chain not found — inspect the graph in Netron and pass --tensor")
+        return 1
+    print(f"exposing: {tensor}" + ("" if args.tensor else "  (matched Round->Clip->...->CumSum chain)"))
+    expose(model, tensor, args.out, args.out_name)
     if args.verify:
-        verify(src_path, args.out, tensor)
+        verify(src_path, args.out, args.out_name)
     return 0
 
 

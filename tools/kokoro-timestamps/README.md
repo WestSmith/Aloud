@@ -107,21 +107,36 @@ surgery, engine-agnostic — at the cost of an extra model download and
 per-sentence compute (gate it on capable devices). Only reach for this if
 the duration tensor can't be exposed; it should not be needed.
 
-## Status — 2026-07-24 (session handoff)
+## Status — 2026-07-24 (Phase 2 executed)
 
 - Phase 1 (heuristic timing fixes, v6.7.0) is on branch
   `claude/aloud-karaoke-sync-41k0fd`; PR opened:
   https://github.com/WestSmith/Aloud/pull/1 — the owner merges it
   themselves (merging auto-deploys the live site via Pages).
-- Phase 2 (this kit) is ready to execute but was blocked in the prior
-  session: its environment could not reach huggingface.co. The owner has
-  a free HF account and a Write token (they will paste it in chat —
-  NEVER write it to a file or commit it).
-- Remaining, in order: (1) verify token via whoami; (2) run
-  export_timestamps.py for the four tiers; (3) create a model repo under
-  the owner's HF account, upload the full onnx-community repo layout with
-  patched onnx/ files; (4) wire the worker per "Step 3" above with
-  feature-detected fallback; (5) test in-browser; (6) remind the owner to
-  revoke the token.
+- Phase 2 is DONE end-to-end (branch `claude/kokoro-timestamps-q79tqo`):
+  - All four tiers patched & verified (waveform bit-identical; the tensor
+    is `/encoder/Clip_output_0`, found via the Round→Clip→…→CumSum chain —
+    the name-based auto-pick was wrong, hence `find_rounded_duration`).
+    The output is exposed as `pred_dur` through a Cast-to-float32 (the
+    fp16 tiers carry it as float16, which browsers can't reliably read).
+    Every tier measures exactly 600 samples per duration frame.
+  - Hosted at `shawnahmed/Kokoro-82M-v1.0-ONNX-timestamped` (public):
+    full onnx-community layout, four patched files + four stock variants.
+  - Worker wired (v6.8.0): rather than re-implementing generate() with a
+    raw phonemizer (the sketch above — it would bypass kokoro-js's text
+    normalization), the app wraps `tts.model` to capture `pred_dur` +
+    `input_ids` per call, probes the tokenizer for the space token id,
+    and derives word starts from space-token boundaries. Strict guard:
+    starts must map 1:1 onto display tokens, be monotonic and in range,
+    else the old silence-pinned aligner runs (it also covers the stock
+    fallback repo, which loads if the timestamped one is unreachable).
+  - Verified in Node with the real kokoro-js against the uploaded bytes:
+    prose sentences get exact 1:1 timings; citation/number-heavy ones
+    (kokoro-js normalization splits words: "$5.30" → five spoken words)
+    correctly fall back. This is expected: normalized sentences keep
+    v6.7.0-quality timing, everything else becomes sample-exact.
+- Remaining: in-browser/device testing per "Acceptance checks" above
+  (all four tiers; WebGPU + wasm + iPhone q4), and the owner should
+  REVOKE the HF token now that the upload is done.
 - The owner is not a programmer: do every step for them, explain in
   plain language, and confirm before anything user-visible goes live.
