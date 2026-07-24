@@ -107,21 +107,83 @@ surgery, engine-agnostic — at the cost of an extra model download and
 per-sentence compute (gate it on capable devices). Only reach for this if
 the duration tensor can't be exposed; it should not be needed.
 
-## Status — 2026-07-24 (session handoff)
+## Status — 2026-07-24 (Phase 2 executed)
 
 - Phase 1 (heuristic timing fixes, v6.7.0) is on branch
   `claude/aloud-karaoke-sync-41k0fd`; PR opened:
   https://github.com/WestSmith/Aloud/pull/1 — the owner merges it
   themselves (merging auto-deploys the live site via Pages).
-- Phase 2 (this kit) is ready to execute but was blocked in the prior
-  session: its environment could not reach huggingface.co. The owner has
-  a free HF account and a Write token (they will paste it in chat —
-  NEVER write it to a file or commit it).
-- Remaining, in order: (1) verify token via whoami; (2) run
-  export_timestamps.py for the four tiers; (3) create a model repo under
-  the owner's HF account, upload the full onnx-community repo layout with
-  patched onnx/ files; (4) wire the worker per "Step 3" above with
-  feature-detected fallback; (5) test in-browser; (6) remind the owner to
-  revoke the token.
+- Phase 2 is DONE end-to-end (branch `claude/kokoro-timestamps-q79tqo`):
+  - All four tiers patched & verified (waveform bit-identical; the tensor
+    is `/encoder/Clip_output_0`, found via the Round→Clip→…→CumSum chain —
+    the name-based auto-pick was wrong, hence `find_rounded_duration`).
+    The output is exposed as `pred_dur` through a Cast-to-float32 (the
+    fp16 tiers carry it as float16, which browsers can't reliably read).
+    Every tier measures exactly 600 samples per duration frame.
+  - Hosted at `shawnahmed/Kokoro-82M-v1.0-ONNX-timestamped` (public):
+    full onnx-community layout, four patched files + four stock variants.
+  - Worker wired (v6.8.0): rather than re-implementing generate() with a
+    raw phonemizer (the sketch above — it would bypass kokoro-js's text
+    normalization), the app wraps `tts.model` to capture `pred_dur` +
+    `input_ids` per call, probes the tokenizer for the space token id,
+    and derives word starts from space-token boundaries. Strict guard:
+    starts must map 1:1 onto display tokens, be monotonic and in range,
+    else the old silence-pinned aligner runs (it also covers the stock
+    fallback repo, which loads if the timestamped one is unreachable).
+  - v6.8.1 (owner feedback: no visible improvement on a real factum —
+    correct observation, the strict 1:1 word-count guard sent nearly every
+    citation/number sentence to the old aligner): replaced the guard with
+    a monotonic DP alignment (`alignExactStarts`). Spoken phoneme words
+    (exact onsets from pred_dur, decoded via the tokenizer vocab) map onto
+    display tokens; plain-word tokens consume exactly their word count,
+    digit/currency tokens absorb kokoro-js's normalization expansions
+    ("$5.30" → five spoken words), trailing punctuation (passed through
+    phonemization verbatim) anchors the pairing, silent tokens (dot
+    leaders, skipped URLs) consume nothing. Verified in Node against the
+    uploaded bytes on real factum sentences: 9/9 exact, incl.
+    "DC-26-00000035-00JR" (4 display tokens, 14 spoken words); every
+    onset lands on speech energy. Anything unmappable still returns null
+    → silence-pinned fallback. Also: model-download progress now shows in
+    a floating pill visible from any screen (was only inside the voice
+    sheet — looked like a hang).
+  - v6.8.2 (owner feedback: "went off the rails around
+    thestudent@gmail.com"): two aligner fixes. (1) flex now means ANY
+    non-letter inside a word, not just digits — espeak expands emails
+    ("… at gmail dot com"), "and/or" ("and slash or"), etc.; a mis-typed
+    plain token forced its expansion onto a neighbouring number and
+    desynced everything between them. (2) espeak sometimes FUSES function
+    words ("of the" → one blob "ʌvðə", "for the" → "fɚðə"): short bare
+    function words may now merge into the preceding word's group, gated
+    by a phoneme-surplus check (host's claimed audio must be bigger than
+    the host alone) so the DP picks the right fusion partner, with a
+    phoneme-length plausibility cost (via the existing phonemeCache) so
+    "of" can't claim "percent". Node-verified: 14/14 exact incl. all
+    prior regressions.
+  - v6.8.3 (owner feedback: "trips on the phone number"): root cause was
+    NOT the aligner — Kokoro's context window is 510 phoneme tokens and
+    kokoro-js silently truncates. The factum's service pages become
+    60-token run-on "sentences" (Aloud's PDF splitter safety cap) dense
+    with emails, dotted phone numbers ("416.864.7355" → "416 point
+    8 6 4 …") and LSO numbers: measured 800+ phonemes → ids hit 512 →
+    the AUDIO IS MISSING THE TAIL of the chunk while the timeline maps
+    all of it. Pre-existing bug (the old aligner had it too), newly
+    visible. Fix: kokoroChunkRanges() splits long sentences into ~300-
+    phoneme ranges (cut after trailing punctuation), each generated
+    separately and stitched; per-chunk exact alignment with offsets;
+    worker reports nIds so a chunk that still comes back 512 is split in
+    half and redone. Verified on the real backsheet blocks: 25.4s of
+    truncated audio became 56.5s complete, 3/3 chunks exact.
+  - v6.9.0: honest tier labels (measured downloads: q4 305MB, q4f16
+    155MB, q8 92MB, fp32 326MB — Lite downloads MORE than Standard but
+    is the phone-safe tier), and an opt-in "Show timing accuracy"
+    Settings toggle that badges the playing sentence exact / mixed /
+    estimated (entry.timing from generateNeuralNow's per-chunk result).
+- Owner tested on the factum through three feedback rounds (strict-guard
+  fallbacks → email expansion → context-window truncation) and signed
+  off; merged to main at their direction. Tier sweep on desktop and
+  iPhone was deferred by the owner — if a phone report comes in, start
+  at kokoroConfig()/the crash-loop guard.
+- The owner should REVOKE the HF token now that the upload is done
+  (reminded three times; not yet confirmed).
 - The owner is not a programmer: do every step for them, explain in
   plain language, and confirm before anything user-visible goes live.
