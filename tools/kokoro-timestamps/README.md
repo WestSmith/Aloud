@@ -109,9 +109,10 @@ the duration tensor can't be exposed; it should not be needed.
 
 ## Status — 2026-07-24 (session handoff)
 
-- Phase 1 (heuristic timing fixes, v6.7.0) is committed on branch
-  `claude/aloud-karaoke-sync-41k0fd` and pushed. **No PR opened yet** —
-  the owner needs to approve/merge for it to go live.
+- Phase 1 (heuristic timing fixes, v6.7.0) is on branch
+  `claude/aloud-karaoke-sync-41k0fd`; PR opened:
+  https://github.com/WestSmith/Aloud/pull/1 — the owner merges it
+  themselves (merging auto-deploys the live site via Pages).
 - Phase 2 (this kit) is ready to execute but was blocked in the prior
   session: its environment could not reach huggingface.co. The owner has
   a free HF account and a Write token (they will paste it in chat —
