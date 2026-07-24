@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.8.1">
+<meta name="aloud-version" content="v6.8.2">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -2484,29 +2484,50 @@ function alignTimeline(displayTokens, wave, durationSec) {
 function alignExactStarts(displayTokens, pwords, durationSec) {
   const n = displayTokens.length, m = pwords ? pwords.length : 0;
   if (!n || !m) return null;
-  const exp = displayTokens.map(t => {
-    const parts = spokenFor(t).trim().split(/\s+/).filter(Boolean);
-    return { count: parts.length, flex: parts.some(w => /[\d$£]/.test(w)) };
-  });
   const PUNCT = ',.;:!?…';
   const tailOf = s => {
     const t = String(s).replace(/[«»“”"'’‘)(\][}{]+$/u, '');
     const c = t.slice(-1);
     return PUNCT.includes(c) ? c : '';
   };
+  /* per display token: how many spoken words its spoken form yields.
+     flex = any non-letter inside a word (digits, @, /, &, %, …) — those
+     expand unpredictably under kokoro-js/espeak normalization (emails
+     become "… at gmail dot com", "and/or" becomes "and slash or").
+     mergeable = a short bare function word: espeak sometimes fuses these
+     into a neighbour ("of the" → one spoken blob "ʌvðə"), so the DP may
+     let them consume nothing and ride their host. */
+  const exp = displayTokens.map(t => {
+    const parts = spokenFor(t).trim().split(/\s+/).filter(Boolean);
+    const cores = parts.map(w => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''));
+    const flex = cores.some(c => /[^\p{L}'’\-]/u.test(c)) || parts.some(w => /[\d$£]/.test(w));
+    const mergeable = !flex && parts.length === 1 && cores[0].length >= 1 &&
+                      cores[0].length <= 4 && /^\p{L}+$/u.test(cores[0]) && !tailOf(parts[0]);
+    return { count: parts.length, flex, mergeable };
+  });
   const dTail = displayTokens.map(t => tailOf(spokenFor(t)));
   const pTail = pwords.map(w => tailOf(w.ph));
   const pOnly = pwords.map(w => !/[\p{L}\p{N}]/u.test(w.ph));
+  const pLen = pwords.map(w => { const r = countPhones(w.ph); return r.v + r.c; });
+  /* expected phoneme length per token from the G2P cache (ensurePhonemes
+     ran before generation) — a plain word can't plausibly claim a spoken
+     stretch three times its size, which is what distinguishes "of"
+     grabbing "percent" from "of" hosting a fused "of-the" */
+  const expLen = displayTokens.map(t => {
+    const e = phonemeCache.get(spokenFor(t).toLowerCase());
+    return e ? e.v + e.c : null;
+  });
   const FLEX_CAP = 40, BIG = 1e9;
   /* dp[i][j]: best cost mapping the first i tokens onto the first j spoken
-     words. prevJ = j before token i's group; gs = index of the group's
-     first spoken word (-1 for silent tokens), kept separately so skipped
-     trailing punctuation doesn't shift a group's start. */
-  const dp = [], prevJ = [], gs = [];
+     words. prevJ = j before token i's group; gs = the group's first spoken
+     word; kd = how token i was consumed (0 group, 1 silent, 2 merged). */
+  const dp = [], prevJ = [], gs = [], kd = [], srp = [];
   for (let i = 0; i <= n; i++) {
     dp.push(new Float64Array(m + 1).fill(BIG));
     prevJ.push(new Int32Array(m + 1).fill(-1));
     gs.push(new Int32Array(m + 1).fill(-1));
+    kd.push(new Int8Array(m + 1));
+    srp.push(new Float32Array(m + 1));    // phoneme surplus of the last group
   }
   dp[0][0] = 0;
   for (let j = 1; j <= m; j++)
@@ -2517,16 +2538,34 @@ function alignExactStarts(displayTokens, pwords, durationSec) {
       const base = dp[i - 1][j];
       if (base >= BIG) continue;
       if (!e.count) {                       // silent token: consume nothing
-        if (base < dp[i][j]) { dp[i][j] = base; prevJ[i][j] = j; gs[i][j] = -1; }
+        if (base < dp[i][j]) { dp[i][j] = base; prevJ[i][j] = j; gs[i][j] = -1; kd[i][j] = 1; srp[i][j] = srp[i - 1][j]; }
         continue;
+      }
+      /* fused into the preceding word's blob — but ONLY when that blob has
+         phoneme room for this word too ("of the" → "ʌvðə": the host "of"
+         claims a 4-phone blob against a 2-phone expectation, leaving a
+         surplus ≥ the rider "the"). Without the surplus gate the DP can't
+         tell WHICH function word fused and may pick the wrong one. */
+      const rl = expLen[i - 1];
+      if (e.mergeable && j > 0 && srp[i - 1][j] >= (rl != null ? rl - 1 : 1) && base + 0.3 < dp[i][j]) {
+        dp[i][j] = base + 0.3; prevJ[i][j] = j; gs[i][j] = -1; kd[i][j] = 2;
+        srp[i][j] = srp[i - 1][j] - (rl != null ? rl : 2);
       }
       const maxW = Math.min(m - j, e.count + (e.flex ? FLEX_CAP : 0));
       for (let w = e.count; w <= maxW; w++) {
         const jj = j + w;
-        let cost = base + (w - e.count) * 0.08;
+        let cost = base + (w - e.count) * 0.05;
         const dt = dTail[i - 1], pt = pTail[jj - 1];
         cost += (dt && pt) ? (dt === pt ? -0.5 : 0.35) : ((dt || pt) ? 0.25 : -0.05);
-        if (cost < dp[i][jj]) { dp[i][jj] = cost; prevJ[i][jj] = j; gs[i][jj] = j; }
+        const el = expLen[i - 1];
+        let surplus = 1e6;                   // unknown expectation: permissive
+        if (el != null) {
+          let g = 0;
+          for (let q = j; q < jj; q++) g += pLen[q];
+          if (Math.abs(g - el) / Math.max(3, el, g) > 0.6) cost += 0.5;
+          surplus = g - el;
+        }
+        if (cost < dp[i][jj]) { dp[i][jj] = cost; prevJ[i][jj] = j; gs[i][jj] = j; kd[i][jj] = 0; srp[i][jj] = surplus; }
       }
     }
     /* a spoken word that is pure punctuation may ride along after any
@@ -2536,21 +2575,37 @@ function alignExactStarts(displayTokens, pwords, durationSec) {
         dp[i][j] = dp[i][j - 1] + 0.02;
         prevJ[i][j] = prevJ[i][j - 1];
         gs[i][j] = gs[i][j - 1];
+        kd[i][j] = kd[i][j - 1];
+        srp[i][j] = srp[i][j - 1];
       }
     }
   }
   if (dp[n][m] >= BIG) return null;
-  const starts = new Array(n);
+  const starts = new Array(n), how = new Array(n);
   for (let i = n, j = m; i >= 1; i--) {
     starts[i - 1] = gs[i][j] >= 0 ? pwords[gs[i][j]].t : null;
+    how[i - 1] = kd[i][j];
     j = prevJ[i][j];
   }
-  /* silent tokens skim: same start as the next spoken token (the karaoke
-     tick prefers the later of equal starts), or the previous at the tail */
-  for (let i = n - 2; i >= 0; i--) if (starts[i] === null && starts[i + 1] !== null) starts[i] = starts[i + 1];
-  for (let i = 0; i < n; i++) if (starts[i] === null) starts[i] = i ? starts[i - 1] : 0;
+  /* silent tokens skim (share the NEXT word's start — the karaoke tick
+     prefers the later of equal starts); merged tokens ride just after
+     their host so the host still lights up first */
+  let nv = null;
+  const nextVal = new Array(n);
+  for (let i = n - 1; i >= 0; i--) { if (starts[i] !== null) nv = starts[i]; nextVal[i] = nv; }
+  let pv = null;
+  for (let i = 0; i < n; i++) {
+    if (starts[i] === null) {
+      if (how[i] === 2) {
+        let t = pv !== null ? pv + 0.06 : 0;
+        if (nextVal[i] !== null && t > nextVal[i]) t = nextVal[i];
+        starts[i] = t;
+      } else starts[i] = nextVal[i] !== null ? nextVal[i] : (pv !== null ? pv : 0);
+    }
+    pv = starts[i];
+  }
   for (let i = 0; i < n; i++) if (!isFinite(starts[i]) || starts[i] < 0) return null;
-  for (let i = 1; i < n; i++) if (starts[i] < starts[i - 1]) return null;
+  for (let i = 1; i < n; i++) if (starts[i] < starts[i - 1]) starts[i] = starts[i - 1];
   if (starts[n - 1] >= durationSec) return null;
   return starts;
 }

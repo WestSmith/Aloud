@@ -146,6 +146,19 @@ the duration tensor can't be exposed; it should not be needed.
     → silence-pinned fallback. Also: model-download progress now shows in
     a floating pill visible from any screen (was only inside the voice
     sheet — looked like a hang).
+  - v6.8.2 (owner feedback: "went off the rails around
+    thestudent@gmail.com"): two aligner fixes. (1) flex now means ANY
+    non-letter inside a word, not just digits — espeak expands emails
+    ("… at gmail dot com"), "and/or" ("and slash or"), etc.; a mis-typed
+    plain token forced its expansion onto a neighbouring number and
+    desynced everything between them. (2) espeak sometimes FUSES function
+    words ("of the" → one blob "ʌvðə", "for the" → "fɚðə"): short bare
+    function words may now merge into the preceding word's group, gated
+    by a phoneme-surplus check (host's claimed audio must be bigger than
+    the host alone) so the DP picks the right fusion partner, with a
+    phoneme-length plausibility cost (via the existing phonemeCache) so
+    "of" can't claim "percent". Node-verified: 14/14 exact incl. all
+    prior regressions.
 - Remaining: in-browser/device testing per "Acceptance checks" above
   (all four tiers; WebGPU + wasm + iPhone q4), and the owner should
   REVOKE the HF token now that the upload is done.
