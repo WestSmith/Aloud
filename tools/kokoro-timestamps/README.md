@@ -109,14 +109,25 @@ the duration tensor can't be exposed; it should not be needed.
 
 ## Status — 2026-07-24 (session handoff)
 
-- Phase 1 (heuristic timing fixes, v6.7.0) is on branch
-  `claude/aloud-karaoke-sync-41k0fd`; PR opened:
-  https://github.com/WestSmith/Aloud/pull/1 — the owner merges it
-  themselves (merging auto-deploys the live site via Pages).
-- Phase 2 (this kit) is ready to execute but was blocked in the prior
-  session: its environment could not reach huggingface.co. The owner has
-  a free HF account and a Write token (they will paste it in chat —
-  NEVER write it to a file or commit it).
+- Phase 1 (heuristic timing fixes, v6.7.0) is merged — PR #1 landed on
+  `main` and auto-deployed via Pages.
+- Phase 2 (this kit) is ready to execute but remains blocked: a second
+  session (2026-07-24, branch `claude/kokoro-timestamps-mcrvw4`) also
+  could not reach huggingface.co — the environment's egress proxy
+  returns a policy denial (403 on CONNECT to huggingface.co:443), while
+  other hosts (github.com, pypi.org) work. This is the environment's
+  network policy, not a transient failure; do not retry or route around
+  it. Fix: the owner must edit this Claude Code environment's network
+  access settings to allow Hugging Face — simplest is to allow
+  `huggingface.co` and its subdomains plus `hf.co` and its subdomains
+  (model downloads also use `cdn-lfs*.huggingface.co` and
+  `*.xethub.hf.co`) — then start a fresh session. See
+  https://code.claude.com/docs/en/claude-code-on-the-web for where the
+  network policy lives.
+- The owner has a free HF account and a Write token (they will paste it
+  in chat — NEVER write it to a file or commit it). The token was NOT
+  used or stored in the 2026-07-24 session (nothing to verify it
+  against with HF unreachable).
 - Remaining, in order: (1) verify token via whoami; (2) run
   export_timestamps.py for the four tiers; (3) create a model repo under
   the owner's HF account, upload the full onnx-community repo layout with
