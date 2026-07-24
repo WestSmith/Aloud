@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.9.0">
+<meta name="aloud-version" content="v6.10.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -437,6 +437,15 @@
     box-shadow: 0 4px 24px rgba(0,0,0,.35);
   }
   [data-theme="light"] .html-host { box-shadow: 0 3px 18px rgba(40,30,90,.14); }
+  /* interactive HTML view (v6.10.0): the document runs in a sandboxed frame.
+     Height is driven from inside (see the karaoke agent) so the reader page
+     keeps its single scrollbar and the player/zoom overlays stay put. */
+  .html-frame {
+    display: block; width: 100%; border: 0; min-height: 60vh;
+    background: #fff; border-radius: 12px;
+    box-shadow: 0 4px 24px rgba(0,0,0,.35);
+  }
+  [data-theme="light"] .html-frame { box-shadow: 0 3px 18px rgba(40,30,90,.14); }
 
   /* ---------- zoom bar (v6.6.0) — PDF & original-layout HTML on big screens ---------- */
   #zoom-bar {
@@ -699,6 +708,10 @@
     <div class="lbl">Skip URLs &amp; code blocks<small>Don't read web addresses or code out loud</small></div>
     <div class="switch on" id="skipcode-switch"></div>
   </div>
+  <div class="set-row">
+    <div class="lbl">Interactive HTML<small>Let a study guide's own quizzes, flip cards and “mark done” progress work, by running it in a sandboxed frame that can't reach Aloud, your files or the network. Turn off to open HTML read-only with all scripts stripped.</small></div>
+    <div class="switch on" id="htmlinteractive-switch"></div>
+  </div>
   <div class="set-row" style="display:block">
     <div class="lbl">✨ Neural voice quality<small>Sizes are the one-time download for each tier. Auto picks a safe model for your device — phones/iPads get Lite, which downloads more than Standard but is the gentlest on memory while playing. Standard/High may crash on phones. Lite+ is an experimental middle ground.</small></div>
     <div class="chips" id="nq-chips" style="margin-top:10px"></div>
@@ -880,6 +893,8 @@ const S = {
   pdf: null,           // {doc, pages:[{page,vp,div,canvas,rendered}], scale}
   pdfViewPref: store.get('pdfView', null),   // null = user hasn't chosen; default resolves per-device
   htmlViewPref: store.get('htmlView', 'native'),
+  htmlInteractive: store.get('htmlInteractive', true),  // run a document's own JS in a sandboxed frame
+  frame: null,         // interactive HTML view: {el, ops, geom, ready, lsKey, ls, onMsg}
   neuralQuality: store.get('neuralQuality', 'auto'),   // 'auto'|'lite'|'standard'|'high'
   fastEnds: 0,
   breather: store.get('breather', 1),   // pause/breather intensity multiplier (0 = off)
@@ -1156,7 +1171,13 @@ async function openFile(file, opts = {}) {
       }
     } else if (/\.(html?|xhtml)$/.test(name) || file.type === 'text/html') {
       $('btn-view').style.display = 'grid';
-      if ((opts.view || S.htmlViewPref) === 'native') { renderHtmlNative(await file.text(), opts); }
+      if ((opts.view || S.htmlViewPref) === 'native') {
+        const html = await file.text();
+        /* a document that brings its own scripts is an app, not a page —
+           run it in the sandboxed frame so its quizzes and cards work */
+        if (S.htmlInteractive) renderHtmlInteractive(html, opts);
+        else renderHtmlNative(html, opts);
+      }
       else { renderFlow(parseHtmlString(await file.text()), [], opts); }
     } else {
       $('btn-view').style.display = 'none';
@@ -1229,7 +1250,11 @@ function resolvePath(baseDir, href) {
 }
 
 /* ---- HTML / XHTML → blocks ---- */
-const SKIP_TAGS = new Set(['SCRIPT','STYLE','NAV','HEADER','FOOTER','ASIDE','NOSCRIPT','SVG','IFRAME','FORM','BUTTON','SELECT','TEMPLATE','FIGURE','TABLE','SUP']);
+/* TABLE and FIGURE are walked, not skipped: TD/CAPTION/FIGCAPTION are already
+   in BLOCK_TAGS below, and dropping the whole element took every comparison
+   table and diagram caption out of the text view — in a study guide or a
+   factum that's the content, not decoration. */
+const SKIP_TAGS = new Set(['SCRIPT','STYLE','NAV','HEADER','FOOTER','ASIDE','NOSCRIPT','SVG','IFRAME','FORM','BUTTON','SELECT','TEMPLATE','SUP']);
 function parseHtmlString(html, isXhtml = false) {
   let doc;
   try { doc = new DOMParser().parseFromString(html, isXhtml ? 'application/xhtml+xml' : 'text/html'); } catch { doc = null; }
@@ -1590,8 +1615,10 @@ function stripCssBeacons(css) {
     // URIs (inline images), strip anything that would fetch off-device. The
     // v6.6.3 regex used an optional-quote group that backtracked to empty and
     // wrongly stripped QUOTED data: URLs too, dropping inline imagery.
+    /* v6.10.0: url(#id) points inside the document itself — SVG gradients,
+       clip-paths and arrow markers on a figure. Nothing to beacon, so keep it. */
     .replace(/url\(\s*(['"]?)([^)]*?)\1\s*\)/gi, (m, q, inner) =>
-      /^\s*data:/i.test(inner) ? m : 'none');
+      /^\s*(data:|#)/i.test(inner) ? m : 'none');
 }
 function scopeDocCss(css) {
   return stripCssBeacons(css)
@@ -1609,6 +1636,420 @@ const KARAOKE_SHADOW_CSS = `
   .w.sent-on { background: rgba(124,108,246,.14); }
   .w.speaking { background: #7c6cf6 !important; color: #fff !important; text-shadow: none !important; }
 `;
+
+/* ====================================================================
+   INTERACTIVE HTML VIEW (v6.10.0)
+
+   A generated study guide isn't a document, it's a small app: collapsible
+   sections, flip cards, graded self-quizzes, "mark done" progress. The
+   sanitized view below strips every <script>, which killed all of that —
+   and worse, left the prose unreachable. Everything lives inside
+   display:none panels that only the page's own JS can open, so a
+   10,000-word guide used to load as 391 readable words.
+
+   So run the document's own JS, in a frame that can't reach Aloud or the
+   network:
+     · sandbox="allow-scripts" WITHOUT allow-same-origin → opaque origin.
+       No access to our DOM, our localStorage/IndexedDB, our cookies.
+     · injected CSP, default-src 'none' → no fetch/XHR/WebSocket, no
+       external scripts or stylesheets. CSS url()/@import are still
+       stripped, so a "local" file still can't beacon on open.
+     · with scripts live, external images become a script-driven beacon
+       channel, so self-contained docs are locked to data:/blob:. A doc
+       with no script of its own keeps loading remote images as before.
+     · localStorage throws in an opaque origin, so the frame gets a
+       postMessage-backed shim — "mark done" survives reopening the file.
+   Karaoke runs through an injected agent that owns the word spans and
+   talks to us over postMessage.
+   ==================================================================== */
+
+/* Injected into the frame, before the document's own scripts, so the page
+   finds its saved state already there. Serialized with toString(), so it
+   must not reference anything outside itself. */
+function ALOUD_LS_SHIM(saved) {
+  var mem = {};
+  for (var k in saved) if (Object.prototype.hasOwnProperty.call(saved, k)) mem[k] = String(saved[k]);
+  var flushT = 0;
+  function persist() {
+    clearTimeout(flushT);
+    flushT = setTimeout(function () {
+      try { parent.postMessage({ t: 'aloud:ls', data: mem }, '*'); } catch (e) {}
+    }, 120);
+  }
+  var api = {
+    getItem: function (k) { k = String(k); return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },
+    setItem: function (k, v) { mem[String(k)] = String(v); persist(); },
+    removeItem: function (k) { delete mem[String(k)]; persist(); },
+    clear: function () { mem = {}; persist(); },
+    key: function (i) { var ks = Object.keys(mem); return i < ks.length ? ks[i] : null; },
+  };
+  try { Object.defineProperty(api, 'length', { get: function () { return Object.keys(mem).length; } }); } catch (e) {}
+  /* an own property on window shadows the throwing Window.prototype accessor */
+  try { Object.defineProperty(window, 'localStorage', { value: api, configurable: true }); } catch (e) {}
+  try { Object.defineProperty(window, 'sessionStorage', { value: api, configurable: true }); } catch (e) {}
+}
+
+/* The karaoke agent. Injected last, so it wraps the text the document's own
+   scripts have already finished building. Serialized with toString(). */
+function ALOUD_FRAME_AGENT(cfg) {
+  var CLS = 'aloud-w';
+  var els = [], toks = [];
+
+  function post(m) { try { parent.postMessage(m, '*'); } catch (e) {} }
+
+  /* ---- tokenize every text node, INCLUDING inside collapsed panels.
+     Hidden text is still content, and tokenizing it up front is what keeps
+     word indices stable no matter what the reader opens or closes.
+     A page that later rewrites a region's textContent (a score readout, a
+     quiz verdict) drops our spans there: that region simply stops taking
+     highlight — the audio, which reads from the parent's token list, is
+     unaffected. ---- */
+  var tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT), nodes = [], n;
+  while ((n = tw.nextNode())) {
+    if (!n.nodeValue || !n.nodeValue.trim()) continue;
+    var p = n.parentElement;
+    if (!p) continue;
+    if (/^(SCRIPT|STYLE|NOSCRIPT|TEXTAREA|SELECT|OPTION|TITLE)$/.test(p.tagName)) continue;
+    if (p.closest('sup,[aria-hidden="true"]')) continue;
+    if (p.closest('button,input,[role="button"]')) continue;   // "Mark done" is UI, not prose
+    if (cfg.skipCode && p.closest('pre,code,samp,kbd')) continue;
+    nodes.push(n);
+  }
+  for (var i = 0; i < nodes.length; i++) {
+    var node = nodes[i], parts = node.nodeValue.split(/(\s+)/), frag = document.createDocumentFragment();
+    for (var j = 0; j < parts.length; j++) {
+      var part = parts[j];
+      if (!part) continue;
+      if (/^\s+$/.test(part) || /^[.·…]{2,}$/.test(part)) { frag.appendChild(document.createTextNode(part)); continue; }
+      var w = document.createElement('span');
+      w.className = CLS;
+      w.textContent = part;
+      w.setAttribute('data-w', String(toks.length));
+      frag.appendChild(w);
+      toks.push(part);
+      els.push(w);
+    }
+    node.parentNode.replaceChild(frag, node);
+  }
+
+  var st = document.createElement('style');
+  st.textContent =
+    'html,body{height:auto!important;overflow:visible!important}' +
+    '.' + CLS + '{border-radius:4px;cursor:pointer;padding:0 1px;margin:0 -1px;' +
+      '-webkit-box-decoration-break:clone;box-decoration-break:clone}' +
+    '.' + CLS + '.sent-on{background:rgba(124,108,246,.14)}' +
+    '.' + CLS + '.speaking{background:#7c6cf6!important;color:#fff!important;text-shadow:none!important}';
+  document.head.appendChild(st);
+
+  /* ---- auto-reveal ----------------------------------------------------
+     When reading reaches a word inside a collapsed panel we don't guess the
+     page's markup — we click the page's OWN toggle and let its own code do
+     the opening. That works for any guide, not just ones written a
+     particular way. <details> is plain HTML, so it's opened directly. */
+  function hiddenAncestor(el) {
+    for (var q = el; q && q !== document.body; q = q.parentElement) {
+      if (q.hidden) return q;
+      var cs = getComputedStyle(q);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return q;
+    }
+    return null;
+  }
+  function clickable(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (/^(SUMMARY|BUTTON|A)$/.test(el.tagName) || el.getAttribute('role') === 'button') return true;
+    try { return getComputedStyle(el).cursor === 'pointer'; } catch (e) { return false; }
+  }
+  function toggleFor(panel) {
+    var sib = panel.previousElementSibling;
+    if (clickable(sib)) return sib;
+    var par = panel.parentElement;
+    if (!par) return null;
+    var direct = par.querySelector('summary,button,[role="button"]');
+    if (direct && !direct.contains(panel) && !panel.contains(direct)) return direct;
+    for (var k = 0; k < par.children.length; k++) {
+      var ch = par.children[k];
+      if (ch !== panel && !ch.contains(panel) && clickable(ch)) return ch;
+    }
+    return clickable(par.previousElementSibling) ? par.previousElementSibling : null;
+  }
+  function reveal(el) {
+    for (var guard = 0; guard < 8; guard++) {
+      var h = hiddenAncestor(el);
+      if (!h) return true;
+      var det = h.closest('details');
+      if (det && !det.open) { det.open = true; continue; }
+      var ctl = toggleFor(h);
+      if (!ctl) return false;
+      ctl.click();
+      if (hiddenAncestor(el) === h) return false;   // the click didn't open it
+    }
+    return !hiddenAncestor(el);
+  }
+
+  /* ---- height: the parent sizes the frame to its content so the reader
+     page keeps one scrollbar and the overlays stay where they are ---- */
+  var lastH = 0, hT = 0;
+  function reportH() {
+    var h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 200);
+    if (Math.abs(h - lastH) < 2) return;
+    lastH = h;
+    post({ t: 'aloud:h', h: h });
+  }
+  function reportSoon() { clearTimeout(hT); hT = setTimeout(reportH, 120); }
+  try { new ResizeObserver(reportSoon).observe(document.body); } catch (e) {}
+  try {
+    new MutationObserver(function (recs) {
+      for (var r = 0; r < recs.length; r++) {
+        var t = recs[r].target;
+        /* our own karaoke paint lands on word spans many times a second —
+           measuring the document on each one would thrash layout */
+        if (t && t.nodeType === 1 && t.classList && t.classList.contains(CLS)) continue;
+        reportSoon();
+        return;
+      }
+    }).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style', 'open', 'hidden'] });
+  } catch (e) {}
+  window.addEventListener('load', reportSoon);
+
+  /* ---- gestures. A tap only means "read from here" on ordinary prose: on
+     anything the page made clickable (a card, a quiz option, a section
+     header) the page's own handler wins, untouched. ---- */
+  function wordOf(t) {
+    for (var q = t; q && q !== document.body; q = q.parentElement) {
+      if (q.nodeType === 1 && q.classList && q.classList.contains(CLS)) return q;
+    }
+    return null;
+  }
+  function inControl(el) {
+    var depth = 0;
+    for (var q = el.parentElement; q && q !== document.body && depth < 6; q = q.parentElement, depth++) {
+      if (clickable(q)) return true;
+    }
+    return false;
+  }
+  var pressT = null, pressed = null, lpFired = false;
+  document.addEventListener('pointerdown', function (e) {
+    var w = wordOf(e.target);
+    if (!w) return;
+    pressed = w; lpFired = false;
+    clearTimeout(pressT);
+    pressT = setTimeout(function () { lpFired = true; post({ t: 'aloud:press', text: w.textContent }); }, 550);
+  }, true);
+  ['pointerup', 'pointercancel', 'pointermove'].forEach(function (ev) {
+    document.addEventListener(ev, function (e) {
+      if (ev === 'pointermove' && pressed && wordOf(e.target) === pressed) return;
+      clearTimeout(pressT); pressT = null;
+    }, true);
+  });
+  document.addEventListener('dblclick', function (e) {
+    var w = wordOf(e.target);
+    if (!w) return;
+    e.preventDefault(); e.stopPropagation();
+    lpFired = true;
+    post({ t: 'aloud:press', text: w.textContent });
+  }, true);
+  document.addEventListener('click', function (e) {
+    if (lpFired) { lpFired = false; e.preventDefault(); e.stopPropagation(); return; }
+    /* links: keep in-page jumps working (a guide's own table of contents),
+       never navigate away mid-listen */
+    var a = null;
+    for (var q = e.target; q && q !== document.body; q = q.parentElement) { if (q.tagName === 'A') { a = q; break; } }
+    if (a) {
+      e.preventDefault();
+      var href = a.getAttribute('href') || '';
+      if (href.charAt(0) === '#') {
+        var tgt = document.getElementById(href.slice(1)) || document.getElementsByName(href.slice(1))[0];
+        if (tgt) { reveal(tgt); post({ t: 'aloud:anchor', top: tgt.getBoundingClientRect().top + window.scrollY }); }
+      }
+      return;
+    }
+    var w = wordOf(e.target);
+    if (w && !inControl(w)) post({ t: 'aloud:tap', word: +w.getAttribute('data-w') });
+  }, true);
+
+  /* ---- paint + geometry. One message per transition, ops before geom, so
+     the rect we send back is measured AFTER any auto-reveal. ---- */
+  window.addEventListener('message', function (e) {
+    var m = e.data;
+    if (!m || m.t !== 'aloud:apply') return;
+    var ops = m.ops || [];
+    for (var i = 0; i < ops.length; i++) {
+      var el = els[ops[i][0]];
+      if (!el) continue;
+      var cls = ops[i][1], on = ops[i][2];
+      if (on === 2) el.classList.toggle(cls); else el.classList.toggle(cls, !!on);
+      if (cls === 'speaking' && on) reveal(el);
+    }
+    if (typeof m.geom === 'number') {
+      var g = els[m.geom];
+      if (g) {
+        reveal(g);
+        var r = g.getBoundingClientRect();
+        post({ t: 'aloud:geom', word: m.geom, top: r.top + window.scrollY, bottom: r.bottom + window.scrollY, force: !!m.force });
+      }
+    }
+  });
+
+  reportH();
+  post({ t: 'aloud:ready', tokens: toks });
+}
+
+/* default-src 'none' is the whole point: no fetch, no XHR, no WebSocket, no
+   external script or stylesheet can load, whatever the document asks for. */
+function htmlFrameCsp(allowRemoteImages) {
+  const img = allowRemoteImages ? "* data: blob:" : "data: blob:";
+  return "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+    "img-src " + img + "; media-src " + img + "; font-src data:; " +
+    "form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'";
+}
+
+function frameSend(msg) {
+  try { S.frame?.el?.contentWindow?.postMessage(msg, '*'); } catch {}
+}
+
+/* Class changes are queued and flushed once per turn, which also guarantees
+   the agent applies paints before it measures for a scroll. */
+function framePaint(wIdx, cls, on) {
+  const f = S.frame;
+  if (!f) return;
+  f.ops.push([wIdx, cls, on === undefined ? 2 : (on ? 1 : 0)]);
+  frameFlushSoon();
+}
+function frameFlushSoon() {
+  const f = S.frame;
+  if (!f || f.flushQueued) return;
+  f.flushQueued = true;
+  Promise.resolve().then(() => {
+    if (!S.frame || S.frame !== f) return;
+    f.flushQueued = false;
+    if (!f.ops.length && f.geom === null) return;
+    frameSend({ t: 'aloud:apply', ops: f.ops, geom: f.geom, force: f.geomForce });
+    f.ops = []; f.geom = null; f.geomForce = false;
+  });
+}
+/* words live in another document, so they get a stand-in that speaks
+   classList and carries its index — every existing highlight call site keeps
+   working unchanged */
+function frameWordEl(wIdx) {
+  return {
+    wi: wIdx,
+    classList: {
+      add: (c) => framePaint(wIdx, c, true),
+      remove: (c) => framePaint(wIdx, c, false),
+      toggle: (c, on) => framePaint(wIdx, c, on),
+    },
+  };
+}
+
+function renderHtmlInteractive(htmlText, opts = {}) {
+  content.innerHTML = '';
+  resetDocState();
+  S.mode = 'html';
+  content.classList.add('html-mode');
+  $('home').style.display = 'none';
+  $('reader').style.display = 'block';
+
+  const doc = new DOMParser().parseFromString(htmlText, 'text/html');
+  /* the page's own scripts stay — that's the feature. Everything that could
+     reach off-device or out of the frame still goes. */
+  doc.querySelectorAll('iframe, frame, frameset, object, embed, base, meta[http-equiv]').forEach(n => n.remove());
+  const hasOwnScript = !!doc.querySelector('script');
+  doc.querySelectorAll('style').forEach(s => { s.textContent = stripCssBeacons(s.textContent); });
+  doc.querySelectorAll('[style]').forEach(el => {
+    const v = el.getAttribute('style');
+    if (/url\s*\(/i.test(v)) el.setAttribute('style', stripCssBeacons(v));
+  });
+  if (!doc.head) doc.documentElement.insertBefore(doc.createElement('head'), doc.body);
+
+  const lsKey = 'htmlls.' + (S.docKey || S.docTitle || 'doc');
+  const saved = store.get(lsKey, {});
+
+  const csp = doc.createElement('meta');
+  csp.setAttribute('http-equiv', 'Content-Security-Policy');
+  csp.setAttribute('content', htmlFrameCsp(!hasOwnScript));
+  doc.head.insertBefore(csp, doc.head.firstChild);
+  const shim = doc.createElement('script');
+  shim.textContent = '(' + ALOUD_LS_SHIM.toString() + ')(' + JSON.stringify(saved) + ');';
+  doc.head.insertBefore(shim, csp.nextSibling);
+  /* run the agent only once the document has finished building itself: it sits
+     last in <body>, so inline scripts are already done, but a page that binds
+     DOMContentLoaded still has to render before we can wrap its words */
+  const agent = doc.createElement('script');
+  agent.textContent = '(function(c){var f=' + ALOUD_FRAME_AGENT.toString() + ';' +
+    'var go=function(){setTimeout(function(){f(c)},0)};' +
+    'if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",go);else go();})(' +
+    JSON.stringify({ skipCode: !!S.skipCode }) + ');';
+  doc.body.appendChild(agent);
+
+  const iframe = document.createElement('iframe');
+  iframe.className = 'html-frame';
+  iframe.setAttribute('sandbox', 'allow-scripts');       /* NO allow-same-origin — that's what keeps it opaque */
+  iframe.setAttribute('referrerpolicy', 'no-referrer');
+  iframe.setAttribute('title', S.docTitle || 'Document');
+
+  const f = S.frame = { el: iframe, ops: [], geom: null, geomForce: false, flushQueued: false, ready: false, lsKey, onMsg: null };
+
+  f.onMsg = (e) => {
+    if (!S.frame || S.frame !== f || e.source !== iframe.contentWindow) return;
+    const m = e.data;
+    if (!m || typeof m.t !== 'string' || m.t.slice(0, 6) !== 'aloud:') return;
+    if (m.t === 'aloud:ready') {
+      if (f.ready) return;
+      f.ready = true;
+      clearTimeout(f.giveUp);
+      const tokens = Array.isArray(m.tokens) ? m.tokens : [];
+      if (!tokens.length) { toast('⚠️ No readable text in that document — showing the text view.', 4500); renderFlow(parseHtmlString(htmlText), [], opts); return; }
+      buildFromTokenStream(tokens, tokens.map((_, i) => frameWordEl(i)));
+      finishOpen(opts);
+    } else if (m.t === 'aloud:h') {
+      iframe.style.height = Math.max(200, m.h | 0) + 'px';
+    } else if (m.t === 'aloud:geom') {
+      frameApplyScroll(m);
+    } else if (m.t === 'aloud:tap') {
+      const wIdx = m.word | 0;
+      if (!S.words[wIdx]) return;
+      primeAudioGesture();
+      pauseAll();
+      setSentence(S.words[wIdx].sent);
+      highlightWord(wIdx);
+      S.playing = true; setPlayIcon(true);
+      playCurrent(wIdx);
+    } else if (m.t === 'aloud:press') {
+      if (typeof m.text === 'string') setPronunciation(m.text);
+    } else if (m.t === 'aloud:anchor') {
+      const ir = iframe.getBoundingClientRect();
+      window.scrollTo({ top: window.scrollY + ir.top + (m.top || 0) * (S.zoom?.applied || 1) - 90, behavior: 'smooth' });
+    } else if (m.t === 'aloud:ls') {
+      if (m.data && typeof m.data === 'object') store.set(f.lsKey, m.data);
+    }
+  };
+  window.addEventListener('message', f.onMsg);
+
+  /* if the frame never reports in, fall back rather than showing a blank page */
+  f.giveUp = setTimeout(() => {
+    if (f.ready || S.frame !== f) return;
+    toast('⚠️ Could not run that document — showing the text view.', 5000);
+    renderFlow(parseHtmlString(htmlText), [], opts);
+  }, 12000);
+
+  content.appendChild(iframe);
+  iframe.srcdoc = '<!doctype html>' + doc.documentElement.outerHTML;
+}
+
+/* the agent measured the word after revealing it; apply Aloud's own
+   keep-it-in-the-reading-band rule to the parent's scroll */
+function frameApplyScroll(m) {
+  const f = S.frame;
+  if (!f) return;
+  const ir = f.el.getBoundingClientRect();
+  const z = S.zoom?.applied || 1;
+  const top = ir.top + (m.top || 0) * z;
+  const bottom = ir.top + (m.bottom || 0) * z;
+  const bandTop = 90 + (S.rsvp.open && S.rsvp.pos === 'top' ? 150 : 0);
+  const bandBottom = window.innerHeight - 210 - (S.rsvp.open && S.rsvp.pos === 'bottom' ? 145 : 0);
+  if (!m.force && top >= bandTop && bottom <= bandBottom) return;
+  window.scrollTo({ top: Math.max(0, window.scrollY + top - window.innerHeight / 2), behavior: 'smooth' });
+}
 
 function renderHtmlNative(htmlText, opts = {}) {
   content.innerHTML = '';
@@ -1652,6 +2093,23 @@ function renderHtmlNative(htmlText, opts = {}) {
   wrap.className = 'aloud-html-root';
   while (doc.body.firstChild) wrap.appendChild(doc.body.firstChild);
   shadow.appendChild(wrap);
+
+  /* This view has no scripts, so nothing can ever open a collapsed panel —
+     and the tokenizer below skips what it can't see. On a guide whose every
+     section starts closed that combination hid 97% of the document. Un-hide
+     anything holding text: flattened is worse-looking than the interactive
+     view, but it is readable, and unreachable prose is not a trade. */
+  let unhidden = 0;
+  for (const el of wrap.querySelectorAll('*')) {
+    if (!el.textContent || !el.textContent.trim()) continue;
+    if (el.hidden) { el.hidden = false; unhidden++; }
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none') { el.style.setProperty('display', 'block', 'important'); unhidden++; }
+    else if (cs.visibility === 'hidden') { el.style.setProperty('visibility', 'visible', 'important'); unhidden++; }
+  }
+  if (unhidden) {
+    setTimeout(() => toast('This document’s panels need its own scripts — expanded them all so nothing is skipped. Settings › Interactive HTML keeps them working instead.', 7000), 900);
+  }
 
   /* collect text nodes first (live walking while mutating is unsafe) */
   const tw = document.createTreeWalker(wrap, NodeFilter.SHOW_TEXT);
@@ -1726,6 +2184,11 @@ function resetDocState() {
   S.neuralCache.forEach(c => URL.revokeObjectURL(c.url));
   S.neuralCache.clear();
   if (S.pdf) { try { S.pdf.io?.disconnect(); S.pdf.doc.destroy?.(); } catch {} S.pdf = null; }
+  if (S.frame) {
+    clearTimeout(S.frame.giveUp);
+    if (S.frame.onMsg) window.removeEventListener('message', S.frame.onMsg);
+    S.frame = null;
+  }
   content.classList.remove('pdf-mode');
   content.classList.remove('html-mode');
   content.style.zoom = '';
@@ -1889,6 +2352,15 @@ function setSentence(sIdx, keepWord = false) {
 }
 function maybeScroll(el, force = false) {
   if ((!S.autoScroll && !force) || !el) return;
+  /* interactive HTML: the word lives in the frame, so ask the agent to
+     measure it (after any auto-reveal) and scroll on its reply */
+  if (S.frame) {
+    if (!S.frame.ready || typeof el.wi !== 'number') return;
+    S.frame.geom = el.wi;
+    S.frame.geomForce = S.frame.geomForce || force;
+    frameFlushSoon();
+    return;
+  }
   const r = el.getBoundingClientRect();
   const top = 90 + (S.rsvp.open && S.rsvp.pos === 'top' ? 150 : 0);
   const bottom = window.innerHeight - 210 - (S.rsvp.open && S.rsvp.pos === 'bottom' ? 145 : 0);
@@ -3675,6 +4147,18 @@ $('skipcode-switch').addEventListener('click', e => {
   store.set('skipCode', S.skipCode);
   try { clearNeuralCache(); } catch {}   // spoken text changed — regenerate audio
 });
+$('htmlinteractive-switch').addEventListener('click', async e => {
+  S.htmlInteractive = !S.htmlInteractive;
+  e.target.classList.toggle('on', S.htmlInteractive);
+  store.set('htmlInteractive', S.htmlInteractive);
+  /* an HTML doc is already open: reopen it the other way so the change is visible */
+  if (S.mode === 'html' && S.lastFile && !/\.pdf$/i.test(S.lastFile.name)) {
+    const wasPlaying = S.playing;
+    pauseAll();
+    await openFile(S.lastFile, { view: 'native', resumeWord: S.curWord });
+    if (wasPlaying) playCurrent(S.curWord);
+  }
+});
 $('timingdebug-switch').addEventListener('click', e => {
   S.timingDebug = !S.timingDebug;
   e.target.classList.toggle('on', S.timingDebug);
@@ -3833,6 +4317,7 @@ if (!store.get('autoScroll', true)) $('autoscroll-switch').classList.remove('on'
 renderNeuralQuality();
 if (store.get('skim', false)) $('skim-switch').classList.add('on');
 if (!store.get('skipCode', true)) $('skipcode-switch').classList.remove('on');
+if (!store.get('htmlInteractive', true)) $('htmlinteractive-switch').classList.remove('on');
 if (store.get('timingDebug', false)) $('timingdebug-switch').classList.add('on');
 S.autoScroll = store.get('autoScroll', true);
 if (!store.get('sentHl', true)) $('senthl-switch').classList.remove('on');
