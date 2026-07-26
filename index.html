@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.13.2">
+<meta name="aloud-version" content="v6.14.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1009,6 +1009,74 @@ function coreOf(tok) {
   return m ? { pre: m[1], core: m[2], post: m[3] } : { pre: '', core: tok, post: '' };
 }
 
+/* ---- numbers as words ------------------------------------------------
+   "$50,000" and "5.01(16)" are the last standing source of karaoke drift.
+   Kokoro expands them internally — kokoro-js normalises text its own way
+   before phonemising — so the aligner had to GUESS how many spoken words
+   one display token became, anywhere in a 40-wide window, and a wrong
+   guess shifts every onset after it. The timing badge reads "exact" the
+   whole time, because the duration tensor is fine; it is the mapping onto
+   display tokens that is wrong.
+
+   Writing the words out here removes the guess entirely: Kokoro is handed
+   plain words and says exactly them, so the count is known by construction
+   rather than predicted. It also clears the token's `flex` flag, which is
+   what let the DP roam in the first place.
+
+   Deliberately narrow — only forms whose reading is unambiguous. Bare
+   integers are left alone: "LAW 9039" is a course code, not nine thousand
+   and thirty-nine, and "2016" is a year. */
+const NUM_ONES = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+  'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+const NUM_TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+function intToWords(n) {
+  n = Math.floor(Math.abs(n));
+  if (n < 20) return NUM_ONES[n];
+  if (n < 100) { const r = n % 10; return NUM_TENS[Math.floor(n / 10)] + (r ? ' ' + NUM_ONES[r] : ''); }
+  if (n < 1000) { const r = n % 100; return NUM_ONES[Math.floor(n / 100)] + ' hundred' + (r ? ' ' + intToWords(r) : ''); }
+  for (const [v, name] of [[1e9, 'billion'], [1e6, 'million'], [1e3, 'thousand']]) {
+    if (n >= v) { const r = n % v; return intToWords(Math.floor(n / v)) + ' ' + name + (r ? ' ' + intToWords(r) : ''); }
+  }
+  return String(n);
+}
+/* digits after a decimal point are read one at a time: 5.01 -> "five point zero one" */
+function decToWords(s) {
+  const [i, f] = s.replace(/,/g, '').split('.');
+  const head = intToWords(parseInt(i, 10) || 0);
+  return f ? head + ' point ' + f.split('').map(d => NUM_ONES[+d]).join(' ') : head;
+}
+function numBodyToWords(b) {
+  let m;
+  if ((m = b.match(/^\$(\d+(?:\.\d+)?)([MK])$/i)))          // $1M, $2.5K
+    return decToWords(m[1]) + ' ' + (m[2].toUpperCase() === 'M' ? 'million' : 'thousand') + ' dollars';
+  if ((m = b.match(/^\$(\d[\d,]*)(?:\.(\d{1,2}))?$/))) {     // $300, $7,500, $0.00
+    const d = parseInt(m[1].replace(/,/g, ''), 10);
+    const c = m[2] ? parseInt(m[2].padEnd(2, '0'), 10) : 0;
+    let s = intToWords(d) + (d === 1 ? ' dollar' : ' dollars');
+    if (c) s += ' and ' + intToWords(c) + (c === 1 ? ' cent' : ' cents');
+    return s;
+  }
+  if ((m = b.match(/^(\d[\d,]*(?:\.\d+)?)%$/)))              // 15%, 8.5%
+    return decToWords(m[1]) + ' percent';
+  if ((m = b.match(/^(\d+)\.(\d+)(?:\((\d+)\))?$/)))         // 5.01, 5.01(16), 7.1
+    return intToWords(+m[1]) + ' point ' + m[2].split('').map(d => NUM_ONES[+d]).join(' ') +
+           (m[3] ? ' ' + intToWords(+m[3]) : '');
+  if ((m = b.match(/^(\d{1,3}(?:,\d{3})+)$/)))               // 50,000
+    return intToWords(parseInt(m[1].replace(/,/g, ''), 10));
+  return null;
+}
+/* returns the token with its number spelled out, keeping the punctuation
+   that surrounds it (pause anchors and the aligner's tail matching rely on
+   it), or null when the token is not one of the handled forms */
+function verbalizeNumeric(tok) {
+  /* the digit run must END on a digit, or a trailing "," is eaten as part of
+     the number and the clause break is lost ("$6,000," -> "$6,000" + ",") */
+  const m = tok.match(/^([^\w$]*)(\$?\d(?:[\d,]*\d)?(?:\.\d+)?(?:\(\d+\))?%?[MK]?)([^\w]*)$/i);
+  if (!m) return null;
+  const words = numBodyToWords(m[2]);
+  return words === null ? null : m[1] + words + m[3];
+}
+
 /* what the TTS engine should actually say for a word of the document.
    A muted word (a source citation) says nothing at all — the timing layers
    already understand a token with no spoken form, so it costs no audio and
@@ -1028,6 +1096,9 @@ function spokenFor(tok) {
   if (rep) return pre + rep + post;
   const full = S.dict[lower];
   if (full) return full;
+  /* after the user's own pronunciations, so a custom reading always wins */
+  const num = verbalizeNumeric(tok);
+  if (num !== null) return num;
   return tok;
 }
 
@@ -3301,9 +3372,13 @@ function analyzeWave(data, sr) {
 }
 
 /* absolute per-word start times (sec) for a sentence's audio */
-/* seconds of genuine silence at the head of a clip, on analyzeWave's frame
-   size and threshold. The lead-in trim is bounded by this: a mis-aligned
-   starts[0] must never be allowed to cut into speech. */
+/* seconds of genuine silence at the head of a clip. The lead-in trim is
+   bounded by this, so a mis-aligned starts[0] can never cut into speech.
+   The threshold is far lower than analyzeWave's 5.5% (which exists to find
+   PAUSES, where a false positive is harmless): a word opening on a quiet
+   fricative — "first", "seven", "the" — sits well under 5.5% of a clip's
+   peak, so that threshold called the onset silence and the trim clipped the
+   consonant. That is audible as a distorted start. */
 function leadSilenceSec(data, sr) {
   const frameS = 0.02, frame = Math.max(1, Math.round(sr * frameS));
   const n = Math.floor(data.length / frame);
@@ -3317,10 +3392,19 @@ function leadSilenceSec(data, sr) {
     rms[i] = Math.sqrt(s / frame);
     if (rms[i] > peak) peak = rms[i];
   }
-  const thr = Math.max(1e-4, peak * 0.055);
+  const thr = Math.max(1e-5, peak * 0.012);
   let lead = 0;
   while (lead < n && rms[lead] < thr) lead++;
   return lead * frameS;
+}
+/* how much of a clip's head playback may skip: measured silence and the
+   first word's onset, whichever is nearer, less a margin, and never more
+   than 0.3s however long the pad claims to be */
+const LEAD_TRIM_MARGIN = 0.08, LEAD_TRIM_MAX = 0.30;
+function leadTrimSec(entry) {
+  if (!entry || !entry.starts || !entry.starts.length) return 0;
+  const bound = Math.min(entry.leadSec ?? 0, entry.starts[0]);
+  return Math.max(0, Math.min(bound - LEAD_TRIM_MARGIN, LEAD_TRIM_MAX));
 }
 
 function alignTimeline(displayTokens, wave, durationSec) {
@@ -3994,10 +4078,9 @@ async function speakNeural(sentIdx, fromWord) {
      longer cut into speech. */
   const startFrom = Math.max(sent.start, Math.min(fromWord ?? sent.start, sent.end - 1));
   const rel = startFrom - sent.start;
-  const firstOnset = entry.starts[rel] ?? 0;
   const seekTo = rel === 0
-    ? Math.max(0, Math.min(entry.leadSec ?? 0, firstOnset) - 0.03)   // skip measured silence only
-    : Math.max(0, firstOnset - 0.06);                                // tap-to-read: land on that word
+    ? leadTrimSec(entry)                                        // skip measured silence only
+    : Math.max(0, (entry.starts[rel] ?? 0) - 0.06);              // tap-to-read: land on that word
   if (seekTo > 0.04 && seekTo < entry.durationSec * 0.9) {
     na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) na.currentTime = seekTo; }, { once: true });
   }
@@ -4063,8 +4146,7 @@ async function speakNeuralStitched(run) {
        seeks past it, so the batch keeps the same rhythm and the same
        word-to-audio relationship (the inter-sentence rests below are the
        breather's, and stay) */
-    const t0 = en.starts && en.starts.length
-      ? Math.max(0, Math.min(en.leadSec ?? 0, en.starts[0]) - 0.03) : 0;
+    const t0 = leadTrimSec(en);
     const skip = Math.min(n, Math.max(0, Math.round(t0 * sr)));
     const f = new Float32Array(n - skip);
     for (let i = 0; i < f.length; i++) f[i] = v.getInt16(44 + (i + skip) * 2, true) / 32768;
