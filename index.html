@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.12.0">
+<meta name="aloud-version" content="v6.12.1">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -711,6 +711,9 @@
   <h3 style="margin-top:18px">Breathers</h3>
   <div class="chips" id="breather-chips"></div>
   <div class="voice-note">How long the reader rests at commas, sentence ends, and new paragraphs — in the speed-reader panel and between spoken paragraphs. Speed itself is unchanged.</div>
+  <h3 style="margin-top:18px">Karaoke sync</h3>
+  <div class="chips" id="lag-chips"></div>
+  <div class="voice-note" id="lag-note"></div>
 </div>
 
 <div class="sheet" id="settings-sheet">
@@ -962,6 +965,7 @@ const S = {
   skim: store.get('skim', false),       // read only the first sentence of each paragraph
   skipCode: store.get('skipCode', true),// don't voice URLs / code blocks
   skipCitations: store.get('skipCitations', true),  // don't voice "(Tr P1 [~0:03])" source pointers
+  karaokeLag: store.get('karaokeLag', 'auto'),  // ms the highlight trails the audio clock ('auto' = device output latency)
   timingDebug: store.get('timingDebug', false), // badge: exact vs estimated karaoke timing
   sleep: { mode: null, until: 0, iv: null, preset: 0 },   // sleep timer
   costCum: null, costGen: 0,            // per-sentence cumulative speech-time (honest ETA)
@@ -3668,8 +3672,11 @@ function ensureNeuralAudio() {
     syncClock();
     naTickStart();
   });
-  /* buffering / stalled: currentTime stops advancing, so stop predicting */
-  ['waiting', 'stalled', 'suspend'].forEach(ev => NA.addEventListener(ev, () => {
+  /* buffering / stalled / paused: currentTime stops advancing, so stop
+     predicting. 'pause' matters most — S.audioPlay outlives a pause, so
+     without this a resume would extrapolate from a wall-clock stamp taken
+     before the pause and jump the highlight the full 1.5s cap ahead. */
+  ['waiting', 'stalled', 'suspend', 'pause'].forEach(ev => NA.addEventListener(ev, () => {
     const P = S.audioPlay;
     if (P) { P.rolling = false; syncClock(); }
   }));
@@ -3706,6 +3713,9 @@ function primeAudioGesture() {
   if (audioPrimed || S.audioPlay) return;
   const na = ensureNeuralAudio();
   audioPrimed = true;
+  /* inside a real gesture an AudioContext is allowed to start, which is when
+     the browser will actually report the output device's latency */
+  try { detectOutputLatency(); audioLagCtx?.resume?.().catch(() => {}); } catch {}
   try {
     na.src = SILENT_WAV;
     /* only pause if real playback hasn't taken the element over meanwhile */
@@ -3737,6 +3747,44 @@ function naMediaPos(P) {
 /* start the paint loop, at most one at a time — 'play', 'playing' and
    'seeked' can all fire for a single sentence, and each used to spawn its
    own self-perpetuating rAF chain */
+/* ---- karaoke sync offset ---------------------------------------------
+   Even with onsets read exactly from the model, the highlight can sit ahead
+   of what you HEAR, because currentTime is where the audio has been handed
+   to the output — not where it reaches your ears. That gap is the device's
+   output latency: tens of ms on wired output, but 150-300ms over Bluetooth,
+   which at 1.75x is a word or two. It shows up at the start of playback and
+   after every sentence gap, because those are the moments with a clean
+   onset to compare against; mid-sentence it is invisible.
+
+   No aligner can remove it — it is downstream of the audio clock — so the
+   compensation is an explicit offset. Default is whatever the browser
+   reports for the output device; the chips let you dial it by ear. */
+let audioLagCtx = null, audioLagDetected = null, audioLagProbeAt = 0;
+function detectOutputLatency() {
+  if (audioLagDetected !== null) return audioLagDetected;
+  /* the figure only becomes available once the context is running, so keep
+     re-probing — but at most once a second, since naTick asks every frame */
+  const now = performance.now();
+  if (now - audioLagProbeAt < 1000) return null;
+  audioLagProbeAt = now;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return (audioLagDetected = 0);
+    audioLagCtx = audioLagCtx || new AC();
+    /* outputLatency is the real figure; baseLatency is the context's own
+       buffer and is the best fallback where outputLatency is unreported */
+    const l = audioLagCtx.outputLatency || audioLagCtx.baseLatency || 0;
+    if (l > 0 && l < 1) audioLagDetected = Math.round(l * 1000);
+  } catch { audioLagDetected = 0; }
+  return audioLagDetected;   // null until a real number turns up
+}
+/* seconds to subtract from the audio clock before choosing a word */
+function karaokeLagSec() {
+  const v = S.karaokeLag;
+  const ms = v === 'auto' ? (detectOutputLatency() ?? 0) : (+v || 0);
+  return ms / 1000;
+}
+
 function naTickStart() {
   const P = S.audioPlay;
   if (!P || P.ticking) return;
@@ -3747,7 +3795,9 @@ function naTickStart() {
 function naTick() {
   const P = S.audioPlay;
   if (!P || !S.playing) { if (P) P.ticking = false; return; }
-  const ct = naMediaPos(P);
+  /* what you are HEARING right now, which trails the audio clock by the
+     output latency (see karaokeLagSec) */
+  const ct = Math.max(0, naMediaPos(P) - karaokeLagSec());
   let seg = P.segs[0];
   for (const g of P.segs) { if (g.t0 <= ct + 0.02) seg = g; else break; }
   if (seg.sentIdx !== S.curSent) setSentence(seg.sentIdx, true);
@@ -4414,8 +4464,35 @@ function renderSpeedSheet() {
     });
     bbox.appendChild(b);
   });
+  renderLagChips();
 }
 const BREATHER_PRESETS = [[0, 'Off'], [0.6, 'Subtle'], [1, 'Normal'], [1.5, 'Extra'], [2.2, 'Max']];
+/* how far the highlight trails the audio clock, in ms. Bluetooth output is
+   commonly 150-250ms; wired is near zero. */
+const LAG_PRESETS = [['auto', 'Auto'], [0, 'None'], [80, '80 ms'], [160, '160 ms'], [240, '240 ms'], [320, '320 ms']];
+function renderLagChips() {
+  const box = $('lag-chips');
+  if (!box) return;
+  box.innerHTML = '';
+  LAG_PRESETS.forEach(([v, label]) => {
+    const b = document.createElement('button');
+    b.className = 'chip' + (v === S.karaokeLag ? ' on' : '');
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      S.karaokeLag = v; store.set('karaokeLag', v);
+      renderLagChips();
+      toast(v === 'auto' ? 'Karaoke sync: matching this device.' : v === 0 ? 'Karaoke sync: no offset.' : `Karaoke sync: highlight held back ${v} ms.`);
+    });
+    box.appendChild(b);
+  });
+  const det = detectOutputLatency();
+  const note = $('lag-note');
+  if (note) note.textContent =
+    'If the highlighted word runs ahead of what you hear — most noticeable on the first words after a pause — hold it back here. ' +
+    'The lag is your audio output, not the timing: Bluetooth headphones buffer 150–250 ms, wired almost nothing. ' +
+    (det ? `Auto uses what this browser reports for your output device (${det} ms).`
+         : 'This browser does not report a figure for your output device, so Auto is no offset — pick one by ear.');
+}
 $('btn-speed').addEventListener('click', () => { renderSpeedSheet(); openSheet('speed-sheet'); });
 $('speed-range').addEventListener('input', e => {
   const v = Math.round(+e.target.value * 20) / 20;
