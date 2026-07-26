@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.12.1">
+<meta name="aloud-version" content="v6.12.2">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -3853,10 +3853,19 @@ async function speakNeural(sentIdx, fromWord) {
   na.src = entry.url;
   na.playbackRate = S.rate;
 
+  /* Start the clip just before its first word instead of at 0.
+     Kokoro pads EVERY clip with a long lead-in: the leading $ token of
+     pred_dur measures 14-18 frames, which at 600 samples/frame and 24kHz is
+     350-450ms of pure silence before the first phoneme. Playing from 0 meant
+     the sentence's first word sat highlighted through all of it — and with a
+     breather gap and the generate/decode wait stacked on top, that reads as
+     the karaoke running ahead at the start of every sentence. Deliberate
+     pauses are the breather setting's job; this is just dead air.
+     The same seek serves a mid-sentence start (tap-to-read, resume). */
   const startFrom = Math.max(sent.start, Math.min(fromWord ?? sent.start, sent.end - 1));
-  if (startFrom > sent.start) {
-    const t = entry.starts[startFrom - sent.start];
-    na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) na.currentTime = Math.max(0, t - 0.05); }, { once: true });
+  const seekTo = Math.max(0, (entry.starts[startFrom - sent.start] ?? 0) - 0.06);
+  if (seekTo > 0.04 && seekTo < entry.durationSec * 0.9) {
+    na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) na.currentTime = seekTo; }, { once: true });
   }
   try { await na.play(); } catch (e) { console.warn(e); }
   highlightWord(startFrom);
@@ -3909,15 +3918,23 @@ async function speakNeuralStitched(run) {
   /* decode each cached WAV back to samples (16-bit mono — our own format
      from audioBlobParts, so a 44-byte header + PCM is a safe assumption) */
   const parts = [];
+  const trims = [];                 // seconds dropped off the front of each part
   let sr = 24000;
   for (const en of entries) {
     const buf = await (await fetch(en.url)).arrayBuffer();
     const v = new DataView(buf);
     sr = v.getUint32(24, true) || sr;
     const n = Math.max(0, (buf.byteLength - 44) >> 1);
-    const f = new Float32Array(n);
-    for (let i = 0; i < n; i++) f[i] = v.getInt16(44 + i * 2, true) / 32768;
+    /* drop Kokoro's ~0.4s lead-in silence, exactly as the per-sentence path
+       seeks past it, so the batch keeps the same rhythm and the same
+       word-to-audio relationship (the inter-sentence rests below are the
+       breather's, and stay) */
+    const t0 = en.starts && en.starts.length ? Math.max(0, en.starts[0] - 0.06) : 0;
+    const skip = Math.min(n, Math.max(0, Math.round(t0 * sr)));
+    const f = new Float32Array(n - skip);
+    for (let i = 0; i < f.length; i++) f[i] = v.getInt16(44 + (i + skip) * 2, true) / 32768;
     parts.push(f);
+    trims.push(skip / sr);
   }
   if (genToken !== S.neuralGenToken || !S.playing) return;
   /* stitch with breather-scaled silence between sentences (playbackRate
@@ -3931,7 +3948,10 @@ async function speakNeuralStitched(run) {
   let off = 0;
   parts.forEach((p, k) => {
     const t0 = off / sr;
-    segs.push({ sentIdx: run[k], sentStart: S.sentences[run[k]].start, t0, starts: entries[k].starts.map(s => s + t0) });
+    /* onsets are in the untrimmed clip's time base, so shift by t0 MINUS
+       whatever was cut off that part's front */
+    segs.push({ sentIdx: run[k], sentStart: S.sentences[run[k]].start, t0,
+                starts: entries[k].starts.map(s => Math.max(t0, s + t0 - trims[k])) });
     all.set(p, off);
     off += p.length + gaps[k];
   });
