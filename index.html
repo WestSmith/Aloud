@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.13.0">
+<meta name="aloud-version" content="v6.13.1">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1316,7 +1316,17 @@ async function ensurePhonemes(displayTokens, maxWaitMs = 1500) {
     phonemeCache.set(spoken, null);   // reserve so parallel calls don't duplicate
     jobs.push(
       phonemizeFn(spoken, 'en-us')
-        .then(r => phonemeCache.set(spoken, countPhones(Array.isArray(r) ? r.join(' ') : String(r))))
+        .then(r => {
+          const ph = (Array.isArray(r) ? r.join(' ') : String(r)).trim();
+          const e = countPhones(ph);
+          /* how many WORDS espeak turns this token into, and whether it makes
+             any sound at all. countPhones floors v at 0.5, so v+c can never
+             reach 0 — the word count is the only honest silence test. Both
+             matter to the aligner: "$0.00" and "5.01(16)" become several
+             spoken words, and "⭐" becomes none. */
+          e.w = ph ? ph.split(/\s+/).filter(t => /[^\sˈˌ',.\-()]/u.test(t)).length : 0;
+          phonemeCache.set(spoken, e);
+        })
         .catch(() => phonemeCache.delete(spoken))
     );
   }
@@ -3252,6 +3262,28 @@ function analyzeWave(data, sr) {
 }
 
 /* absolute per-word start times (sec) for a sentence's audio */
+/* seconds of genuine silence at the head of a clip, on analyzeWave's frame
+   size and threshold. The lead-in trim is bounded by this: a mis-aligned
+   starts[0] must never be allowed to cut into speech. */
+function leadSilenceSec(data, sr) {
+  const frameS = 0.02, frame = Math.max(1, Math.round(sr * frameS));
+  const n = Math.floor(data.length / frame);
+  if (n < 2) return 0;
+  const rms = new Float32Array(n);
+  let peak = 0;
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    const o = i * frame;
+    for (let j = 0; j < frame; j++) { const v = data[o + j]; s += v * v; }
+    rms[i] = Math.sqrt(s / frame);
+    if (rms[i] > peak) peak = rms[i];
+  }
+  const thr = Math.max(1e-4, peak * 0.055);
+  let lead = 0;
+  while (lead < n && rms[lead] < thr) lead++;
+  return lead * frameS;
+}
+
 function alignTimeline(displayTokens, wave, durationSec) {
   const tl = buildTimeline(displayTokens);
   const speechStart = Math.min(wave.lead, durationSec * 0.4);
@@ -3384,12 +3416,19 @@ function alignExactStarts(displayTokens, pwords, durationSec) {
        DP to steal a neighbour's, shifting every onset around it. The phoneme
        cache is the authority here: it holds espeak's own answer. */
     const ph = phonemeCache.get(spoken.toLowerCase());
-    if (parts.length && ph && ph.v + ph.c === 0) return { count: 0, flex: false, mergeable: false };
+    if (parts.length && ph && ph.w === 0) return { count: 0, flex: false, mergeable: false };
     const cores = parts.map(w => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''));
     const flex = cores.some(c => /[^\p{L}'’\-]/u.test(c)) || parts.some(w => /[\d$£]/.test(w));
     const mergeable = !flex && parts.length === 1 && cores[0].length >= 1 &&
                       cores[0].length <= 4 && /^\p{L}+$/u.test(cores[0]) && !tailOf(parts[0]);
-    return { count: parts.length, flex, mergeable };
+    /* For a flex token ("$0.00", "5.01(16),", "15%") the display form says
+       nothing about how many words the voice will say, and the DP was left to
+       pick anywhere in a 40-wide window — which is where the drift on money
+       and rule numbers came from. espeak (Kokoro's own G2P) already told us
+       the answer; use it as the expected count so the DP's deviation penalty
+       pulls toward the truth instead of guessing. */
+    const count = (flex && ph && ph.w > 0) ? ph.w : parts.length;
+    return { count, flex, mergeable };
   });
   const dTail = displayTokens.map(t => tailOf(spokenFor(t)));
   const pTail = pwords.map(w => tailOf(w.ph));
@@ -3660,7 +3699,10 @@ async function generateNeuralNow(sentIdx, key) {
   const durationSec = total / sr;
   const url = audioBlobParts({ audio, sampling_rate: sr });
   const timing = !spokenChunks || exactChunks === spokenChunks ? 'exact' : exactChunks ? 'mixed' : 'estimated';
-  const entry = { url, starts, durationSec, timing };
+  /* silence actually present at the head of this clip — the ceiling on how
+     much of it playback may skip */
+  const leadSec = leadSilenceSec(audio, sr);
+  const entry = { url, starts, durationSec, timing, leadSec };
   S.neuralCache.set(key, entry);
   if (S.neuralCache.size > 24) {
     const oldest = S.neuralCache.keys().next().value;
@@ -3904,9 +3946,19 @@ async function speakNeural(sentIdx, fromWord) {
      breather gap and the generate/decode wait stacked on top, that reads as
      the karaoke running ahead at the start of every sentence. Deliberate
      pauses are the breather setting's job; this is just dead air.
-     The same seek serves a mid-sentence start (tap-to-read, resume). */
+
+     Bounded by the silence MEASURED in the waveform, never by starts[0]
+     alone: the model's pad routinely overshoots the real onset (by up to
+     70ms in the clips measured), and trusting it clipped the first phoneme
+     — which is what made the voice sound distorted at a sentence's start
+     and put the opening words out of step. A mis-aligned starts[0] can no
+     longer cut into speech. */
   const startFrom = Math.max(sent.start, Math.min(fromWord ?? sent.start, sent.end - 1));
-  const seekTo = Math.max(0, (entry.starts[startFrom - sent.start] ?? 0) - 0.06);
+  const rel = startFrom - sent.start;
+  const firstOnset = entry.starts[rel] ?? 0;
+  const seekTo = rel === 0
+    ? Math.max(0, Math.min(entry.leadSec ?? 0, firstOnset) - 0.03)   // skip measured silence only
+    : Math.max(0, firstOnset - 0.06);                                // tap-to-read: land on that word
   if (seekTo > 0.04 && seekTo < entry.durationSec * 0.9) {
     na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) na.currentTime = seekTo; }, { once: true });
   }
@@ -3972,7 +4024,8 @@ async function speakNeuralStitched(run) {
        seeks past it, so the batch keeps the same rhythm and the same
        word-to-audio relationship (the inter-sentence rests below are the
        breather's, and stay) */
-    const t0 = en.starts && en.starts.length ? Math.max(0, en.starts[0] - 0.06) : 0;
+    const t0 = en.starts && en.starts.length
+      ? Math.max(0, Math.min(en.leadSec ?? 0, en.starts[0]) - 0.03) : 0;
     const skip = Math.min(n, Math.max(0, Math.round(t0 * sr)));
     const f = new Float32Array(n - skip);
     for (let i = 0; i < f.length; i++) f[i] = v.getInt16(44 + (i + skip) * 2, true) / 32768;
