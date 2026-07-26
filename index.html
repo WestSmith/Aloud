@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.14.2">
+<meta name="aloud-version" content="v6.15.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -3377,9 +3377,17 @@ function analyzeWave(data, sr) {
    standalone "·" and 102 "→" across the two Week guides — and the aligner
    must not spend a spoken word on one. The phoneme cache proves this per
    token, but only once G2P has run; this covers the first sentences too.
-   Deliberately excludes "+", "=", "/", "%" and the dashes: espeak really
-   does say "plus", "equals", "slash", and a dash earns a pause we want. */
-const NONSPEECH_RE = /^[\p{Extended_Pictographic}←-⇿⌀-➿⬀-⯿■-◿·•▪▫▸▶◀●○■□★☆✓✔✗✕¶]+$/u;
+   Dashes and stray punctuation belong here too. They earn a PAUSE, which is
+   why they stay in the text handed to Kokoro — but a pause is not a spoken
+   word, and requiring one is what broke `The "too busy" line diverted
+   students — but it's irrelevant.`: with 10 display tokens against 9 spoken
+   blobs, the em dash claimed a blob and everything from "busy" to the dash
+   slid one word late, up to 500ms off. Measured against the model's own
+   durations, that sentence now aligns to 0ms.
+
+   Still excludes "+", "=", "/", "%", "&" and "$": espeak really does say
+   "plus", "equals", "slash", "percent" and "and" for those. */
+const NONSPEECH_RE = /^[\p{Extended_Pictographic}←-⇿⌀-➿⬀-⯿■-◿·•▪▫▸▶◀●○■□★☆✓✔✗✕¶—–‒―−…"'“”‘’«»(){}\[\],.;:!?\-]+$/u;
 
 /* seconds of genuine silence at the head of a clip. The lead-in trim is
    bounded by this, so a mis-aligned starts[0] can never cut into speech.
