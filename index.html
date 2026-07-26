@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.11.0">
+<meta name="aloud-version" content="v6.12.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -220,6 +220,10 @@
     background: var(--word-hl-bg) !important; color: var(--word-hl-fg);
     box-shadow: 0 2px 10px color-mix(in srgb, var(--word-hl-bg) 50%, transparent);
   }
+  /* a source citation the voice skips: still readable on the page, visibly
+     not part of the audio, so it's obvious WHY it went unsaid */
+  #content .w.w-mute { opacity: .45; }
+  #content .w.w-mute.speaking { opacity: 1; }
 
   /* ---------- Player bar ---------- */
   #player {
@@ -753,6 +757,10 @@
     <div class="switch on" id="skipcode-switch"></div>
   </div>
   <div class="set-row">
+    <div class="lbl">Skip source citations<small>Don't read the reference pointers a study guide cites itself with — “(Tr P1 [~0:03])”, “Slide 14 · Tr P1 [0:17]”, “Source: Week 11 Slides”, “(pp. 2–3)”. Skipped words stay on the page, dimmed. Rule and by-law numbers are always read.</small></div>
+    <div class="switch on" id="skipcit-switch"></div>
+  </div>
+  <div class="set-row">
     <div class="lbl">Interactive HTML<small>Let a study guide's own quizzes, flip cards and “mark done” progress work, by running it in a sandboxed frame that can't reach Aloud, your files or the network. Turn off to open HTML read-only with all scripts stripped.</small></div>
     <div class="switch on" id="htmlinteractive-switch"></div>
   </div>
@@ -953,6 +961,7 @@ const S = {
   breatherToken: 0,                     // cancels a pending inter-paragraph gap
   skim: store.get('skim', false),       // read only the first sentence of each paragraph
   skipCode: store.get('skipCode', true),// don't voice URLs / code blocks
+  skipCitations: store.get('skipCitations', true),  // don't voice "(Tr P1 [~0:03])" source pointers
   timingDebug: store.get('timingDebug', false), // badge: exact vs estimated karaoke timing
   sleep: { mode: null, until: 0, iv: null, preset: 0 },   // sleep timer
   costCum: null, costGen: 0,            // per-sentence cumulative speech-time (honest ETA)
@@ -996,6 +1005,12 @@ function coreOf(tok) {
   return m ? { pre: m[1], core: m[2], post: m[3] } : { pre: '', core: tok, post: '' };
 }
 
+/* what the TTS engine should actually say for a word of the document.
+   A muted word (a source citation) says nothing at all — the timing layers
+   already understand a token with no spoken form, so it costs no audio and
+   simply shares the next word's onset. */
+function spokenOfWord(w) { return w && w.mute ? '' : spokenFor(w ? w.text : ''); }
+
 /* what the TTS engine should actually say for a display token */
 const URL_TOKEN_RE = /(?:https?:\/\/|www\.)\S/i;
 function spokenFor(tok) {
@@ -1010,6 +1025,204 @@ function spokenFor(tok) {
   const full = S.dict[lower];
   if (full) return full;
   return tok;
+}
+
+/* ---- source citations -------------------------------------------------
+   Study guides built from a lecture carry provenance inline: "(Tr P1
+   [~0:03])", "(Slide 43; Tr P2 [~0:48:00])", "Slide 14 · Tr P1 [0:17]",
+   "Source: Week 11 Slides, Slide 2". Read aloud, every one of those is a
+   spoken serial number in the middle of a sentence.
+
+   The rule is deliberately narrow, because most parentheses in the same
+   documents ARE prose — "(LSO)", "(b)", "(verbatim)", "(pleadings,
+   research, correspondence)". A run is only muted when EVERY token in it
+   is reference vocabulary (Tr / Slide / Transcript / p. / para / ¶ / a
+   locator / a timestamp) AND at least one token is a strong locator (a
+   timestamp, or a reference word carrying a number). Rule numbers, by-law
+   numbers and bare enumerations are left alone on purpose: in a law
+   course those are the examinable content, not the citation. ---- */
+
+const CIT_TIME_RE   = /^[[(]?[~≈]?\d{1,2}:\d{2}(?::\d{2})?[\])]?$/;     // [0:03] [~0:48:00] 0:12:23
+const CIT_RANGE_RE  = /^[[(]?[~≈]?\d{1,2}:\d{2}(?::\d{2})?[\])]?[–—-][[(]?[~≈]?\d{1,2}:\d{2}(?::\d{2})?[\])]?$/;
+const CIT_WORD_RE   = /^(?:tr|transcript|transcripts|slide|slides|p|pp|pg|pgs|page|pages|para|paras|paragraph|paragraphs|¶|fig|figs|figure|min|mins|at|and|to|see|also)$/;
+const CIT_NUM_RE    = /^(?:p\.?|pp\.?|¶)?\d{1,4}(?:[–—-]\d{1,4})?$/;    // 13   20–21   24-27
+const CIT_PART_RE   = /^p(?:t|art)?\.?\s?\d{1,3}$|^p\d{1,3}$/i;         // P1  P2  Pt.3
+const CIT_MONTH_RE  = /^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)(?:uary|ruary|ch|il|e|y|ust|ember|ober|tember)?$/;
+
+/* strip the punctuation a whitespace tokenizer leaves glued on, but keep
+   the inner shape (a timestamp's own brackets and colons) intact */
+function citBare(tok) {
+  return tok.replace(/^[([{«"“'’]+/, '').replace(/[)\]}»"”'’.,;:·]+$/, '');
+}
+
+/* 'strong' = a timestamp;  'ref' = a reference noun (Tr, Slide, p.);
+   'num' = a locator a reference noun can point at;  'conn' = filler that
+   may sit inside a run but never extends it;  'sep' = bare punctuation;
+   null = ordinary prose, which ends any run. */
+const CIT_REF_RE  = /^(?:tr|transcript|transcripts|slide|slides|p|pp|pg|pgs|page|pages|para|paras|paragraph|paragraphs|¶|fig|figs|figure)$/;
+function citKind(tok) {
+  const bare = citBare(tok);
+  if (!bare) return 'sep';                                  // lone punctuation: rides along
+  if (CIT_TIME_RE.test(bare) || CIT_RANGE_RE.test(bare)) return 'strong';
+  const low = bare.toLowerCase().replace(/\.$/, '');
+  if (CIT_REF_RE.test(low)) return 'ref';
+  if (CIT_PART_RE.test(bare)) return 'num';                 // P1 / P2 — only ever a locator here
+  if (CIT_WORD_RE.test(low)) return 'conn';
+  if (CIT_NUM_RE.test(bare)) return 'num';
+  if (CIT_MONTH_RE.test(low)) return 'num';
+  if (/^(?:week|wk)$/.test(low)) return 'conn';
+  return null;                                              // real prose — ends the run
+}
+
+/* does a token close a bracket group / end a clause? */
+const CIT_OPENS_RE  = /^[([]/;
+const CIT_CLOSES_RE = /[)\]]/;
+const CIT_BREAK_RE  = /[—–·:;]$/;
+/* tested against the RAW token: the colon is what makes it an announcement.
+   Bare "source" is ordinary prose ("not printed in any Week 11 source"). */
+const CIT_LEADIN_RE = /^sources?[::]$/i;
+
+/* mask of display tokens that are citation apparatus rather than prose.
+   `tokens` is one sentence's whitespace tokens, in order. */
+function markCitations(tokens) {
+  const n = tokens.length;
+  const mute = new Uint8Array(n);
+  if (!n) return mute;
+  const kind = tokens.map(citKind);
+
+  /* a run qualifies when it is all reference vocabulary and carries a real
+     locator: a timestamp, or a reference word next to a number */
+  const qualifies = (a, b) => {
+    let strong = false, ref = -1, sawNum = false;
+    for (let i = a; i < b; i++) {
+      const k = kind[i];
+      if (k === null) return false;
+      if (k === 'strong') strong = true;
+      if (k === 'ref') ref = i;
+      if (k === 'num' && ref >= 0) sawNum = true;
+    }
+    return strong || (ref >= 0 && sawNum);
+  };
+  const apply = (a, b) => { for (let i = a; i < b; i++) mute[i] = 1; };
+
+  /* (1) bracketed groups: mute piecewise, so "(Tr P1 [~0:03], Rule 3.01)"
+     loses the transcript pointer and keeps the rule number. The brackets
+     themselves go only when nothing inside survived. */
+  for (let i = 0; i < n; i++) {
+    if (!CIT_OPENS_RE.test(tokens[i])) continue;
+    let j = i, depth = 0;
+    for (; j < n; j++) {
+      depth += (tokens[j].match(/[([]/g) || []).length;
+      depth -= (tokens[j].match(/[)\]]/g) || []).length;
+      if (depth <= 0) break;
+    }
+    /* unclosed, too long to be a citation, or a single self-contained token
+       like "[0:17]" — that one is left to the bare-run pass below, which
+       can fold it together with the "Tr P1" in front of it */
+    if (j >= n || j - i > 14 || j === i) continue;
+    /* split the group's interior on ; and , into pieces */
+    let allMuted = true, any = false;
+    let p = i;
+    for (let q = i; q <= j; q++) {
+      const last = q === j;
+      if (last || /[;,]$/.test(tokens[q])) {
+        if (qualifies(p, q + 1)) { apply(p, q + 1); any = true; } else allMuted = false;
+        p = q + 1;
+      }
+    }
+    if (any && allMuted) { mute[i] = 1; mute[j] = 1; }       // whole group was apparatus
+    else if (any) {
+      /* keep the brackets: un-mute the opener/closer if they carry prose */
+      if (kind[i] === null) mute[i] = 0;
+      if (kind[j] === null) mute[j] = 0;
+    }
+    i = j;
+  }
+
+  /* (2) bare runs, the form used in figure labels and table cells:
+     "Slide 14 · Tr P1 [0:17]", "— Tr P2 [0:12:23].", "Tr P1 [0:00:03]".
+
+     A run carrying BOTH a reference word and a timestamp is unambiguous —
+     "Tr P1 [0:17]" is never prose — so it goes wherever it sits. A run
+     without a timestamp ("Slide 43", "Slides 20–22") is only muted when
+     fenced on both sides by a clause break, the sentence edge, or a
+     "Source:" lead-in, so "the Slide 43 checklist" keeps its pointer. */
+  /* a "Source:" lead-in already ends in a colon, so CIT_BREAK_RE covers it */
+  const fencedLeft = (a) => a === 0 || CIT_BREAK_RE.test(tokens[a - 1]);
+  const fencedRight = (b) => b >= n || CIT_BREAK_RE.test(tokens[b - 1]) ||
+    /[.;,]$/.test(tokens[b - 1]) || CIT_CLOSES_RE.test(tokens[b - 1]);
+  /* tightest end for a run: through the last timestamp, else through the
+     number that follows the last reference word. Keeps "and 12 more" out
+     of "Tr P1 [0:05] and 12 more". */
+  const runEnd = (a, b) => {
+    let lastStrong = -1, lastRef = -1;
+    for (let k = a; k < b; k++) {
+      if (kind[k] === 'strong') lastStrong = k;
+      if (kind[k] === 'ref') lastRef = k;
+    }
+    if (lastStrong >= 0) return lastStrong + 1;
+    if (lastRef >= 0) return lastRef + 1 < b && kind[lastRef + 1] === 'num' ? lastRef + 2 : lastRef + 1;
+    return b;
+  };
+  const tryRun = (a, b) => {
+    const e = runEnd(a, b);
+    if (e <= a || !qualifies(a, e)) return false;
+    const seg = kind.slice(a, e);
+    const labelled = kind[a] === 'ref' && CIT_BREAK_RE.test(tokens[e - 1]);   // "Slide 21:" heads a label
+    /* "Source:" announces a reference outright, so what follows needs no
+       fencing on the right — the flat token stream of an HTML document has
+       no block boundary to fence against anyway ("…Slide 12</div>" runs
+       straight into the next paragraph's first word) */
+    const ledIn = a > 0 && CIT_LEADIN_RE.test(tokens[a - 1]);
+    if (!((seg.includes('strong') && seg.includes('ref')) || labelled || ledIn ||
+          (fencedLeft(a) && fencedRight(e)))) return false;
+    apply(a, e);
+    /* swallow a "Source:" lead-in that exists only to introduce it */
+    if (ledIn) mute[a - 1] = 1;
+    return true;
+  };
+  let i = 0;
+  while (i < n) {
+    if (mute[i] || kind[i] === null || kind[i] === 'sep') { i++; continue; }
+    let j = i;
+    while (j < n && !mute[j] && kind[j] !== null) j++;
+    /* the whole run first; failing that, the part from its first reference
+       noun on — "Guideline 5 Slide 21:" splits into prose + pointer */
+    if (!tryRun(i, j)) {
+      let r = i;
+      while (r < j && kind[r] !== 'ref') r++;
+      if (r > i && r < j) tryRun(r, j);
+    }
+    i = Math.max(j, i + 1);
+  }
+  return mute;
+}
+
+/* recompute S.words[].mute for the whole document (sentence by sentence,
+   so a run can never bleed across a sentence boundary) and mark sentences
+   that ended up with nothing left to say. */
+function applyCitationMutes() {
+  const on = !!S.skipCitations;
+  for (const s of S.sentences) {
+    const toks = [];
+    for (let i = s.start; i < s.end; i++) toks.push(S.words[i].text);
+    const mask = on ? markCitations(toks) : null;
+    let allMute = toks.length > 0;
+    for (let k = 0; k < toks.length; k++) {
+      const w = S.words[s.start + k];
+      const m = !!(mask && mask[k]);
+      /* !!w.mute, not w.mute: on the first pass it is undefined, and
+         comparing that against false would repaint every unmuted word in the
+         document — 18k no-op class toggles, which for the interactive-HTML
+         view means 18k ops in one postMessage to the frame */
+      if (!!w.mute !== m) {
+        w.mute = m;
+        w.el?.classList?.toggle('w-mute', m);
+      }
+      if (!m && spokenFor(w.text).trim()) allMute = false;
+    }
+    s.allMute = allMute;
+  }
 }
 
 function setPronunciation(word) {
@@ -1090,6 +1303,7 @@ async function ensurePhonemes(displayTokens, maxWaitMs = 1500) {
   const jobs = [];
   for (const tok of displayTokens) {
     const spoken = spokenFor(tok).toLowerCase();
+    if (!spoken) continue;                       // muted/skipped token: nothing to phonemize
     if (phonemeCache.has(spoken)) continue;
     phonemeCache.set(spoken, null);   // reserve so parallel calls don't duplicate
     jobs.push(
@@ -1568,17 +1782,33 @@ function buildFromTokenStream(tokens, wordEls) {
     S.sentences.push({ start, end, text, span: null, block: null });  // PDF token stream: no paragraph info
     start = end;
   };
+  /* bracket depth, so the run-on safety cut never lands INSIDE a
+     parenthetical. Cutting "(Tr P2 [0:00:01], July 21)" in half used to
+     strand "(Tr P2" in the previous sentence — which broke citation
+     detection and handed Kokoro a fragment to find prosody for. */
+  let depth = 0;
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
+    const after = Math.max(0, depth + (tok.match(/[([]/g) || []).length - (tok.match(/[)\]]/g) || []).length);
     if (/[.!?…]["”'’)\]]*$/.test(tok)) {
       const tail = tokens.slice(Math.max(start, i - 2), i + 1).join(' ');
-      if (ABBREV.test(tail) || /(^|\s)[A-Z]\.$/.test(tail)) continue;
+      if (ABBREV.test(tail) || /(^|\s)[A-Z]\.$/.test(tail)) { depth = after; continue; }
       pushSent(i + 1);
-    } else if (i - start > 60) {
-      pushSent(i + 1); // safety: break up run-on streams (tables, captions)
+      depth = 0;
+      continue;
     }
+    /* safety: break up run-on streams (tables, captions). Held while a
+       bracket is open, with a hard ceiling so an unbalanced document can't
+       grow one endless sentence. */
+    if (i - start > 60 && (after === 0 || i - start > 90)) {
+      pushSent(i + 1);
+      depth = 0;
+      continue;
+    }
+    depth = after;
   }
   pushSent(tokens.length);
+  applyCitationMutes();
 }
 
 /* phones/tablets: coarse pointer or a narrow viewport. Used to keep PDF page
@@ -1802,6 +2032,10 @@ function ALOUD_FRAME_AGENT(cfg) {
     '.' + CLS + '{border-radius:4px;cursor:pointer;padding:0 1px;margin:0 -1px;' +
       '-webkit-box-decoration-break:clone;box-decoration-break:clone}' +
     '.' + CLS + '.sent-on{background:rgba(124,108,246,.14)}' +
+    /* skipped source citation: dimmed, never hidden — the guide's own layout
+       is untouched, but it's clear the voice is passing over it */
+    '.' + CLS + '.w-mute{opacity:.45}' +
+    '.' + CLS + '.w-mute.speaking{opacity:1}' +
     '.' + CLS + '.speaking{background:#7c6cf6!important;color:#fff!important;text-shadow:none!important}' +
     /* SVG has no background box, so a diagram label marks the spoken word by
        colour instead. Weight is left alone: it would reflow the figure. */
@@ -2318,6 +2552,7 @@ function renderFlow(blocks, chapters, opts = {}) {
     frag.appendChild(el);
   });
   content.appendChild(frag);
+  applyCitationMutes();
   finishOpen(opts);
 }
 
@@ -2401,6 +2636,13 @@ function highlightWord(wIdx, force = false) {
   if (w) w.el.classList.add('speaking');
   if (S.rsvp.open && w) rsvpFlash(w.text);
 }
+/* first word of a sentence the voice will actually say — a sentence can open
+   on a muted citation ("Slide 20: An individual may believe…") and the
+   highlight should start on the first real word, not on skipped text */
+function firstSpokenWord(sent) {
+  for (let i = sent.start; i < sent.end; i++) if (!S.words[i].mute) return i;
+  return sent.start;
+}
 function sentClass(sent, on) {
   if (!sent) return;
   if (sent.span) sent.span.classList.toggle('sent-active', on);
@@ -2414,7 +2656,7 @@ function setSentence(sIdx, keepWord = false) {
   const sent = S.sentences[sIdx];
   if (!sent) return;
   if (S.sentHl) sentClass(sent, true);
-  if (!keepWord) S.curWord = sent.start;
+  if (!keepWord) S.curWord = firstSpokenWord(sent);
   highlightWord(S.curWord, !keepWord);
   maybeScroll(S.words[S.curWord]?.el);
   updateProgress();
@@ -2471,7 +2713,7 @@ function buildCostIndex() {
     while (si < S.sentences.length && performance.now() < deadline) {
       const s = S.sentences[si];
       for (let wi = s.start; wi < s.end; wi++)
-        t += wordCostMs(spokenFor(S.words[wi].text)) + pauseAfterMs(S.words[wi].text, false);
+        t += wordCostMs(spokenOfWord(S.words[wi])) + pauseAfterMs(S.words[wi].text, false);
       cum[++si] = t;
     }
     if (si < S.sentences.length) setTimeout(chunk, 30);
@@ -2520,7 +2762,7 @@ function speakDevice(sentIdx, fromWord) {
   for (let i = startWord; i < sent.end; i++) {
     offsets.push(text.length);
     idxs.push(i);
-    text += spokenFor(S.words[i].text) + (i < sent.end - 1 ? ' ' : '');
+    text += spokenOfWord(S.words[i]) + (i < sent.end - 1 ? ' ' : '');
   }
   if (!text.trim()) return advanceSentence(1, true);
 
@@ -2548,7 +2790,7 @@ function speakDevice(sentIdx, fromWord) {
      The ticker does NOT advance until the engine reports it actually
      started speaking — cloud voices can take 500ms+ to begin, and
      re-anchoring after a guess is what made the highlight jump back. */
-  const tl = buildTimeline(idxs.map(i => S.words[i].text));
+  const tl = buildTimeline(idxs.map(i => S.words[i].mute ? '' : S.words[i].text));
   const factor = calibFactor(voiceKey) / S.rate;
   const queuedAt = performance.now();
   let anchorT = -1;                    // set by onstart (or late fallback)
@@ -3295,8 +3537,13 @@ async function generateNeuralNow(sentIdx, key) {
   const cached = S.neuralCache.get(key);
   if (cached) return cached;
   const sent = S.sentences[sentIdx];
+  /* a muted word enters the pipeline as an empty token: spokenFor('') is
+     '', so it contributes no audio, and alignExactStarts already treats a
+     token with no spoken form as silent — it consumes none of the model's
+     spoken words and inherits the next word's onset. Indices stay 1:1 with
+     S.words, so the returned `starts` still lines up with the display. */
   const tokens = [];
-  for (let i = sent.start; i < sent.end; i++) tokens.push(S.words[i].text);
+  for (let i = sent.start; i < sent.end; i++) tokens.push(S.words[i].mute ? '' : S.words[i].text);
   /* wait for real G2P before timing the FIRST sentences — the promise settles
      the moment the module is ready (or errors), so this only ever costs time
      while the one-time download is genuinely in flight. 250ms used to lose
@@ -3400,9 +3647,32 @@ function ensureNeuralAudio() {
   NA.preload = 'auto';
   try { NA.preservesPitch = true; NA.webkitPreservesPitch = true; } catch {}
   const syncClock = () => { const P = S.audioPlay; if (P) { P.clock.media = NA.currentTime; P.clock.wall = performance.now(); } };
-  NA.addEventListener('timeupdate', syncClock);
+  NA.addEventListener('timeupdate', () => {
+    const P = S.audioPlay;
+    /* the element only reports a moving currentTime once it is genuinely
+       producing sound — that is the signal that makes wall-clock
+       extrapolation safe (see naMediaPos) */
+    if (P && NA.currentTime > 0) P.rolling = true;
+    syncClock();
+  });
   NA.addEventListener('seeked', () => { syncClock(); if (S.audioPlay) S.audioPlay.shownAbs = -1; });   // real seek → regression allowed
-  NA.addEventListener('play', () => { syncClock(); requestAnimationFrame(naTick); });
+  NA.addEventListener('play', () => { syncClock(); naTickStart(); });
+  /* 'playing' is the first frame of actual audio. Everything between play()
+     and here was silent load/decode time, so discard any word the tick
+     showed during it and restart the clock from the real position. */
+  NA.addEventListener('playing', () => {
+    const P = S.audioPlay;
+    if (!P) return;
+    P.rolling = true;
+    P.shownAbs = -1;
+    syncClock();
+    naTickStart();
+  });
+  /* buffering / stalled: currentTime stops advancing, so stop predicting */
+  ['waiting', 'stalled', 'suspend'].forEach(ev => NA.addEventListener(ev, () => {
+    const P = S.audioPlay;
+    if (P) { P.rolling = false; syncClock(); }
+  }));
   NA.addEventListener('ended', () => {
     const P = S.audioPlay;
     if (!P) return;                                   // prime clip / stale
@@ -3445,30 +3715,56 @@ function primeAudioGesture() {
 
 /* browsers update audio.currentTime only ~4×/sec — far too coarse for word
    karaoke. Extrapolate media position from the wall clock between timeupdate
-   events, capped so a stalled pipeline can't sprint ahead. */
+   events, capped so a stalled pipeline can't sprint ahead.
+
+   v6.12.0 — only extrapolate while audio is REALLY rolling. play() resolves
+   long before a freshly-assigned src is decoded, and every sentence is a
+   fresh src, so at each sentence boundary there was a silent window in which
+   the element was un-paused at currentTime 0 while the wall clock ran. The
+   old code predicted straight through it (at 1.75× speed, ~1.75s of phantom
+   media per second of load), lighting the next sentence's first few words
+   before they were spoken — and P.shownAbs, which exists to stop visible
+   rewinds, then pinned the highlight ahead so it could never recover. */
 function naMediaPos(P) {
   if (NA.paused || NA.ended) return NA.currentTime;
+  /* not yet producing sound, or buffering: report the true position */
+  if (!P.rolling || NA.readyState < 3) return NA.currentTime;
   let est = P.clock.media + ((performance.now() - P.clock.wall) / 1000) * NA.playbackRate;
   est = Math.min(est, P.clock.media + 1.5);
   return isFinite(NA.duration) ? Math.min(est, NA.duration) : est;
 }
 
+/* start the paint loop, at most one at a time — 'play', 'playing' and
+   'seeked' can all fire for a single sentence, and each used to spawn its
+   own self-perpetuating rAF chain */
+function naTickStart() {
+  const P = S.audioPlay;
+  if (!P || P.ticking) return;
+  P.ticking = true;
+  requestAnimationFrame(naTick);
+}
+
 function naTick() {
   const P = S.audioPlay;
-  if (!P || !S.playing) return;
+  if (!P || !S.playing) { if (P) P.ticking = false; return; }
   const ct = naMediaPos(P);
   let seg = P.segs[0];
   for (const g of P.segs) { if (g.t0 <= ct + 0.02) seg = g; else break; }
   if (seg.sentIdx !== S.curSent) setSentence(seg.sentIdx, true);
   let wi = 0;
   for (let i = 0; i < seg.starts.length; i++) { if (seg.starts[i] <= ct + 0.02) wi = i; else break; }
+  let wIdx = seg.sentStart + wi;
+  /* a muted citation shares the onset of the word after it, so the scan can
+     land on one. Nothing is spoken there — hold the last real word instead
+     of moving the highlight onto text the voice is passing over. */
+  while (wIdx > seg.sentStart && S.words[wIdx]?.mute) wIdx--;
   /* clock resyncs can land a hair behind the extrapolation — hold rather
      than visibly rewind a word */
-  let wIdx = seg.sentStart + wi;
   if (wIdx < P.shownAbs) wIdx = P.shownAbs;
   P.shownAbs = wIdx;
   if (wIdx !== S.curWord) { highlightWord(wIdx); maybeScroll(S.words[wIdx]?.el); }
   if (!NA.paused && !NA.ended) requestAnimationFrame(naTick);
+  else P.ticking = false;
 }
 
 async function speakNeural(sentIdx, fromWord) {
@@ -3501,6 +3797,7 @@ async function speakNeural(sentIdx, fromWord) {
   const P = S.audioPlay = {
     segs: [{ sentIdx, sentStart: sent.start, t0: 0, starts: entry.starts }],
     shownAbs: -1,
+    rolling: false,                     // set on 'playing': audio truly started
     clock: { media: 0, wall: performance.now() },
   };
   na.src = entry.url;
@@ -3593,7 +3890,7 @@ async function speakNeuralStitched(run) {
   const na = ensureNeuralAudio();
   na.pause();
   if (S.audioPlay?.batchUrl) URL.revokeObjectURL(S.audioPlay.batchUrl);
-  S.audioPlay = { segs, batchUrl: url, shownAbs: -1, clock: { media: 0, wall: performance.now() } };
+  S.audioPlay = { segs, batchUrl: url, shownAbs: -1, rolling: false, clock: { media: 0, wall: performance.now() } };
   na.src = url;
   na.playbackRate = S.rate;
   setSentence(run[0]);
@@ -3681,7 +3978,7 @@ function rsvpPlay(fromWord) {
     const tok = S.words[w].text;
     const msPerWord = 60000 / S.rsvp.wpm;
     /* phoneme-weighted flash duration: long words linger, short ones snap */
-    let dur = msPerWord * Math.min(2.6, Math.max(0.55, wordCostMs(spokenFor(tok)) / 330));
+    let dur = msPerWord * Math.min(2.6, Math.max(0.55, wordCostMs(spokenOfWord(S.words[w])) / 330));
     const pause = pauseAfterMs(tok, w === S.words.length - 1);
     if (pause >= 300) dur += msPerWord * 1.9 * S.breather;        // sentence end: breathe
     else if (pause > 0) dur += msPerWord * 0.9 * S.breather;      // clause break
@@ -3775,7 +4072,10 @@ function firstOfBlock(sIdx) {
 }
 function sentSkipped(i) {
   const s = S.sentences[i];
-  return !!(s && ((S.skipCode && s.code) || (S.skim && !firstOfBlock(i))));
+  /* s.allMute: a caption or table cell that was nothing BUT a citation —
+     with the citation muted there is no audio left, so hop it entirely
+     rather than playing a sliver of silence */
+  return !!(s && ((S.skipCode && s.code) || (S.skim && !firstOfBlock(i)) || s.allMute));
 }
 function seekPlayable(from, dir) {
   let i = from;
@@ -4262,6 +4562,20 @@ $('skipcode-switch').addEventListener('click', e => {
   store.set('skipCode', S.skipCode);
   try { clearNeuralCache(); } catch {}   // spoken text changed — regenerate audio
 });
+$('skipcit-switch').addEventListener('click', e => {
+  S.skipCitations = !S.skipCitations;
+  e.target.classList.toggle('on', S.skipCitations);
+  store.set('skipCitations', S.skipCitations);
+  /* re-mask the open document in place: the dimming updates, the cached
+     audio no longer matches the new spoken text, and the time-left index
+     was built from it */
+  try {
+    applyCitationMutes();
+    clearNeuralCache();
+    buildCostIndex();
+    if (S.playing) playCurrent(S.curWord);
+  } catch {}
+});
 $('htmlinteractive-switch').addEventListener('click', async e => {
   S.htmlInteractive = !S.htmlInteractive;
   e.target.classList.toggle('on', S.htmlInteractive);
@@ -4432,6 +4746,7 @@ if (!store.get('autoScroll', true)) $('autoscroll-switch').classList.remove('on'
 renderNeuralQuality();
 if (store.get('skim', false)) $('skim-switch').classList.add('on');
 if (!store.get('skipCode', true)) $('skipcode-switch').classList.remove('on');
+if (!store.get('skipCitations', true)) $('skipcit-switch').classList.remove('on');
 if (!store.get('htmlInteractive', true)) $('htmlinteractive-switch').classList.remove('on');
 if (store.get('timingDebug', false)) $('timingdebug-switch').classList.add('on');
 S.autoScroll = store.get('autoScroll', true);
