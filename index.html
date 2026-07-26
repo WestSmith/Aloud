@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.12.2">
+<meta name="aloud-version" content="v6.13.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1223,7 +1223,11 @@ function applyCitationMutes() {
         w.mute = m;
         w.el?.classList?.toggle('w-mute', m);
       }
-      if (!m && spokenFor(w.text).trim()) allMute = false;
+      /* letters or digits, not merely non-blank: splitting at block edges
+         leaves lone-glyph blocks ("⚠", "→") as their own sentences, and there
+         is nothing there for a voice to say — hop them instead of generating
+         a clip of silence and resting a breather against it */
+      if (!m && /[\p{L}\p{N}]/u.test(spokenFor(w.text))) allMute = false;
     }
     s.allMute = allMute;
   }
@@ -1776,14 +1780,17 @@ async function openPdfNative(file, opts = {}) {
    tokens that are NOT sentence ends, and every miss both fragments the
    audio and fabricates a pause anchor for the karaoke aligner. */
 const ABBREV = /\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|v|etc|e\.g|i\.e|Fig|No|Nos|Vol|Ch|pp?|para|paras|approx|Inc|Ltd|Co|Corp|U\.S|U\.K|s|ss|sub|subs|cl|art|arts|Sch|Sched|Reg|Regs|Sec|Secs|Div|Dept|Hon|Ont|Alta|Sask|Que|R\.S\.[A-Z]|S\.[A-Z]|O\.\s?Reg|aff'?d|rev'?d|cert)\.$/i;
-function buildFromTokenStream(tokens, wordEls) {
+/* `blocks` (interactive HTML only) gives each token its block index, so a
+   paragraph, a callout label and a heading stay separate utterances. PDF
+   token streams pass nothing and keep block: null. */
+function buildFromTokenStream(tokens, wordEls, blocks = null) {
   let start = 0;
   const pushSent = (end) => {
     if (end <= start) return;
     const text = tokens.slice(start, end).join(' ');
     const idx = S.sentences.length;
     for (let i = start; i < end; i++) S.words.push({ el: wordEls[i], text: tokens[i], sent: idx });
-    S.sentences.push({ start, end, text, span: null, block: null });  // PDF token stream: no paragraph info
+    S.sentences.push({ start, end, text, span: null, block: blocks ? blocks[start] : null });
     start = end;
   };
   /* bracket depth, so the run-on safety cut never lands INSIDE a
@@ -1792,6 +1799,11 @@ function buildFromTokenStream(tokens, wordEls) {
      detection and handed Kokoro a fragment to find prosody for. */
   let depth = 0;
   for (let i = 0; i < tokens.length; i++) {
+    /* a block boundary always ends a sentence, whatever the punctuation did.
+       "…exam flags, more than any other week so far:" ends in a colon, so it
+       used to swallow the "⭐ The three exam flags" label and the "Flag 1 —"
+       heading that followed into one 47-token utterance. */
+    if (blocks && i > 0 && blocks[i] !== blocks[i - 1]) { pushSent(i); depth = 0; }
     const tok = tokens[i];
     const after = Math.max(0, depth + (tok.match(/[([]/g) || []).length - (tok.match(/[)\]]/g) || []).length);
     if (/[.!?…]["”'’)\]]*$/.test(tok)) {
@@ -1984,7 +1996,24 @@ function ALOUD_LS_SHIM(saved) {
 function ALOUD_FRAME_AGENT(cfg) {
   var CLS = 'aloud-w';
   var SVGNS = 'http://www.w3.org/2000/svg';
-  var els = [], toks = [];
+  var els = [], toks = [], blks = [];
+
+  /* Which block each token belongs to. A flat token stream cannot tell the
+     parent where a paragraph ends, so a heading, a callout label and the
+     prose after it used to fuse into one "sentence" — which cost the
+     karaoke its alignment and the reader every paragraph breather. */
+  var BLOCK_TAGS = /^(?:P|LI|TD|TH|H1|H2|H3|H4|H5|H6|DIV|SECTION|ARTICLE|BLOCKQUOTE|FIGCAPTION|CAPTION|DT|DD|PRE|TR|UL|OL|TABLE|ASIDE|HEADER|FOOTER|MAIN|NAV|SUMMARY|DETAILS|FIGURE|FORM|HR|ADDRESS)$/;
+  var blockSeq = 0, blockIds = null;
+  try { blockIds = new WeakMap(); } catch (e) {}
+  function blockOf(node) {
+    var el = node.parentElement;
+    while (el && el !== document.body && !BLOCK_TAGS.test(el.tagName)) el = el.parentElement;
+    if (!el) el = document.body;
+    if (!blockIds) return 0;
+    var id = blockIds.get(el);
+    if (id === undefined) { id = blockSeq++; blockIds.set(el, id); }
+    return id;
+  }
 
   function post(m) { try { parent.postMessage(m, '*'); } catch (e) {} }
 
@@ -2015,6 +2044,7 @@ function ALOUD_FRAME_AGENT(cfg) {
        not an SVG text node, so the browser paints nothing and every label in
        the figure silently disappears */
     var svg = node.parentNode && node.parentNode.namespaceURI === SVGNS;
+    var bid = blockOf(node);          // resolved before the node is replaced
     for (var j = 0; j < parts.length; j++) {
       var part = parts[j];
       if (!part) continue;
@@ -2025,6 +2055,7 @@ function ALOUD_FRAME_AGENT(cfg) {
       w.setAttribute('data-w', String(toks.length));
       frag.appendChild(w);
       toks.push(part);
+      blks.push(bid);
       els.push(w);
     }
     node.parentNode.replaceChild(frag, node);
@@ -2196,7 +2227,7 @@ function ALOUD_FRAME_AGENT(cfg) {
   });
 
   reportH();
-  post({ t: 'aloud:ready', tokens: toks });
+  post({ t: 'aloud:ready', tokens: toks, blocks: blks });
 }
 
 /* default-src 'none' is the whole point: no fetch, no XHR, no WebSocket, no
@@ -2304,7 +2335,8 @@ function renderHtmlInteractive(htmlText, opts = {}) {
       clearTimeout(f.giveUp);
       const tokens = Array.isArray(m.tokens) ? m.tokens : [];
       if (!tokens.length) { toast('⚠️ No readable text in that document — showing the text view.', 4500); renderFlow(parseHtmlString(htmlText), [], opts); return; }
-      buildFromTokenStream(tokens, tokens.map((_, i) => frameWordEl(i)));
+      const blocks = Array.isArray(m.blocks) && m.blocks.length === tokens.length ? m.blocks : null;
+      buildFromTokenStream(tokens, tokens.map((_, i) => frameWordEl(i)), blocks);
       finishOpen(opts);
     } else if (m.t === 'aloud:h') {
       iframe.style.height = Math.max(200, m.h | 0) + 'px';
@@ -3343,7 +3375,16 @@ function alignExactStarts(displayTokens, pwords, durationSec) {
      into a neighbour ("of the" → one spoken blob "ʌvðə"), so the DP may
      let them consume nothing and ride their host. */
   const exp = displayTokens.map(t => {
-    const parts = spokenFor(t).trim().split(/\s+/).filter(Boolean);
+    const spoken = spokenFor(t);
+    const parts = spoken.trim().split(/\s+/).filter(Boolean);
+    /* A glyph the voice cannot say is SILENT, not a word. Study guides label
+       every callout with one — "⭐ The three exam flags", "⚠ Watch out" — and
+       espeak (the same G2P Kokoro runs) returns zero phonemes for them, so
+       the model never voices them. Demanding a spoken word for one forced the
+       DP to steal a neighbour's, shifting every onset around it. The phoneme
+       cache is the authority here: it holds espeak's own answer. */
+    const ph = phonemeCache.get(spoken.toLowerCase());
+    if (parts.length && ph && ph.v + ph.c === 0) return { count: 0, flex: false, mergeable: false };
     const cores = parts.map(w => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''));
     const flex = cores.some(c => /[^\p{L}'’\-]/u.test(c)) || parts.some(w => /[\d$£]/.test(w));
     const mergeable = !flex && parts.length === 1 && cores[0].length >= 1 &&
@@ -3562,7 +3603,9 @@ async function generateNeuralNow(sentIdx, key) {
     const [a, b] = pending.shift();
     const ctoks = tokens.slice(a, b);
     const text = ctoks.map(spokenFor).join(' ').trim();
-    if (!text) { parts.push({ a, b, audio: new Float32Array(3600), sr: 24000, pwords: null, silent: true }); continue; }
+    /* nothing pronounceable (all muted, or only glyphs/punctuation): don't
+       spend a model call to synthesise silence */
+    if (!text || !/[\p{L}\p{N}]/u.test(text)) { parts.push({ a, b, audio: new Float32Array(3600), sr: 24000, pwords: null, silent: true }); continue; }
     let raw, pwords = null, nIds = 0;
     if (S.kokoro.workerGenerate) {
       raw = await S.kokoro.workerGenerate(text, S.neuralVoice);
