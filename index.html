@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.14.0">
+<meta name="aloud-version" content="v6.14.1">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1860,7 +1860,7 @@ async function openPdfNative(file, opts = {}) {
    O. Reg., "Ahmed v. King"…) — factums and judgments are dense with dotted
    tokens that are NOT sentence ends, and every miss both fragments the
    audio and fabricates a pause anchor for the karaoke aligner. */
-const ABBREV = /\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|v|etc|e\.g|i\.e|Fig|No|Nos|Vol|Ch|pp?|para|paras|approx|Inc|Ltd|Co|Corp|U\.S|U\.K|s|ss|sub|subs|cl|art|arts|Sch|Sched|Reg|Regs|Sec|Secs|Div|Dept|Hon|Ont|Alta|Sask|Que|R\.S\.[A-Z]|S\.[A-Z]|O\.\s?Reg|aff'?d|rev'?d|cert)\.$/i;
+const ABBREV = /\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|v|etc|e\.g|i\.e|Fig|No|Nos|Vol|Ch|pp?|para|paras|approx|Inc|Ltd|Co|Corp|U\.S|U\.K|s|ss|sub|subs|cl|art|arts|Sch|Sched|Reg|Regs|Sec|Secs|Div|Dept|Hon|Ont|Alta|Sask|Que|R\.S\.[A-Z]|S\.[A-Z]|O\.\s?Reg|aff'?d|rev'?d|cert|a\.m|p\.m|Ave|Rd|Blvd|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\.$/i;
 /* `blocks` (interactive HTML only) gives each token its block index, so a
    paragraph, a callout label and a heading stay separate utterances. PDF
    token streams pass nothing and keep block: null. */
@@ -3794,17 +3794,35 @@ async function generateNeuralNow(sentIdx, key) {
      absorbs kokoro-js's number/currency expansions), the silence-pinned
      heuristic per chunk otherwise — then offset into the joined clip */
   const sr = parts[0].sr;
+  /* Every generated clip carries Kokoro's lead-in pad, so a sentence split
+     across chunks used to regain ~0.4s of silence at each join — dead air in
+     the MIDDLE of a sentence, with the highlight parked on a word right
+     through it. Trim each following chunk's measured lead-in as the joint is
+     made. The first chunk keeps its pad: playback seeks past that instead
+     (see leadTrimSec), which keeps the cache reusable for a mid-sentence
+     start. */
+  /* no LEAD_TRIM_MAX here: mid-sentence the measured silence is itself the
+     safety bound (it ends where energy begins, so nothing spoken can be
+     cut), and any residual pause inside a sentence is unnatural. 20ms is
+     left so the joint does not sound glued. */
+  const trims = parts.map((p, i) =>
+    (i === 0 || p.silent) ? 0 : Math.max(0, leadSilenceSec(p.audio, sr) - 0.02));
+  const skips = trims.map(t => Math.round(t * sr));
   let total = 0;
-  for (const p of parts) total += p.audio.length;
+  for (let i = 0; i < parts.length; i++) total += parts[i].audio.length - skips[i];
   let audio = parts[0].audio;
   if (parts.length > 1) {
     audio = new Float32Array(total);
     let off = 0;
-    for (const p of parts) { audio.set(p.audio, off); off += p.audio.length; }
+    parts.forEach((p, i) => {
+      audio.set(p.audio.subarray(skips[i]), off);
+      off += p.audio.length - skips[i];
+    });
   }
   const starts = new Array(tokens.length);
   let off = 0, exactChunks = 0, spokenChunks = 0;
-  for (const p of parts) {
+  for (let pi = 0; pi < parts.length; pi++) {
+    const p = parts[pi];
     const offSec = off / sr;
     const dSec = p.audio.length / sr;
     const ctoks = tokens.slice(p.a, p.b);
@@ -3816,8 +3834,10 @@ async function generateNeuralNow(sentIdx, key) {
       if (cs) exactChunks++;
       else cs = alignTimeline(ctoks, analyzeWave(p.audio, sr), dSec);
     }
-    for (let k = 0; k < ctoks.length; k++) starts[p.a + k] = cs[k] + offSec;
-    off += p.audio.length;
+    /* cs[] is in this chunk's own time base, so shift by where the chunk
+       lands in the joined clip MINUS what was cut off its front */
+    for (let k = 0; k < ctoks.length; k++) starts[p.a + k] = Math.max(offSec, cs[k] + offSec - trims[pi]);
+    off += p.audio.length - skips[pi];
   }
   const durationSec = total / sr;
   const url = audioBlobParts({ audio, sampling_rate: sr });
