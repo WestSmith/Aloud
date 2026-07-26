@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.10.1">
+<meta name="aloud-version" content="v6.11.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -146,16 +146,40 @@
     background: var(--accent); color: #fff; font-size: 15px; font-weight: 650;
     margin-bottom: 12px;
   }
-  #recent-list { margin-top: 22px; width: 100%; max-width: 460px; }
+  #library { margin-top: 22px; width: 100%; max-width: 460px; display: none; }
+  #lib-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  #lib-head .lib-h { flex: 1; text-align: left; font-size: 11.5px; font-weight: 700;
+    letter-spacing: .7px; text-transform: uppercase; color: var(--text-dim); }
+  .lib-btn { flex: none; background: var(--bg-elev2); border: 1px solid var(--border); color: var(--text-dim);
+    font: 650 12px/1 var(--ui-font); padding: 7px 11px; border-radius: 999px; cursor: pointer;
+    transition: border-color .15s, color .15s; }
+  .lib-btn:hover { border-color: var(--accent); color: var(--text); }
+  #lib-folders { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .fchip { display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%;
+    padding: 6px 12px; border-radius: 999px; font: 650 12.5px/1.25 var(--ui-font); cursor: pointer;
+    background: var(--bg-elev2); border: 1px solid var(--border); color: var(--text-dim); }
+  .fchip .fc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fchip .fc-n { font-size: 11px; opacity: .65; font-variant-numeric: tabular-nums; }
+  .fchip.on { background: var(--accent); color: #fff; border-color: transparent; }
+  .fchip.on .fc-n { opacity: .85; }
+  #lib-folder-tools { display: none; gap: 14px; margin: -3px 0 10px; }
+  #lib-folder-tools button { background: none; border: none; padding: 2px 0; cursor: pointer;
+    color: var(--text-dim); font: 600 12px var(--ui-font); }
+  #lib-folder-tools button:hover { color: var(--accent-strong); }
+  #lib-more { width: 100%; margin-top: 2px; }
+  #lib-empty { text-align: left; font-size: 12.5px; color: var(--text-dim); line-height: 1.55; padding: 2px 2px 6px; }
   .recent-row { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border: 1px solid var(--border);
     border-radius: 12px; margin-bottom: 8px; cursor: pointer; background: var(--bg-elev); text-align: left; transition: border-color .15s; }
   .recent-row:hover { border-color: var(--accent); }
   .rr-play { color: var(--accent); flex: none; }
   .rr-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
   .rr-name mark { background: var(--accent-soft); color: var(--accent-strong); border-radius: 3px; padding: 0 1px; }
+  .rr-tag { flex: none; max-width: 34%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 10.5px; font-weight: 650; color: var(--text-dim);
+    background: var(--bg-elev2); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; }
   .rr-pct { color: var(--text-dim); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
-  .rr-x { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 13px; padding: 4px; flex: none; }
-  .rr-x:hover { color: var(--text); }
+  .rr-x, .rr-folder { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 13px; padding: 4px; flex: none; }
+  .rr-x:hover, .rr-folder:hover { color: var(--text); }
   #btn-sleep.sleep-on { color: var(--accent-strong); font-size: 12px !important; font-weight: 700; font-variant-numeric: tabular-nums; }
   #search-input { width: 100%; box-sizing: border-box; padding: 11px 14px; border-radius: 12px; border: 1px solid var(--border);
     background: var(--bg-elev2); color: var(--text); font-size: 15px; margin-bottom: 12px; outline: none; }
@@ -593,7 +617,21 @@
     <div class="fmt-chips"><span>EPUB</span><span>PDF</span><span>HTML</span><span>TXT / MD</span></div>
   </div>
   <button id="btn-paste-open">📋 Or paste text to listen to it</button>
-  <div id="recent-list"></div>
+  <div id="library">
+    <div id="lib-head">
+      <span class="lib-h">Continue</span>
+      <button class="lib-btn" id="lib-sort" title="Change the order">↕ Recent</button>
+      <button class="lib-btn" id="lib-newfolder" title="Create a folder">🗂 New folder</button>
+    </div>
+    <div id="lib-folders"></div>
+    <div id="lib-folder-tools">
+      <button id="lib-rename">Rename folder</button>
+      <button id="lib-delfolder">Delete folder</button>
+    </div>
+    <div id="recent-list"></div>
+    <button class="lib-btn" id="lib-more" style="display:none"></button>
+    <div id="lib-empty" style="display:none"></div>
+  </div>
   <div class="hint">
     <b>Two voice engines:</b> instant device voices, or the <b>Kokoro neural voice</b> (open-source, runs in your browser). PDFs open as real pages with highlighting right on them. Double-tap any word to fix its pronunciation.
   </div>
@@ -749,6 +787,14 @@
   <h3>Bookmarks</h3>
   <button class="chip" id="bm-add" style="margin-bottom:12px">＋ Bookmark current sentence (B)</button>
   <div id="bm-list"></div>
+</div>
+
+<div class="sheet" id="folder-sheet">
+  <div class="grab"></div>
+  <h3>Move to folder</h3>
+  <div class="voice-note" id="folder-file" style="margin: -6px 0 12px"></div>
+  <div class="chips" id="folder-chips"></div>
+  <div class="voice-note">Folders are labels on your home screen — files never leave your device, and nothing is moved or re-uploaded.</div>
 </div>
 
 <div class="sheet" id="search-sheet">
@@ -4416,7 +4462,11 @@ const idb = {
   async del(key) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('files', 'readwrite'); t.objectStore('files').delete(key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   async keys() { const db = await this.open(); return new Promise((res, rej) => { const q = db.transaction('files').objectStore('files').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
 };
-const RECENT_MAX = 5;
+/* How many files the Continue list remembers. The list itself is a handful of
+   strings per file; the expensive part is the re-openable COPY (see
+   MAX_STORE_BYTES below), which is capped separately — so the list can be long
+   enough to hold a semester of study guides without costing storage. */
+const LIB_MAX = 60;
 /* One-time migration: v6.2.0 could stash oversized PDF blobs that crash iOS
    on reopen. Wipe the store once so no pre-fix monster survives; positions
    (kept separately under pos.*) are untouched, so resume still works. */
@@ -4431,12 +4481,20 @@ if (!RESETTING && store.get('lib.v', 0) < 2) {
    cap we still list the file for one-tap resume, but reopen via the picker
    (position is saved by docKey, so the place is restored either way). */
 const MAX_STORE_BYTES = 18 * 1024 * 1024;
+/* Re-openable copies are what actually costs storage, so only the newest few
+   files keep one (within a total-size budget). Everything older stays in the
+   list and reopens through the picker with its reading position intact. */
+const BLOB_KEEP = 12;
+const BLOB_BUDGET = 120 * 1024 * 1024;
 async function rememberFile(file) {
   try {
     const key = file.name + '|' + file.size;
+    const prev = store.get('recent', []);
     const storable = file.size <= MAX_STORE_BYTES;
-    const rec = [{ key, name: file.name, title: S.docTitle, at: Date.now(), noBlob: !storable },
-                 ...store.get('recent', []).filter(r => r.key !== key)].slice(0, RECENT_MAX);
+    const rec = [{ key, name: file.name, title: S.docTitle, at: Date.now(), size: file.size,
+                   folder: prev.find(r => r.key === key)?.folder || '',   // reopening keeps its folder
+                   noBlob: !storable },
+                 ...prev.filter(r => r.key !== key)].slice(0, LIB_MAX);
     store.set('recent', rec);
     /* defer the copy to idle so it never competes with the render's memory
        peak; big files skip the copy entirely */
@@ -4446,19 +4504,126 @@ async function rememberFile(file) {
     } else {
       idb.del(key).catch(() => {});   // drop any stale copy from a prior version
     }
-    const keep = new Set(rec.map(r => r.key));
-    for (const k of await idb.keys()) if (!keep.has(k)) idb.del(k).catch(() => {});
+    await pruneBlobs();
   } catch (e) { console.warn('library', e); }   // private mode etc. — Continue just won't appear
 }
+/* Keep copies for the newest BLOB_KEEP files that fit the budget; drop the
+   rest from IndexedDB and flag them noBlob so their row asks for the file
+   again instead of promising a one-tap open. */
+async function pruneBlobs() {
+  const rec = store.get('recent', []);
+  const keep = new Set();
+  let bytes = 0, kept = 0, changed = false;
+  for (const r of rec) {
+    if (r.noBlob) continue;                       // too big to copy, or already evicted
+    const size = r.size || 0;
+    if (kept < BLOB_KEEP && bytes + size <= BLOB_BUDGET) { keep.add(r.key); bytes += size; kept++; }
+    else { r.noBlob = true; changed = true; }
+  }
+  if (changed) store.set('recent', rec);
+  for (const k of await idb.keys()) if (!keep.has(k)) idb.del(k).catch(() => {});
+}
+
+/* ---- folders & sorting ------------------------------------------------
+   A "folder" is just a label stored next to the file entry — nothing moves
+   on disk, and a file keeps its folder when it's reopened. */
+const UNFILED = '\u0000unfiled';   // filter sentinel: no real folder name can match it
+const LIB_PAGE = 8;                     // rows shown before "Show all"
+const SORTS = [
+  ['recent', '↕ Recent', (a, b) => (b.at || 0) - (a.at || 0)],
+  ['name',   '↕ A–Z',    (a, b) => libName(a).localeCompare(libName(b), undefined, { numeric: true, sensitivity: 'base' })],
+  ['oldest', '↕ Oldest', (a, b) => (a.at || 0) - (b.at || 0)],
+];
+let libExpanded = false;
+const libName = r => r.title || r.name || '';
+const folders = () => store.get('folders', []);
+function askFolder(preset) {
+  const name = (prompt('Name this folder — a class, a project, anything.', preset || '') || '').trim().slice(0, 40);
+  if (!name) return null;
+  const list = folders();
+  const existing = list.find(f => f.toLowerCase() === name.toLowerCase());
+  if (existing) return existing;
+  store.set('folders', [...list, name]);
+  return name;
+}
+function setFolder(key, folder) {
+  store.set('recent', store.get('recent', []).map(r => r.key === key ? { ...r, folder } : r));
+  renderRecents();
+}
+let folderTarget = null;    // key of the file the move sheet is acting on
+function openFolderSheet(r) {
+  folderTarget = r.key;
+  $('folder-file').textContent = libName(r);
+  const box = $('folder-chips');
+  box.innerHTML = '';
+  const cur = r.folder || '';
+  const chip = (label, on, fn) => {
+    const b = document.createElement('button');
+    b.className = 'chip' + (on ? ' on' : '');
+    b.textContent = label;
+    b.addEventListener('click', fn);
+    box.appendChild(b);
+  };
+  chip('Unfiled', !cur, () => { setFolder(folderTarget, ''); closeSheets(); });
+  for (const f of folders()) chip(f, f === cur, () => { setFolder(folderTarget, f); closeSheets(); toast(`🗂 Moved to “${f}”.`); });
+  chip('＋ New folder…', false, () => { const f = askFolder(); if (f) { setFolder(folderTarget, f); closeSheets(); toast(`🗂 Moved to “${f}”.`); } });
+  openSheet('folder-sheet');
+}
 function renderRecents() {
+  const all = store.get('recent', []);
   const box = $('recent-list');
   box.innerHTML = '';
-  for (const r of store.get('recent', [])) {
+  $('library').style.display = all.length ? 'block' : 'none';
+  if (!all.length) return;
+
+  /* folder chips — the filter falls back to All if its folder is gone */
+  const fl = folders();
+  const unfiled = all.filter(r => !r.folder).length;
+  let filter = store.get('libFolder', '');
+  if (filter === UNFILED ? !unfiled : (filter && !fl.includes(filter))) filter = '';
+  store.set('libFolder', filter);
+  const fbox = $('lib-folders');
+  fbox.innerHTML = '';
+  if (fl.length) {
+    const chip = (label, val, n) => {
+      const b = document.createElement('button');
+      b.className = 'fchip' + (val === filter ? ' on' : '');
+      const nm = document.createElement('span'); nm.className = 'fc-name'; nm.textContent = label;
+      const ct = document.createElement('span'); ct.className = 'fc-n'; ct.textContent = n;
+      b.append(nm, ct);
+      b.addEventListener('click', () => { store.set('libFolder', val === filter ? '' : val); renderRecents(); });
+      fbox.appendChild(b);
+    };
+    chip('All', '', all.length);
+    for (const f of fl) chip(f, f, all.filter(r => r.folder === f).length);
+    if (unfiled) chip('Unfiled', UNFILED, unfiled);
+  }
+  $('lib-folder-tools').style.display = (filter && filter !== UNFILED) ? 'flex' : 'none';
+
+  /* sort */
+  const sort = SORTS.find(s => s[0] === store.get('libSort', 'recent')) || SORTS[0];
+  $('lib-sort').textContent = sort[1];
+  $('lib-sort').style.display = all.length > 1 ? '' : 'none';
+
+  const rows = all
+    .filter(r => filter === UNFILED ? !r.folder : (!filter || r.folder === filter))
+    .sort(sort[2]);
+  const shown = libExpanded ? rows : rows.slice(0, LIB_PAGE);
+  for (const r of shown) {
     const pos = store.get('pos.' + r.key, null);
     const row = document.createElement('div');
     row.className = 'recent-row';
-    row.innerHTML = `<span class="rr-play">▶</span><span class="rr-name"></span><span class="rr-pct">${pos?.pct != null ? pos.pct + '%' : ''}</span><button class="rr-x" title="Remove from this list">✕</button>`;
-    row.querySelector('.rr-name').textContent = (r.title || r.name);
+    row.innerHTML = `<span class="rr-play"></span><span class="rr-name"></span><span class="rr-tag"></span>` +
+      `<span class="rr-pct">${pos?.pct != null ? pos.pct + '%' : ''}</span>` +
+      `<button class="rr-folder" title="Move to a folder">🗂</button>` +
+      `<button class="rr-x" title="Remove from this list">✕</button>`;
+    const play = row.querySelector('.rr-play');
+    play.textContent = r.noBlob ? '📂' : '▶';
+    if (r.noBlob) play.title = 'Opens the file picker — your place is saved';
+    row.querySelector('.rr-name').textContent = libName(r);
+    const tag = row.querySelector('.rr-tag');
+    if (r.folder && !filter) tag.textContent = r.folder; else tag.remove();
+    row.querySelector('.rr-folder').addEventListener('click', ev => { ev.stopPropagation(); openFolderSheet(r); });
     row.querySelector('.rr-x').addEventListener('click', ev => {
       ev.stopPropagation();
       store.set('recent', store.get('recent', []).filter(x => x.key !== r.key));
@@ -4478,7 +4643,46 @@ function renderRecents() {
     });
     box.appendChild(row);
   }
+  const more = $('lib-more');
+  more.style.display = rows.length > LIB_PAGE ? '' : 'none';
+  more.textContent = libExpanded ? 'Show fewer' : `Show all ${rows.length} files`;
+  const empty = $('lib-empty');
+  empty.style.display = rows.length ? 'none' : 'block';
+  if (!rows.length) empty.textContent = 'Nothing here yet — tap 🗂 on a file to move it into this folder.';
 }
+$('lib-more').addEventListener('click', () => { libExpanded = !libExpanded; renderRecents(); });
+$('lib-sort').addEventListener('click', () => {
+  const i = SORTS.findIndex(s => s[0] === store.get('libSort', 'recent'));
+  store.set('libSort', SORTS[(i + 1) % SORTS.length][0]);
+  renderRecents();
+});
+$('lib-newfolder').addEventListener('click', () => {
+  const f = askFolder();
+  if (!f) return;
+  store.set('libFolder', f);
+  renderRecents();
+  toast(`🗂 “${f}” created — tap 🗂 on a file to put it in here.`, 4500);
+});
+$('lib-rename').addEventListener('click', () => {
+  const cur = store.get('libFolder', '');
+  if (!cur || cur === UNFILED) return;
+  const name = (prompt('Rename this folder.', cur) || '').trim().slice(0, 40);
+  if (!name || name === cur) return;
+  store.set('folders', folders().map(f => f === cur ? name : f));
+  store.set('recent', store.get('recent', []).map(r => r.folder === cur ? { ...r, folder: name } : r));
+  store.set('libFolder', name);
+  renderRecents();
+});
+$('lib-delfolder').addEventListener('click', () => {
+  const cur = store.get('libFolder', '');
+  if (!cur || cur === UNFILED) return;
+  const n = store.get('recent', []).filter(r => r.folder === cur).length;
+  if (n && !confirm(`Delete the folder “${cur}”?\n\nThe ${n} file${n === 1 ? '' : 's'} inside stay in your list — they just go back to Unfiled.`)) return;
+  store.set('folders', folders().filter(f => f !== cur));
+  store.set('recent', store.get('recent', []).map(r => r.folder === cur ? { ...r, folder: '' } : r));
+  store.set('libFolder', '');
+  renderRecents();
+});
 renderRecents();
 
 /* ====================================================================
