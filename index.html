@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.13.1">
+<meta name="aloud-version" content="v6.13.2">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1794,13 +1794,12 @@ const ABBREV = /\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|v|etc|e\.g|i\.e|Fig|No|Nos|Vol|
    paragraph, a callout label and a heading stay separate utterances. PDF
    token streams pass nothing and keep block: null. */
 function buildFromTokenStream(tokens, wordEls, blocks = null) {
+  /* pass 1: collect candidate cut points, so pass 2 can still reconsider them */
   let start = 0;
+  const cuts = [];
   const pushSent = (end) => {
     if (end <= start) return;
-    const text = tokens.slice(start, end).join(' ');
-    const idx = S.sentences.length;
-    for (let i = start; i < end; i++) S.words.push({ el: wordEls[i], text: tokens[i], sent: idx });
-    S.sentences.push({ start, end, text, span: null, block: blocks ? blocks[start] : null });
+    cuts.push(end);
     start = end;
   };
   /* bracket depth, so the run-on safety cut never lands INSIDE a
@@ -1834,6 +1833,36 @@ function buildFromTokenStream(tokens, wordEls, blocks = null) {
     depth = after;
   }
   pushSent(tokens.length);
+
+  /* pass 2: fold away micro-sentences. A run-in heading ("<strong>The
+     people.</strong> Ping Lee was a paralegal…") splits off as a 2-token
+     sentence, and asking a neural voice for a 2-word clip is what makes it
+     sound artificial — it also earns a breather it should never have had.
+     Fold anything under 4 tokens into the sentence that follows, but ONLY
+     inside the same block: folding across a block edge would recreate the
+     label-swallowing this pass exists alongside. */
+  const ends = [];
+  for (let k = 0; k < cuts.length; k++) {
+    const from = k === 0 ? 0 : cuts[k - 1];
+    const end = cuts[k];
+    const hasNext = k + 1 < cuts.length;
+    const sameBlockAcross = blocks && hasNext && blocks[end] === blocks[end - 1];
+    if (end - from < 4 && sameBlockAcross) continue;   // let the next cut carry it
+    ends.push(end);
+  }
+  if (!ends.length || ends[ends.length - 1] !== tokens.length) ends.push(tokens.length);
+
+  let prev = 0;
+  for (const end of ends) {
+    if (end <= prev) continue;
+    const idx = S.sentences.length;
+    for (let i = prev; i < end; i++) S.words.push({ el: wordEls[i], text: tokens[i], sent: idx });
+    S.sentences.push({
+      start: prev, end, text: tokens.slice(prev, end).join(' '),
+      span: null, block: blocks ? blocks[prev] : null,
+    });
+    prev = end;
+  }
   applyCitationMutes();
 }
 
@@ -2017,7 +2046,17 @@ function ALOUD_FRAME_AGENT(cfg) {
   try { blockIds = new WeakMap(); } catch (e) {}
   function blockOf(node) {
     var el = node.parentElement;
-    while (el && el !== document.body && !BLOCK_TAGS.test(el.tagName)) el = el.parentElement;
+    while (el && el !== document.body) {
+      /* an SVG <text> is its own label: a flowchart's boxes are not one
+         paragraph. SVG tags are not HTML block tags, so without this every
+         label in a figure shared the enclosing <div> and fused into one
+         run-on utterance broken only by the 60-token safety cut. */
+      var isBlock = el.namespaceURI === SVGNS
+        ? /^(?:text|textPath)$/i.test(el.localName)
+        : BLOCK_TAGS.test(el.tagName);
+      if (isBlock) break;
+      el = el.parentElement;
+    }
     if (!el) el = document.body;
     if (!blockIds) return 0;
     var id = blockIds.get(el);
