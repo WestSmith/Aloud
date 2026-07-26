@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.14.1">
+<meta name="aloud-version" content="v6.14.2">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -3372,6 +3372,15 @@ function analyzeWave(data, sr) {
 }
 
 /* absolute per-word start times (sec) for a sentence's audio */
+/* Glyphs a voice never utters: bullets, arrows, dingbats, emoji, the pilcrow.
+   These guides use them constantly as separators and callout markers — 337
+   standalone "·" and 102 "→" across the two Week guides — and the aligner
+   must not spend a spoken word on one. The phoneme cache proves this per
+   token, but only once G2P has run; this covers the first sentences too.
+   Deliberately excludes "+", "=", "/", "%" and the dashes: espeak really
+   does say "plus", "equals", "slash", and a dash earns a pause we want. */
+const NONSPEECH_RE = /^[\p{Extended_Pictographic}←-⇿⌀-➿⬀-⯿■-◿·•▪▫▸▶◀●○■□★☆✓✔✗✕¶]+$/u;
+
 /* seconds of genuine silence at the head of a clip. The lead-in trim is
    bounded by this, so a mis-aligned starts[0] can never cut into speech.
    The threshold is far lower than analyzeWave's 5.5% (which exists to find
@@ -3539,7 +3548,8 @@ function alignExactStarts(displayTokens, pwords, durationSec) {
        DP to steal a neighbour's, shifting every onset around it. The phoneme
        cache is the authority here: it holds espeak's own answer. */
     const ph = phonemeCache.get(spoken.toLowerCase());
-    if (parts.length && ph && ph.w === 0) return { count: 0, flex: false, mergeable: false };
+    if (parts.length && (NONSPEECH_RE.test(spoken.trim()) || (ph && ph.w === 0)))
+      return { count: 0, flex: false, mergeable: false };
     const cores = parts.map(w => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''));
     const flex = cores.some(c => /[^\p{L}'’\-]/u.test(c)) || parts.some(w => /[\d$£]/.test(w));
     const mergeable = !flex && parts.length === 1 && cores[0].length >= 1 &&
