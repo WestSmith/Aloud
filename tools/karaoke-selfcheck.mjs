@@ -15,7 +15,12 @@ import fs from 'fs';
 import { execFileSync } from 'child_process';
 import ort from 'onnxruntime-node';
 
-const DIR = '/tmp/claude-0/-home-user-Aloud/21015b46-e5c7-58be-b91c-271100e209ee/scratchpad/m/shawnahmed/Kokoro-82M-v1.0-ONNX-timestamped';
+/* Model location. The default is the layout README-selfcheck.md describes
+   (./m/<repo> relative to wherever you run this); KOKORO_DIR overrides it.
+   This used to be one absolute path inside a single session's scratchpad,
+   which meant the harness only ran for whoever created that directory. */
+const DIR = process.env.KOKORO_DIR
+  || './m/shawnahmed/Kokoro-82M-v1.0-ONNX-timestamped';
 const SR = 24000;
 const vocab = JSON.parse(fs.readFileSync(DIR + '/tokenizer.json', 'utf8')).model.vocab;
 
@@ -117,6 +122,16 @@ const CASES = [
   ['reported: $0.00', 'Answer: $0.00.'],
   ['reported: too busy', 'The "too busy" line diverted students — but it\'s irrelevant.'],
   ['reported: glyph sep', '8.04(1) obtain & maintain adequate E&O insurance · 8.04(2) give prompt notice of any circumstance that may give rise to a claim'],
+  /* Week 13 "Closing Your Business", reported out of sync around "The standard".
+     The markup is <b>…representation</b>"</i> and …, so the closing quote is
+     its own text node and therefore its own display token, with no whitespace
+     around it on screen. The space before " below reproduces that split —
+     without it this is a different test than what actually ships. */
+  ['reported: withdrawal', 'Slide 7, verbatim: "If you have outstanding client matters that will not be completed before the closure of your practice, you are effectively withdrawing from representation " and must comply with the withdrawal rule.'],
+  ['reported: the standard', 'The standard (Slide 7): "A paralegal may only withdraw service if there is good cause and on reasonable notice to the client."'],
+  /* same sentence with the quote glued on, to isolate whether the standalone
+     quote token is what costs the alignment */
+  ['control: quote glued', 'Slide 7, verbatim: "If you have outstanding client matters that will not be completed before the closure of your practice, you are effectively withdrawing from representation" and must comply with the withdrawal rule.'],
   ['control: no numbers', 'On the exam: look for the conflict before you compute. The percentage answer is the planted trap.'],
   ['control: plain prose', 'The duty of confidentiality is a forever duty: it continues after the client terminates you.'],
 ];

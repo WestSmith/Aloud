@@ -60,12 +60,31 @@ should assume the same: verify a hypothesis before building on it.
    *Risk:* kokoro-js's normaliser handles things Aloud's spoken-text layer
    may not. Ship behind the self-check.
 
-2. **Harness gap.** `karaoke-selfcheck.mjs` phonemises **per word**;
-   production sends whole text, and espeak fuses function words
-   (`of the` → one blob `ʌvðɪ`). So its 0 ms is the *clean* case; production
-   has a hazard it doesn't yet reproduce. Extending it to whole-text
-   phonemisation would measure the real production error. Item 1 would make
-   production match the clean path by construction.
+2. **Harness gap — now measured, and it is real.** `karaoke-selfcheck.mjs`
+   phonemises **per word**; production sends whole text, and espeak fuses
+   function words. So its 0 ms is the *clean* case and does **not** clear a
+   sentence for production.
+
+   `tools/whole-text-fusion.mjs` measures the gap directly (espeak only — no
+   model, no ONNX). On the Week 13 guide's reported sentence:
+
+       display tokens    34
+       per-word blobs    33   <- karaoke-selfcheck scores this 0ms
+       whole-text blobs  32   <- what production actually sends
+       FUSED  "with" + "the"  ->  wɪððə
+
+   One blob short, so every token from `the` onward maps to the *next*
+   token's audio — `the` gets "withdrawal"'s onset, `withdrawal` gets
+   "rule"'s. That lands exactly where the reader said it drifts, and
+   `karaoke-selfcheck.mjs` scores the same sentence 0 ms warm **and**
+   `NOWARM=1`. Compare stress-stripped: espeak marks stress differently in
+   isolation (`ˈɪf` alone vs `ɪf` in context) and that is not a fusion.
+
+   The `mergeable` branch in `alignExactStarts` exists for this case, but a
+   0 ms harness score is no evidence it recovers — the harness never feeds it
+   a fused blob. Item 1 removes the class by construction; short of that,
+   extending the harness to whole-text phonemisation would at least measure
+   the error instead of hiding it.
 
 3. **Distortion is not fully explained.** Reduced but reported as still
    present. Onset error and audio quality are different questions and the
@@ -90,6 +109,14 @@ In `CASES` in the self-check: the money sentence, `(5.01(11))`,
 `And under 5.01(16)`, `Answer: $0.00.`, `The "too busy" line…`, the
 `8.04(1) … · 8.04(2)` glyph line, plus two number-free controls.
 
+Week 13 "Closing Your Business" — `…withdrawing from representation" and must
+comply with the withdrawal rule.` and the `The standard (Slide 7):` sentence
+after it. Both score 0 ms in the self-check; the first carries a `with`+`the`
+fusion that only `whole-text-fusion.mjs` sees (open item 2). Its markup puts
+the closing `"` in its own text node, so that quote is its own display token —
+the case string reproduces that with an explicit space, and removing the space
+(`control: quote glued`) is the isolating control.
+
 Fixed by segmentation, not in the harness (they need the real DOM):
 `<strong>The people.</strong> Ping Lee…`, `If you remember nothing else`,
 `Olga opened by saying…`, Figure 2's green half.
@@ -98,9 +125,27 @@ Fixed by segmentation, not in the harness (they need the real DOM):
 
     node tools/karaoke-selfcheck.mjs              # warm cache
     NOWARM=1 node tools/karaoke-selfcheck.mjs     # phonemizer unavailable
+    node tools/whole-text-fusion.mjs              # production fusion hazard
 
-Both must stay at 0 ms. `NOWARM=1` is not optional — that path was 500 ms
-out while the badge read "exact".
+The two self-check runs must stay at 0 ms. `NOWARM=1` is not optional — that
+path was 500 ms out while the badge read "exact". `whole-text-fusion.mjs`
+needs only espeak, runs in seconds, and answers a question the other two
+structurally cannot: it should report 0 hazards, and any sentence it flags is
+misaligned in production no matter what the self-check says.
+
+Setup, since a fresh container has none of it:
+
+    apt-get install -y espeak-ng
+    npm i onnxruntime-node        # postinstall needs a proxy-aware fetch;
+                                  # --ignore-scripts then re-run script/install
+    # model files (curl works where node's fetch may not):
+    #   https://huggingface.co/shawnahmed/Kokoro-82M-v1.0-ONNX-timestamped
+    #   onnx/model_quantized.onnx, voices/af_heart.bin, tokenizer.json, config.json
+    KOKORO_DIR=/path/to/model node tools/karaoke-selfcheck.mjs
+
+`KOKORO_DIR` defaults to `./m/shawnahmed/Kokoro-82M-v1.0-ONNX-timestamped`.
+Note ESM ignores `NODE_PATH`, so run the self-check from a directory that can
+resolve `onnxruntime-node`.
 
 Browser-side checks used throughout: load both study guides, confirm token
 count, block count, citation-dimming count and **no page errors**. A
