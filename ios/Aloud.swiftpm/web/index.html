@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.19.0">
+<meta name="aloud-version" content="v6.19.1">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -4240,6 +4240,31 @@ function naTick() {
    A real download runs to minutes and is nothing like it. */
 const KOKORO_COVER_DELAY_MS = 5000;
 
+/* Wait, then cover — but only a genuine DOWNLOAD, never a slow start.
+   A cached model emits no progress events at all: that path is pure ONNX
+   session init, and it finishes on its own. Covering it would swap Kokoro's
+   exact onsets for the device engine's estimated timing for no reason, which
+   is the regression this guard exists to prevent. So when nothing is
+   downloading, keep waiting and re-check. A load that is neither downloading
+   nor finishing is still bounded — kokoroStallGuard() fails it at 60s. */
+function armKokoroCover(cover) {
+  clearTimeout(kokoroCoverTimer);
+  kokoroCoverTimer = setTimeout(() => {
+    if (S.kokoro.state === 'ready' || !S.playing || S.engine !== 'neural') return;
+    /* <95: bytes still moving. At the top of the range the download is done
+       and only init remains, which is again not worth covering. */
+    const downloading = S.kokoro.progress > 0 && S.kokoro.progress < 95;
+    if (!downloading) return armKokoroCover(cover);
+    kokoroStopgapActive = true;
+    $('btn-play').classList.remove('loading');
+    if (!kokoroStopgapNoticed) {
+      kokoroStopgapNoticed = true;
+      toast(`⏳ The Kokoro voice is still downloading — reading with the ${cover === 'native' ? 'iOS' : 'device'} voice until it's ready, then it takes over automatically.`, 7000);
+    }
+    playCurrent(S.curWord);
+  }, KOKORO_COVER_DELAY_MS);
+}
+
 async function speakNeural(sentIdx, fromWord) {
   if (S.kokoro.state !== 'ready') {
     /* Kokoro isn't here yet. The original code pulsed the play button and
@@ -4260,19 +4285,7 @@ async function speakNeural(sentIdx, fromWord) {
     }
 
     $('btn-play').classList.add('loading');
-    clearTimeout(kokoroCoverTimer);
-    kokoroCoverTimer = setTimeout(() => {
-      /* re-check everything: the model may have landed, or the user may have
-         paused or switched engines while we waited */
-      if (S.kokoro.state === 'ready' || !S.playing || S.engine !== 'neural') return;
-      kokoroStopgapActive = true;
-      $('btn-play').classList.remove('loading');
-      if (!kokoroStopgapNoticed) {
-        kokoroStopgapNoticed = true;
-        toast(`⏳ The Kokoro voice is still downloading — reading with the ${cover === 'native' ? 'iOS' : 'device'} voice until it's ready, then it takes over automatically.`, 7000);
-      }
-      playCurrent(S.curWord);
-    }, KOKORO_COVER_DELAY_MS);
+    armKokoroCover(cover);
     return;
   }
   kokoroStopgapActive = false;
