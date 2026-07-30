@@ -1,0 +1,26 @@
+name: iOS bundle in sync
+
+# The native app ships its own copy of the web app under
+# ios/Aloud.swiftpm/web/. Without a check, editing index.html and forgetting to
+# run the sync script produces an app that silently lags a release behind —
+# which looks exactly like "the fix didn't work".
+#
+# Deliberately a separate workflow from pages.yml so a stale bundle never blocks
+# a web deploy.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare bundled web assets against the root web app
+        run: ./ios/sync-web-assets.sh --check
