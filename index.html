@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.16.0">
+<meta name="aloud-version" content="v6.17.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -3283,7 +3283,11 @@ function initKokoroWorker() {
       if (m.type === 'progress') {
         S.kokoro.progressAt = Date.now();          // proof of life for the stall guard
         const pct = Math.round(5 + 92 * (m.loaded / m.total));
-        if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}%`, pct); }
+        /* show the megabytes, not just the percentage — on a 305MB model a
+           percentage that moves slowly reads as "stuck", and the only way to
+           tell a slow download from a dead one is watching the bytes climb */
+        const mb = (n) => (n / 1048576).toFixed(0);
+        if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}% (${mb(m.loaded)} of ${mb(m.total)} MB)`, pct); }
       } else if (m.type === 'ready') { ready = true; resolve(); }
       else if (m.type === 'initerror') { if (!ready) fail(new Error(m.message)); }
       else if (m.type === 'result') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ audio: m.audio, sampling_rate: m.sr, pwords: m.pwords || null, nIds: m.nIds || 0 }); } }
@@ -3450,7 +3454,10 @@ async function loadKokoro() {
     S.kokoro.state = 'ready';
     renderKokoroStatus('✅ Neural voice ready — works offline from now on.', 100);
     setTimeout(() => { if (S.kokoro.state === 'ready') hideKokoroStatus(); }, 3500);
-    toast('✨ Kokoro neural voice is ready.');
+    /* if playback fell back to another engine while this downloaded, say how to
+       come back — don't yank the voice out from under a sentence in progress */
+    if (S.engine !== 'neural') toast('✨ Kokoro is ready — tap the voice pill to switch to it.', 7000);
+    else toast('✨ Kokoro neural voice is ready.');
     if (S.playing && S.engine === 'neural') playCurrent(S.curWord);
     else neuralPump();
   } catch (err) {
@@ -3461,8 +3468,13 @@ async function loadKokoro() {
     try { resetNeuralEngine(); } catch {}
     S.kokoro.state = 'error';
     $('btn-play').classList.remove('loading');   // stop the pulse: the tap is answered, one way or the other
-    renderKokoroStatus('⚠️ Could not load the neural engine (it needs an internet connection the first time, and a fairly recent browser). Device voices still work.', 0);
-    if (S.engine === 'neural') setEngine('device');
+    /* put the real reason on screen. It used to go only to console.error, which
+       on an iPad needs a Mac and a cable to read — so every distinct failure
+       (no network, blocked CDN, worker refused, out of memory) looked like the
+       same generic message, and none of them could be told apart from a hang. */
+    const why = String((err && err.message) || err || '').slice(0, 200);
+    renderKokoroStatus(`⚠️ Could not load the neural engine — ${why || 'unknown error'}. It needs an internet connection the first time, and a fairly recent browser. Other voices still work.`, 0);
+    if (S.engine === 'neural') setEngine(NATIVE ? 'native' : 'device');
   }
 }
 
@@ -4190,10 +4202,31 @@ function naTick() {
   else P.ticking = false;
 }
 
+/* one notice per session, not one per sentence */
+let kokoroStopgapNoticed = false;
+
 async function speakNeural(sentIdx, fromWord) {
   if (S.kokoro.state !== 'ready') {
-    $('btn-play').classList.add('loading');
+    /* Kokoro isn't here yet. The old code pulsed the play button and returned,
+       so the reader stayed silent for the whole 155–305MB download — which on a
+       tablet over a normal connection is minutes, and is indistinguishable from
+       a hang. (It is exactly what "the play button just pulses" was on iPad: the
+       stall guard only fires after 60s of ZERO progress, so a download that is
+       slow but healthy never trips it and the pulse just continues.)
+
+       Start the load, then hand this sentence to an engine that already works.
+       Kokoro announces itself when it lands; switching mid-document is one tap
+       and is the user's call, not something to do underneath them. */
     loadKokoro();
+    const stopgap = NATIVE ? 'native' : 'device';
+    if (!kokoroStopgapNoticed) {
+      kokoroStopgapNoticed = true;
+      toast(`⏳ The Kokoro voice is still downloading — reading with the ${stopgap === 'native' ? 'iOS' : 'device'} voice meanwhile. You'll get a nudge when it's ready.`, 7000);
+    }
+    /* setEngine restarts playback itself when it was already playing, so
+       calling playCurrent again here would speak the sentence twice */
+    setEngine(stopgap);
+    if (!S.playing) playCurrent(fromWord);
     return;
   }
   const sent = S.sentences[sentIdx];
