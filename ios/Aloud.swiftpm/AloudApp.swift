@@ -41,11 +41,52 @@ final class AppModel: ObservableObject {
     private static let fallbackURL = URL(string: "https://westsmith.github.io/Aloud/")!
 
     init() {
-        if let webRoot = Bundle.module.url(forResource: "web", withExtension: nil) {
+        if let webRoot = Self.bundledWebRoot() {
             server = LocalWebServer(root: webRoot)
         } else {
+            print("[Aloud] bundled web/ not found — using the hosted build")
             server = nil
         }
+    }
+
+    /// Locate the bundled copy of the web app.
+    ///
+    /// Not `Bundle.module`: that accessor is synthesised by SwiftPM for library
+    /// targets with resources, and Swift Playgrounds' app target does not get
+    /// one — referencing it fails to compile with "Type 'Bundle' has no member
+    /// 'module'". For an `.iOSApplication` product, `.copy("web")` resources
+    /// land in the app bundle itself, so `Bundle.main` is the right root.
+    ///
+    /// The extra probes cost nothing and cover the layouts different toolchains
+    /// produce, since a wrong guess here silently degrades the app to
+    /// network-only.
+    private static func bundledWebRoot() -> URL? {
+        let fm = FileManager.default
+
+        // Normal case: copied straight into the app bundle's resources.
+        if let url = Bundle.main.url(forResource: "web", withExtension: nil),
+           fm.fileExists(atPath: url.appendingPathComponent("index.html").path) {
+            return url
+        }
+
+        guard let resources = Bundle.main.resourceURL else { return nil }
+
+        let direct = resources.appendingPathComponent("web")
+        if fm.fileExists(atPath: direct.appendingPathComponent("index.html").path) {
+            return direct
+        }
+
+        // Some toolchains nest package resources inside a generated .bundle.
+        if let entries = try? fm.contentsOfDirectory(at: resources, includingPropertiesForKeys: nil) {
+            for entry in entries where entry.pathExtension == "bundle" {
+                let nested = entry.appendingPathComponent("web")
+                if fm.fileExists(atPath: nested.appendingPathComponent("index.html").path) {
+                    return nested
+                }
+            }
+        }
+
+        return nil
     }
 
     func start() {

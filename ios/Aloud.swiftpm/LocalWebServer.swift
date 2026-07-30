@@ -159,7 +159,11 @@ final class LocalWebServer {
     private func respond(to head: Data, on connection: NWConnection) {
         guard
             let headText = String(data: head, encoding: .utf8),
-            let requestLine = headText.split(separator: "\r\n", maxSplits: 1).first
+            // components(separatedBy:) rather than split(separator:) — splitting
+            // a String on a multi-character String separator depends on a
+            // stdlib overload that has moved between Swift versions, and this
+            // is not worth a compile error.
+            let requestLine = headText.components(separatedBy: "\r\n").first
         else {
             send(status: "400 Bad Request", body: Data(), contentType: "text/plain", on: connection)
             return

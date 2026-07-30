@@ -159,20 +159,24 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
     // MARK: - Helpers
 
     /// Aloud speaks in multiples of natural speed (1×–4×). AVSpeechUtterance
-    /// wants 0…1 with `AVSpeechUtteranceDefaultRate` (0.5) as natural, and the
+    /// wants 0…1 with `AVSpeechUtteranceDefaultSpeechRate` (0.5) as natural, and the
     /// scale above default is not linear in perceived speed. This piecewise map
     /// is approximate by design — unlike the Web Speech path, the highlight here
     /// follows real boundary callbacks, so a small speed error costs nothing in
     /// sync accuracy.
     static func avRate(forMultiplier multiplier: Double) -> Float {
+        // Note the name: the default is AVSpeechUtteranceDefault*Speech*Rate,
+        // while the bounds are AVSpeechUtteranceMinimum/MaximumSpeechRate. The
+        // obvious-looking AVSpeechUtteranceDefaultRate does not exist.
+        let defaultRate = Double(AVSpeechUtteranceDefaultSpeechRate)
         let m = max(0.5, min(4.0, multiplier))
         let raw: Double
         if m <= 1.0 {
             // 0.5× → 0.25, 1× → 0.5
-            raw = Double(AVSpeechUtteranceDefaultRate) * m
+            raw = defaultRate * m
         } else {
             // 1× → 0.5, 4× → 1.0
-            raw = Double(AVSpeechUtteranceDefaultRate) + (m - 1.0) * (0.5 / 3.0)
+            raw = defaultRate + (m - 1.0) * (0.5 / 3.0)
         }
         return Float(max(Double(AVSpeechUtteranceMinimumSpeechRate),
                          min(Double(AVSpeechUtteranceMaximumSpeechRate), raw)))
