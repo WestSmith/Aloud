@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.17.0">
+<meta name="aloud-version" content="v6.18.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -941,6 +941,13 @@ const NATIVE = (typeof window !== 'undefined' && window.__aloudNative && window.
    late callbacks (identical role to S.utterToken in the device engine), and
    offsets/idxs map a UTF-16 character index back onto a display word */
 let nativeUtter = null;
+
+/* another engine is covering for a Kokoro download that hasn't finished yet.
+   S.engine stays 'neural' the whole time — see speakNeural. Declared here, not
+   beside the neural engine, because loadKokoro() sits earlier in the file and
+   reads both. */
+let kokoroStopgapNoticed = false;   // one notice per session, not one per sentence
+let kokoroStopgapActive = false;
 
 /* ---------------- state ---------------- */
 const S = {
@@ -2967,7 +2974,10 @@ function initNativeEngine() {
 
     if (ev.type === 'end') {
       nativeUtter = null;
-      if (S.playing && S.engine === 'native') advanceAfterBreather();
+      /* kokoroStopgapActive: this engine is covering for a Kokoro download, so
+         S.engine is still 'neural' — without that clause the chain would stop
+         dead after one sentence */
+      if (S.playing && (S.engine === 'native' || kokoroStopgapActive)) advanceAfterBreather();
       return;
     }
 
@@ -3454,10 +3464,15 @@ async function loadKokoro() {
     S.kokoro.state = 'ready';
     renderKokoroStatus('✅ Neural voice ready — works offline from now on.', 100);
     setTimeout(() => { if (S.kokoro.state === 'ready') hideKokoroStatus(); }, 3500);
-    /* if playback fell back to another engine while this downloaded, say how to
-       come back — don't yank the voice out from under a sentence in progress */
-    if (S.engine !== 'neural') toast('✨ Kokoro is ready — tap the voice pill to switch to it.', 7000);
-    else toast('✨ Kokoro neural voice is ready.');
+    toast('✨ Kokoro neural voice is ready.');
+    /* another engine has been covering the download. Silence it before Kokoro
+       speaks, or both voices talk at once — but only when we're really handing
+       back: if the user switched engines meanwhile, that playback is now theirs
+       and cutting it off would be the bug. */
+    if (kokoroStopgapActive) {
+      kokoroStopgapActive = false;
+      if (S.playing && S.engine === 'neural') silenceStopgap();
+    }
     if (S.playing && S.engine === 'neural') playCurrent(S.curWord);
     else neuralPump();
   } catch (err) {
@@ -3472,6 +3487,7 @@ async function loadKokoro() {
        on an iPad needs a Mac and a cable to read — so every distinct failure
        (no network, blocked CDN, worker refused, out of memory) looked like the
        same generic message, and none of them could be told apart from a hang. */
+    kokoroStopgapActive = false;   // no handover is coming; the covering engine keeps the floor
     const why = String((err && err.message) || err || '').slice(0, 200);
     renderKokoroStatus(`⚠️ Could not load the neural engine — ${why || 'unknown error'}. It needs an internet connection the first time, and a fairly recent browser. Other voices still work.`, 0);
     if (S.engine === 'neural') setEngine(NATIVE ? 'native' : 'device');
@@ -4202,33 +4218,45 @@ function naTick() {
   else P.ticking = false;
 }
 
-/* one notice per session, not one per sentence */
-let kokoroStopgapNoticed = false;
+/* kokoroStopgapNoticed / kokoroStopgapActive are declared up with the app
+   state: loadKokoro() sits earlier in this file and reads both, which for a
+   `let` declared here would be a temporal-dead-zone ReferenceError the moment
+   anything called it before this line evaluated. */
+
+/* hand the microphone back: silence whichever engine was covering, so it can't
+   keep talking over Kokoro. Bumping utterToken is what actually invalidates the
+   in-flight callbacks; cancel()/stop() just stop the sound. */
+function silenceStopgap() {
+  S.utterToken++;
+  stopEstLoop();
+  if (synth) synth.cancel();
+  if (NATIVE) { try { NATIVE.stop(); } catch {} nativeUtter = null; }
+}
 
 async function speakNeural(sentIdx, fromWord) {
   if (S.kokoro.state !== 'ready') {
-    /* Kokoro isn't here yet. The old code pulsed the play button and returned,
-       so the reader stayed silent for the whole 155–305MB download — which on a
-       tablet over a normal connection is minutes, and is indistinguishable from
-       a hang. (It is exactly what "the play button just pulses" was on iPad: the
-       stall guard only fires after 60s of ZERO progress, so a download that is
-       slow but healthy never trips it and the pulse just continues.)
+    /* Kokoro isn't here yet. The original code pulsed the play button and
+       returned, so the reader stayed silent for the whole 155–305MB download —
+       minutes on a tablet, and indistinguishable from a hang. (The stall guard
+       only fires after 60s of ZERO progress, so a download that is slow but
+       healthy never trips it and the pulse just continues.)
 
-       Start the load, then hand this sentence to an engine that already works.
-       Kokoro announces itself when it lands; switching mid-document is one tap
-       and is the user's call, not something to do underneath them. */
+       So start the load and hand this sentence to an engine that already works.
+       Crucially S.engine stays 'neural': the user picked that, and a slow
+       download is not a reason to rewrite their choice — least of all a
+       persisted one. Kokoro takes over by itself the moment it lands. */
     loadKokoro();
-    const stopgap = NATIVE ? 'native' : 'device';
+    const cover = NATIVE ? 'native' : (synth ? 'device' : null);
+    if (!cover) { $('btn-play').classList.add('loading'); return; }   // nothing to cover with
     if (!kokoroStopgapNoticed) {
       kokoroStopgapNoticed = true;
-      toast(`⏳ The Kokoro voice is still downloading — reading with the ${stopgap === 'native' ? 'iOS' : 'device'} voice meanwhile. You'll get a nudge when it's ready.`, 7000);
+      toast(`⏳ The Kokoro voice is still downloading — reading with the ${cover === 'native' ? 'iOS' : 'device'} voice until it's ready, then it takes over automatically.`, 7000);
     }
-    /* setEngine restarts playback itself when it was already playing, so
-       calling playCurrent again here would speak the sentence twice */
-    setEngine(stopgap);
-    if (!S.playing) playCurrent(fromWord);
-    return;
+    kokoroStopgapActive = true;
+    $('btn-play').classList.remove('loading');
+    return cover === 'native' ? speakNative(sentIdx, fromWord) : speakDevice(sentIdx, fromWord);
   }
+  kokoroStopgapActive = false;
   const sent = S.sentences[sentIdx];
   if (!sent) return stopAll();
   const genToken = ++S.neuralGenToken;
