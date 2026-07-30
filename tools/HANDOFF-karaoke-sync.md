@@ -49,6 +49,32 @@ should assume the same: verify a hypothesis before building on it.
 - **`countPhones` floors `v` at 0.5**, so `v + c === 0` can never be true.
   Use the word count (`e.w`) to detect "espeak says nothing".
 
+### Ruled out by measurement, 2026-07-30 (Mac + iPad simulator)
+
+Three sentence-start hypotheses were tested and **all three refuted**. They are
+listed because each is plausible from code reading alone, and re-deriving them
+costs a session.
+
+- **Whole-text fusion does not misplace onsets.** Open item 2 below has the
+  numbers: four sentences carrying real blob fusions all score 0 ms through
+  `alignExactStarts`. The `mergeable` branch recovers.
+- **The lead-in seek is not silently lost.** `na.currentTime = seekTo` inside
+  the one-shot `loadedmetadata` handler sticks on both desktop Chrome and iOS
+  WebKit — reads back 0.400 from a 0.400 assignment, `seekable=[0.00-2.00]`,
+  playback genuinely starts there. Registering the listener *after* `na.src`
+  (production's order) still catches the event. **Trap:** an early run of this
+  probe served the clip over `python3 -m http.server`, which ignores Range, so
+  every seek was reported LOST — a rig artefact, not the app. Production plays
+  from `URL.createObjectURL`, which is fully seekable; test with a blob.
+- **`rolling` going true early costs nothing.** On iOS WebKit (unlike Chrome)
+  the post-seek `timeupdate` *does* set `rolling` before `playing` — the
+  precondition for `naMediaPos` extrapolating through a silent window. Measured
+  phantom is **0 ms** anyway, including with a 14.3 s clip and 900 ms of CPU
+  burned right after `play()`: the gap between the two is ~5 ms because the
+  `timeupdate` handler calls `syncClock()` as it sets the flag, re-anchoring
+  `clock.media` to the true position. The comment on the `currentTime > 0`
+  test is inaccurate for iOS, but the behaviour is safe.
+
 ## Open items
 
 1. **Feed Kokoro per-word phonemes instead of text** — the big one.
@@ -122,14 +148,26 @@ should assume the same: verify a hypothesis before building on it.
    measured, and a normalisation difference would move the blob boundaries this
    whole comparison rests on.
 
-3. **Distortion is not fully explained.** Reduced but reported as still
-   present. Onset error and audio quality are different questions and the
-   harness only measures the first. Candidates: CPU contention (Kokoro
-   inference starves the audio pipeline and stalls the rAF paint, which
-   looks like drift), and very short clips — segmentation went 734 → ~1150
-   sentences on the Week 10 guide, so there are far more inference calls.
-   **Untested diagnostic:** pause 30–60 s so the runway pre-generates, then
-   play. If it cleans up, it's contention, not timing.
+3. **Distortion is not fully explained — and it is now the leading suspect
+   for the drift too.** Reduced but reported as still present. Onset error and
+   audio quality are different questions and the harness only measures the
+   first. Candidates: CPU contention (Kokoro inference starves the audio
+   pipeline and stalls the rAF paint, which looks like drift), and very short
+   clips — segmentation went 734 → ~1150 sentences on the Week 10 guide, so
+   there are far more inference calls.
+
+   This moved up the list on 2026-07-30: the three *timing* explanations for
+   sentence-start drift were measured and refuted (see "Ruled out" above), so
+   the remaining candidates are the paint path and the audio pipeline rather
+   than the onsets fed to them. Note the 900 ms busy-loop in that probe blocked
+   the main thread without moving the audio clock at all — which is exactly the
+   shape of "the highlight stalls and then jumps", and is a *paint* failure,
+   not a timing one.
+
+   **Untested diagnostic, and still the highest-value single observation
+   available:** pause 30–60 s so the runway pre-generates, then play. If it
+   cleans up, it's contention, not timing. It needs a human ear, which is why
+   it is still open.
 
 4. **Native macOS app** was raised. Honest scorecard: it decisively fixes
    the clock class (AVAudioEngine gives sample-accurate position) and the
