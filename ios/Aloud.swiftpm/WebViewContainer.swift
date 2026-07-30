@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import WebKit
 
 /// Hosts the Aloud web app and wires it to the native audio session and speech

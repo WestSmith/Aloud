@@ -154,13 +154,16 @@ is expected.
 
 ## App icon
 
-`Package.swift` currently uses `appIcon: .placeholder(icon: .book)` so the
-package builds with no asset catalog present.
+`Package.swift` omits `appIcon` entirely, so Swift Playgrounds supplies a
+default. That is on purpose: every icon spelling (`.placeholder(icon:)`,
+`.asset(_:)`) is an enum case whose name varies between Swift Playgrounds
+versions, and a wrong guess fails the build before the app has ever run.
 
-To use the real Aloud icon you need a **1024×1024** source; the repo's existing
-icons top out at 512×512, so they'd need regenerating first. Once you have one,
-add `Assets.xcassets` with an `AppIcon` app-icon set and change the line to
-`appIcon: .asset("AppIcon")`.
+The easy fix is in Swift Playgrounds itself — tap the app's settings and pick an
+icon from the UI. To use the real Aloud icon in Xcode instead, you need a
+**1024×1024** source (the repo's icons top out at 512×512, so they need
+regenerating first); add `Assets.xcassets` with an `AppIcon` app-icon set, then
+add `appIcon: .asset("AppIcon")` back to the product.
 
 ---
 

@@ -23,14 +23,14 @@ let package = Package(
             name: "Aloud",
             targets: ["AppModule"],
             bundleIdentifier: "com.westsmith.aloud",
-            teamIdentifier: "",
             displayVersion: "1.0",
             bundleVersion: "1",
-            // Placeholder so the package builds with no asset catalog. To use the
-            // real Aloud icon, see ios/README.md — it needs a 1024×1024 source,
-            // which the repo's existing 512px icons don't provide.
-            appIcon: .placeholder(icon: .book),
-            accentColor: .presetColor(.purple),
+            // appIcon/accentColor/teamIdentifier are deliberately omitted. Every
+            // one of them is optional, and each is a spelling of an enum case
+            // that varies between Swift Playgrounds versions — i.e. a way for
+            // the build to fail before it has run once. Swift Playgrounds fills
+            // in a default icon; set a real one from its own UI (or see
+            // ios/README.md) once the app is running.
             supportedDeviceFamilies: [.pad, .phone],
             supportedInterfaceOrientations: [
                 .portrait,
