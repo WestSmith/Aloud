@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.18.0">
+<meta name="aloud-version" content="v6.19.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -948,6 +948,7 @@ let nativeUtter = null;
    reads both. */
 let kokoroStopgapNoticed = false;   // one notice per session, not one per sentence
 let kokoroStopgapActive = false;
+let kokoroCoverTimer = null;        // delay before covering — see KOKORO_COVER_DELAY_MS
 
 /* ---------------- state ---------------- */
 const S = {
@@ -2974,10 +2975,12 @@ function initNativeEngine() {
 
     if (ev.type === 'end') {
       nativeUtter = null;
-      /* kokoroStopgapActive: this engine is covering for a Kokoro download, so
-         S.engine is still 'neural' — without that clause the chain would stop
-         dead after one sentence */
-      if (S.playing && (S.engine === 'native' || kokoroStopgapActive)) advanceAfterBreather();
+      /* no engine check: the token guard above already proves this is the live
+         utterance. It may have been spoken as 'native', or while covering a
+         Kokoro download with S.engine still 'neural' — and the covering case
+         can have the flag cleared out from under it when the model lands
+         mid-sentence, so keying on the flag would strand the last sentence. */
+      if (S.playing) advanceAfterBreather();
       return;
     }
 
@@ -3465,15 +3468,15 @@ async function loadKokoro() {
     renderKokoroStatus('✅ Neural voice ready — works offline from now on.', 100);
     setTimeout(() => { if (S.kokoro.state === 'ready') hideKokoroStatus(); }, 3500);
     toast('✨ Kokoro neural voice is ready.');
-    /* another engine has been covering the download. Silence it before Kokoro
-       speaks, or both voices talk at once — but only when we're really handing
-       back: if the user switched engines meanwhile, that playback is now theirs
-       and cutting it off would be the bug. */
     if (kokoroStopgapActive) {
+      /* another engine is mid-sentence, covering the download. Let it finish:
+         the next sentence goes through speakNeural again and picks up Kokoro by
+         itself. Cutting in here would swap voice mid-sentence, which is more
+         jarring than waiting a few seconds — and would have to restart the
+         sentence to do it. Just start the generation runway. */
       kokoroStopgapActive = false;
-      if (S.playing && S.engine === 'neural') silenceStopgap();
-    }
-    if (S.playing && S.engine === 'neural') playCurrent(S.curWord);
+      neuralPump();
+    } else if (S.playing && S.engine === 'neural') playCurrent(S.curWord);
     else neuralPump();
   } catch (err) {
     console.error(err);
@@ -4218,20 +4221,24 @@ function naTick() {
   else P.ticking = false;
 }
 
-/* kokoroStopgapNoticed / kokoroStopgapActive are declared up with the app
-   state: loadKokoro() sits earlier in this file and reads both, which for a
-   `let` declared here would be a temporal-dead-zone ReferenceError the moment
-   anything called it before this line evaluated. */
+/* kokoroStopgapNoticed / kokoroStopgapActive / kokoroCoverTimer are declared up
+   with the app state: loadKokoro() sits earlier in this file and reads them,
+   which for a `let` declared here would be a temporal-dead-zone ReferenceError
+   the moment anything called it before this line evaluated. */
 
-/* hand the microphone back: silence whichever engine was covering, so it can't
-   keep talking over Kokoro. Bumping utterToken is what actually invalidates the
-   in-flight callbacks; cancel()/stop() just stop the sound. */
-function silenceStopgap() {
-  S.utterToken++;
-  stopEstLoop();
-  if (synth) synth.cancel();
-  if (NATIVE) { try { NATIVE.stop(); } catch {} nativeUtter = null; }
-}
+/* How long to wait, in silence, before handing the sentence to another engine.
+   This exists because covering is not free: the device engine's timing is
+   ESTIMATED (buildTimeline + calibFactor) and takes a sentence or two to
+   calibrate, so its first few words drift — exactly the desync Kokoro's
+   exact-onset path was built to eliminate. Covering a load that was about to
+   finish anyway trades good sync for bad.
+
+   So cover only a wait that is genuinely long. A cached model — the normal
+   desktop case, where the weights are already in Cache Storage and only the
+   ONNX session has to spin up — lands well inside this window and never
+   triggers a cover at all, which is how it behaved before covering existed.
+   A real download runs to minutes and is nothing like it. */
+const KOKORO_COVER_DELAY_MS = 5000;
 
 async function speakNeural(sentIdx, fromWord) {
   if (S.kokoro.state !== 'ready') {
@@ -4241,22 +4248,35 @@ async function speakNeural(sentIdx, fromWord) {
        only fires after 60s of ZERO progress, so a download that is slow but
        healthy never trips it and the pulse just continues.)
 
-       So start the load and hand this sentence to an engine that already works.
-       Crucially S.engine stays 'neural': the user picked that, and a slow
+       S.engine stays 'neural' throughout: the user picked that, and a slow
        download is not a reason to rewrite their choice — least of all a
-       persisted one. Kokoro takes over by itself the moment it lands. */
+       persisted one. */
     loadKokoro();
     const cover = NATIVE ? 'native' : (synth ? 'device' : null);
-    if (!cover) { $('btn-play').classList.add('loading'); return; }   // nothing to cover with
-    if (!kokoroStopgapNoticed) {
-      kokoroStopgapNoticed = true;
-      toast(`⏳ The Kokoro voice is still downloading — reading with the ${cover === 'native' ? 'iOS' : 'device'} voice until it's ready, then it takes over automatically.`, 7000);
+    if (!cover) { $('btn-play').classList.add('loading'); return; }
+
+    if (kokoroStopgapActive) {   // already covering — keep the chain going
+      return cover === 'native' ? speakNative(sentIdx, fromWord) : speakDevice(sentIdx, fromWord);
     }
-    kokoroStopgapActive = true;
-    $('btn-play').classList.remove('loading');
-    return cover === 'native' ? speakNative(sentIdx, fromWord) : speakDevice(sentIdx, fromWord);
+
+    $('btn-play').classList.add('loading');
+    clearTimeout(kokoroCoverTimer);
+    kokoroCoverTimer = setTimeout(() => {
+      /* re-check everything: the model may have landed, or the user may have
+         paused or switched engines while we waited */
+      if (S.kokoro.state === 'ready' || !S.playing || S.engine !== 'neural') return;
+      kokoroStopgapActive = true;
+      $('btn-play').classList.remove('loading');
+      if (!kokoroStopgapNoticed) {
+        kokoroStopgapNoticed = true;
+        toast(`⏳ The Kokoro voice is still downloading — reading with the ${cover === 'native' ? 'iOS' : 'device'} voice until it's ready, then it takes over automatically.`, 7000);
+      }
+      playCurrent(S.curWord);
+    }, KOKORO_COVER_DELAY_MS);
+    return;
   }
   kokoroStopgapActive = false;
+  clearTimeout(kokoroCoverTimer);
   const sent = S.sentences[sentIdx];
   if (!sent) return stopAll();
   const genToken = ++S.neuralGenToken;
@@ -4565,6 +4585,7 @@ function pauseAll() {
   S.utterToken++; stopEstLoop();
   if (synth) synth.cancel();
   if (NATIVE) { try { NATIVE.stop(); } catch {} nativeUtter = null; }
+  clearTimeout(kokoroCoverTimer);   // a pause must not spawn a cover voice later
   S.neuralGenToken++;
   if (S.audio) S.audio.pause();
   S.rsvp.token++;
