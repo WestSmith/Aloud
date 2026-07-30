@@ -1,4 +1,11 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 5.7
+//
+// 5.7 rather than 5.9 on purpose: the tools version gates which Swift
+// Playgrounds versions will open this package at all, and a manifest the
+// installed toolchain considers too new fails with a bare "failed to load"
+// rather than a useful diagnostic. 5.7 is the oldest version that still
+// supports everything used here (`guard let self`, structured concurrency),
+// so it is the widest door with no cost.
 
 // This is a Swift Playgrounds *App* package. It opens two ways:
 //   • Swift Playgrounds on the iPad — build and install straight onto the device, no Mac.

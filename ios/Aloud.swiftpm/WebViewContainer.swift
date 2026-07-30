@@ -180,11 +180,31 @@ struct WebViewContainer: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             print("[Aloud] navigation failed: \(error)")
+            fallBackToHostedBuild(webView, reason: error)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             print("[Aloud] provisional navigation failed: \(error)")
+            fallBackToHostedBuild(webView, reason: error)
         }
+
+        /// The loopback server binding is only half the battle — App Transport
+        /// Security can still refuse the `http://127.0.0.1` load itself if the
+        /// Info.plist additions didn't make it into the built app. That failure
+        /// mode is a blank screen with nothing to go on, so treat *any* failure
+        /// to load the local origin as a cue to try the hosted build instead.
+        /// Once is enough: a second failure means there is no network either,
+        /// and retrying forever would just spin.
+        private func fallBackToHostedBuild(_ webView: WKWebView, reason: Error) {
+            guard !hasFallenBack else { return }
+            guard webView.url?.host == "127.0.0.1" || webView.url == nil else { return }
+            hasFallenBack = true
+            print("[Aloud] local load failed (\(reason.localizedDescription)) — trying the hosted build")
+            webView.load(URLRequest(url: Self.hostedFallbackURL))
+        }
+
+        private var hasFallenBack = false
+        private static let hostedFallbackURL = URL(string: "https://westsmith.github.io/Aloud/")!
 
         /// `target="_blank"` links have no window to open into inside the app.
         func webView(
