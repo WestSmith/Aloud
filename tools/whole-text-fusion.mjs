@@ -21,12 +21,31 @@
  */
 import { execFileSync } from 'child_process';
 
+/* espeak IS the measurement here, so a missing binary has to stop the run.
+   The old code caught every failure and returned '', which read as a sentence
+   with zero blobs — no blobs, no gap, and a confident "0 of 4 sentences carry
+   the production hazard". A green result from having measured nothing, on the
+   one check CLAUDE.md says must be 0. It hid the known Week 13 fusion. */
+try {
+  execFileSync('espeak-ng', ['--version'], { stdio: 'ignore' });
+} catch {
+  console.error(
+    'espeak-ng not found on PATH — this tool cannot measure anything without it.\n' +
+    '  macOS:   brew install espeak-ng\n' +
+    '  Debian:  apt-get install -y espeak-ng\n' +
+    'Refusing to run rather than report a false all-clear.');
+  process.exit(1);
+}
+
 function phonemize(text) {
   try {
     return execFileSync('espeak-ng', ['-v', 'en-us', '-q', '--ipa=3', text], { encoding: 'utf8' })
       .replace(/‍/g, '').replace(/\s+/g, ' ').trim();
-  } catch {
-    return '';
+  } catch (err) {
+    /* the preflight already proved espeak exists, so a failure here is a real
+       one — bad input, killed process — and blanking it would corrupt the
+       blob count in exactly the direction that fakes a pass. */
+    throw new Error(`espeak-ng failed on ${JSON.stringify(text)}: ${err.message}`);
   }
 }
 

@@ -12,6 +12,8 @@
  * Any gap is the aligner's error, in milliseconds, per word.
  */
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import ort from 'onnxruntime-node';
 
@@ -25,7 +27,16 @@ const SR = 24000;
 const vocab = JSON.parse(fs.readFileSync(DIR + '/tokenizer.json', 'utf8')).model.vocab;
 
 /* ---- Aloud's own spoken-text layer, lifted from index.html ---- */
-const src = fs.readFileSync('/home/user/Aloud/index.html', 'utf8');
+
+/* index.html sits at the repo root, one level above tools/. Deriving that from
+   this file's own URL keeps the harness runnable from any checkout and any
+   working directory; ALOUD_ROOT overrides it for an unusual layout. The
+   KOKORO_DIR note above records this same fix for the model path — this line
+   was missed and still pointed into one container's home directory, so the
+   harness could not run anywhere else at all. */
+const ROOT = process.env.ALOUD_ROOT
+  || path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
+const src = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
 const grab1 = (from, to) => src.slice(src.indexOf(from), src.indexOf(to));
 const S = { skipCode: true, dict: {}, skipCitations: true };
 const phonemeCache = new Map();
@@ -41,14 +52,32 @@ const aloud = new Function('S', 'phonemeCache',
 )(S, phonemeCache);
 
 /* ---- espeak-ng, the same G2P engine Kokoro uses ---- */
+
+/* A missing espeak used to become out='' for every word, which makes the
+   phoneme-direct onsets — the GROUND TRUTH this harness measures against —
+   silently empty, and a 0 ms score means nothing at that point. Since 0 ms is
+   the pass condition, that failure mode reports success. Stop instead. */
+try {
+  execFileSync('espeak-ng', ['--version'], { stdio: 'ignore' });
+} catch {
+  console.error(
+    'espeak-ng not found on PATH — the ground truth this harness compares\n' +
+    'against is derived from it, so a score computed without it is meaningless.\n' +
+    '  macOS:   brew install espeak-ng\n' +
+    '  Debian:  apt-get install -y espeak-ng');
+  process.exit(1);
+}
+
 const g2pCache = new Map();
 function phonemize(text) {
   if (g2pCache.has(text)) return g2pCache.get(text);
-  let out = '';
+  let out;
   try {
     out = execFileSync('espeak-ng', ['-v', 'en-us', '-q', '--ipa=3', text],
       { encoding: 'utf8' }).replace(/‍/g, '').replace(/\s+/g, ' ').trim();
-  } catch { out = ''; }
+  } catch (err) {
+    throw new Error(`espeak-ng failed on ${JSON.stringify(text)}: ${err.message}`);
+  }
   g2pCache.set(text, out);
   return out;
 }

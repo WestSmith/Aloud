@@ -1,0 +1,10 @@
+# macOS Finder metadata. Created in any folder Finder opens, never useful in
+# the repo, and this one is public.
+.DS_Store
+
+# Local setup for the karaoke harness, per tools/README-selfcheck.md:
+#   npm i onnxruntime-node        -> node_modules/
+#   Kokoro model files            -> ./m/<repo>/   (hundreds of MB)
+# Both are machine-local and far too large to belong in git.
+node_modules/
+m/
