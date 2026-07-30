@@ -80,11 +80,47 @@ should assume the same: verify a hypothesis before building on it.
    `NOWARM=1`. Compare stress-stripped: espeak marks stress differently in
    isolation (`ˈɪf` alone vs `ɪf` in context) and that is not a fusion.
 
-   The `mergeable` branch in `alignExactStarts` exists for this case, but a
-   0 ms harness score is no evidence it recovers — the harness never feeds it
-   a fused blob. Item 1 removes the class by construction; short of that,
-   extending the harness to whole-text phonemisation would at least measure
-   the error instead of hiding it.
+   **ANSWERED (2026-07-30, on a Mac with the full harness).**
+   `tools/whole-text-selfcheck.mjs` is the extension this item asked for: it
+   phonemises the whole sentence exactly as `generateNeuralNow` does, generates
+   real audio, and scores `alignExactStarts` against ground truth derived from
+   the same clip. Result across the reported spots:
+
+       reported: withdrawal    34 tok  mean 0ms  worst 0ms   [33->32 blobs]
+       reported: money         25 tok  mean 0ms  worst 0ms   [31->29 blobs]
+       reported: 5.01(16)      19 tok  mean 0ms  worst 0ms   [23->22 blobs]
+       control:  quote glued   33 tok  mean 0ms  worst 0ms   [33->32 blobs]
+       across 150 words: mean 0ms, worst 0ms
+
+   So the `mergeable` branch **does** recover: four sentences carrying genuine
+   fusions all score 0 ms. The fusion is real, but on this evidence it is not
+   what the reader saw, and **item 1 would not fix the reported symptom** —
+   there is no onset error in this path left to remove. Item 1 may still be
+   worth doing to delete the DP, but it is no longer a desync fix and should
+   not be sold as one.
+
+   The 0 ms is load-bearing, so it is guarded two ways. `SELFTEST=1` shifts
+   every onset one token late and must report a large error (it reports mean
+   349 ms, worst 2275 ms, 100/150 words visible) — if that ever reads 0 ms the
+   two sides have gone circular and the run proves nothing. And a sentence
+   whose blob walk does not reconcile prints `UNSCORED` rather than a number.
+
+   Two traps cost real time here and are worth not repeating. Matching the
+   per-word and whole-text blob streams **cannot be exact-string**: espeak
+   applies sentence-level allophony, so "of the" before a vowel is `ʌvðɪ` while
+   the per-word strings concatenate to `ʌvðə`. An identity test misses that
+   fusion, slips one blob, and reports a confident **650 ms error that is
+   purely the harness's own** — it was briefly believed. Nor is a
+   low-similarity 1:1 step evidence of a slip: `"A"` reduces to `ɐ` and `to` to
+   `tə` in context, and failing sentences on that signal marked two clean ones
+   UNSCORED. The honest invariant is `per_blobs - fusions == whole_blobs`.
+
+   **Caveat, untested:** the harness calls the `espeak-ng` CLI directly, while
+   production reaches espeak through kokoro-js, which applies its own text
+   normalisation first. Aloud has already normalised via `spokenFor` by that
+   point so the remaining difference should be small, but "should be" is not
+   measured, and a normalisation difference would move the blob boundaries this
+   whole comparison rests on.
 
 3. **Distortion is not fully explained.** Reduced but reported as still
    present. Onset error and audio quality are different questions and the
@@ -126,12 +162,21 @@ Fixed by segmentation, not in the harness (they need the real DOM):
     node tools/karaoke-selfcheck.mjs              # warm cache
     NOWARM=1 node tools/karaoke-selfcheck.mjs     # phonemizer unavailable
     node tools/whole-text-fusion.mjs              # production fusion hazard
+    node tools/whole-text-selfcheck.mjs           # onset error on the SHIPPING path
+    SELFTEST=1 node tools/whole-text-selfcheck.mjs   # must NOT be 0ms
 
 The two self-check runs must stay at 0 ms. `NOWARM=1` is not optional — that
 path was 500 ms out while the badge read "exact". `whole-text-fusion.mjs`
-needs only espeak, runs in seconds, and answers a question the other two
-structurally cannot: it should report 0 hazards, and any sentence it flags is
-misaligned in production no matter what the self-check says.
+needs only espeak, runs in seconds, and flags sentences where espeak fuses
+function words; note that a flagged sentence is **not** by itself a
+misalignment — measured, `alignExactStarts` recovers the fusions it finds
+(open item 2). `whole-text-selfcheck.mjs` is the one that scores the shipping
+path end to end, and its `SELFTEST=1` run must report a LARGE error: a 0 ms
+there means the harness has gone circular and its real-data 0 ms is worthless.
+
+All four tools now refuse to run without `espeak-ng` rather than reporting a
+green result from having measured nothing — that footgun was live until
+2026-07-30 and was hiding the fusion this handoff documents.
 
 Setup, since a fresh container has none of it:
 
