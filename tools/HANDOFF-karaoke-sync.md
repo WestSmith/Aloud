@@ -8,6 +8,29 @@ The reader's report that opened all of it: with the Kokoro neural voice at
 **1.75×** and breathers on **Max**, the word highlight ran ahead of the
 audio — worst at the start of a sentence — plus intermittent distortion.
 
+> **DOES NOT REPRODUCE at v6.19.1** (2026-07-30). The reader re-tested the
+> reported document under the reported conditions — Kokoro, 1.75×, breathers
+> Max — on iPad, both from a cold start and after a 60 s pause, and on desktop.
+> Sync was correct every time. Independently, `whole-text-selfcheck.mjs` scores
+> the shipping path 0 ms across 150 words with a negative control proving it
+> can detect a one-token slip, and three sentence-start timing causes were
+> measured and refuted (see "Ruled out"). Ears and instrument agree.
+>
+> The likely fix is **v6.15.0** itself — the aligner no longer depending on a
+> phoneme cache that silently goes cold. It landed as this handoff was being
+> written, so the document records the bug as open simply because nobody
+> listened afterwards. Everything shipped since (v6.16–v6.19.1) is the native
+> app and the Kokoro-download cover, not sync work.
+>
+> **Do not "fix" this.** Nine causes produced this symptom and it returned
+> after several fixes; speculative changes to a path that currently measures
+> 0 ms and sounds correct are how it comes back a tenth time.
+>
+> If it IS reported again, capture what this round could not vary: which
+> quality tier, whether the model was still downloading (the cover engine's
+> timing is *estimated* and drifts at sentence starts by design — see
+> `KOKORO_COVER_DELAY_MS`), device thermal state, and document length.
+
 ---
 
 ## The one thing to understand first
