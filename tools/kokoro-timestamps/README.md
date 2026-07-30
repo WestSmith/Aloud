@@ -147,9 +147,9 @@ the duration tensor can't be exposed; it should not be needed.
     a floating pill visible from any screen (was only inside the voice
     sheet — looked like a hang).
   - v6.8.2 (owner feedback: "went off the rails around
-    thestudent@gmail.com"): two aligner fixes. (1) flex now means ANY
+    name@example.com"): two aligner fixes. (1) flex now means ANY
     non-letter inside a word, not just digits — espeak expands emails
-    ("… at gmail dot com"), "and/or" ("and slash or"), etc.; a mis-typed
+    ("… at example dot com"), "and/or" ("and slash or"), etc.; a mis-typed
     plain token forced its expansion onto a neighbouring number and
     desynced everything between them. (2) espeak sometimes FUSES function
     words ("of the" → one blob "ʌvðə", "for the" → "fɚðə"): short bare
