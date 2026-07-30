@@ -3,8 +3,14 @@
 .DS_Store
 
 # Local setup for the karaoke harness, per tools/README-selfcheck.md:
-#   npm i onnxruntime-node        -> node_modules/
+#   npm i onnxruntime-node        -> node_modules/ + package*.json
 #   Kokoro model files            -> ./m/<repo>/   (hundreds of MB)
-# Both are machine-local and far too large to belong in git.
+# All machine-local. The manifests are ignored too: Aloud ships as one file
+# with no build step and no bundler, and a package.json in the root would
+# advertise a toolchain that does not exist. onnxruntime-node is a harness
+# dependency only — nothing the app loads. If a real build step ever lands,
+# delete these two lines rather than working around them.
 node_modules/
+package.json
+package-lock.json
 m/
