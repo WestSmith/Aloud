@@ -169,9 +169,18 @@ add `appIcon: .asset("AppIcon")` back to the product.
 
 ## Not done / worth knowing
 
-- **None of the Swift here has been compiled.** It was written in a Linux
-  container with no macOS toolchain, so treat the first build as a real review
-  pass rather than a formality.
+- **It builds and runs, but nobody has heard it.** Xcode 26.6 builds the
+  package clean for the iOS Simulator, and it launches on an iPad Air (M4):
+  the loopback server binds (`localhost:49200`), `BridgeScript` injects,
+  the reader renders, and `MPNowPlayingInfoCenter` picks up the session.
+  What none of that covers is *sound*. The silent-switch fix in
+  `AudioSession.swift` is the whole reason this app exists, and it is exactly
+  the part a screenshot cannot verify — so first audio on real hardware is
+  still the open question, not the build.
+- **First paint took roughly 25–30 s in the Simulator.** Parsing a 2.1 MB
+  `index.html` on simulated hardware is the obvious suspect, but that is
+  reasoning, not measurement — it has not been timed on a real iPad, and this
+  repo has been burned before by the difference.
 - **Qwen TTS** is not wired up, and it is not a drop-in. Qwen3-TTS is a hosted
   API (Alibaba DashScope) rather than a local model, so it would mean network
   calls, an API key, and per-character cost — a different privacy and offline
