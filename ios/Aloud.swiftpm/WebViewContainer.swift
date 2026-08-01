@@ -8,8 +8,11 @@ struct WebViewContainer: UIViewRepresentable {
 
     /// Where to load from. Resolved once at launch by `AppModel`.
     let source: URL
+    let onFatalError: (String) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(shellOrigin: source, onFatalError: onFatalError)
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
@@ -21,17 +24,14 @@ struct WebViewContainer: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.userContentController = controller
 
-        // The single most important line for Kokoro on iOS. Aloud generates a
-        // sentence *then* calls play() — seconds after the tap that started it —
-        // so the call no longer traces back to a user gesture and Safari refuses
-        // it. index.html works around this with a silent-WAV priming trick
-        // (`primeAudioGesture`). Here we can just turn the requirement off.
+        // Aloud generates a sentence *then* calls play(), after the tap that
+        // started it. The app can allow that delayed playback explicitly.
         config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsInlineMediaPlayback = true
         config.suppressesIncrementalRendering = false
 
-        // Persistent store — the Continue library (IndexedDB) and the cached
-        // Kokoro weights (Cache Storage) must survive relaunches.
+        // Persistent store — the Continue library in IndexedDB must survive
+        // relaunches. Native Kokoro's weights live outside WebKit entirely.
         config.websiteDataStore = .default()
 
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -59,6 +59,7 @@ struct WebViewContainer: UIViewRepresentable {
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "aloudNative")
+        coordinator.detach()
     }
 
     // MARK: - Coordinator
@@ -67,6 +68,15 @@ struct WebViewContainer: UIViewRepresentable {
 
         private weak var webView: WKWebView?
         private let speech = NativeSpeechEngine()
+        private let kokoro = NativeKokoroEngine.shared
+        private let shellOrigin: URL
+        private let onFatalError: (String) -> Void
+        private var kokoroEventHandlerID: UUID?
+
+        init(shellOrigin: URL, onFatalError: @escaping (String) -> Void) {
+            self.shellOrigin = shellOrigin
+            self.onFatalError = onFatalError
+        }
 
         func attach(webView: WKWebView) {
             self.webView = webView
@@ -74,18 +84,45 @@ struct WebViewContainer: UIViewRepresentable {
             speech.onEvent = { [weak self] event in
                 self?.emit(event)
             }
+            if kokoroEventHandlerID == nil {
+                kokoroEventHandlerID = kokoro.addEventHandler { [weak self] event in
+                    self?.emit(event)
+                }
+            }
 
             // Lock screen / headphone buttons drive the web app's transport.
             AudioSession.shared.onPlay = { [weak self] in self?.remote("play") }
             AudioSession.shared.onPause = { [weak self] in self?.remote("pause") }
+            AudioSession.shared.onTogglePlayPause = { [weak self] in self?.remote("toggle") }
             AudioSession.shared.onNextTrack = { [weak self] in self?.remote("next") }
             AudioSession.shared.onPreviousTrack = { [weak self] in self?.remote("prev") }
+        }
+
+        func detach() {
+            webView = nil
+            if let kokoroEventHandlerID {
+                kokoro.removeEventHandler(kokoroEventHandlerID)
+                self.kokoroEventHandlerID = nil
+            }
+            speech.stop()
+            AudioSession.shared.onPlay = nil
+            AudioSession.shared.onPause = nil
+            AudioSession.shared.onTogglePlayPause = nil
+            AudioSession.shared.onNextTrack = nil
+            AudioSession.shared.onPreviousTrack = nil
+        }
+
+        deinit {
+            if let kokoroEventHandlerID {
+                kokoro.removeEventHandler(kokoroEventHandlerID)
+            }
         }
 
         // MARK: Messages from JavaScript
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard
+                message.frameInfo.isMainFrame,
                 let body = message.body as? [String: Any],
                 let cmd = body["cmd"] as? String
             else { return }
@@ -122,6 +159,33 @@ struct WebViewContainer: UIViewRepresentable {
                     progress: body["progress"] as? Double ?? 0,
                     playing: body["playing"] as? Bool ?? false
                 )
+
+            case "kokoroPrepare":
+                guard let requestID = body["requestId"] as? String else { return }
+                // A bridge message is delivered on the main thread. Refresh
+                // from UIKit at the point of use as a defensive backstop for
+                // lifecycle transitions racing a user tap.
+                kokoro.setAppActive(UIApplication.shared.applicationState == .active)
+                kokoro.prepare(requestID: requestID)
+
+            case "kokoroGenerate":
+                guard let requestID = body["requestId"] as? String else { return }
+                kokoro.setAppActive(UIApplication.shared.applicationState == .active)
+                kokoro.generate(
+                    requestID: requestID,
+                    text: body["text"] as? String ?? "",
+                    voiceName: body["voice"] as? String ?? "af_heart"
+                )
+
+            case "kokoroCancel":
+                if let requestID = body["requestId"] as? String {
+                    kokoro.cancel(requestID: requestID)
+                }
+
+            case "kokoroRelease":
+                if let audioID = body["audioId"] as? String {
+                    kokoro.release(audioID: audioID)
+                }
 
             default:
                 break
@@ -162,10 +226,24 @@ struct WebViewContainer: UIViewRepresentable {
             // Keep the app shell in the web view; send real outbound links —
             // source citations in an article, say — to Safari rather than
             // stranding the user in a chrome-less view with no back button.
-            let isAppShell = url.host == "127.0.0.1" || url.scheme == "about" || url.scheme == "blob" || url.scheme == "data"
-            if navigationAction.navigationType == .linkActivated, !isAppShell {
+            let isLoopbackShell = url.scheme == shellOrigin.scheme
+                && url.host == shellOrigin.host
+                && url.port == shellOrigin.port
+            let isAuxiliaryWebContent = url.scheme == "about" || url.scheme == "blob" || url.scheme == "data"
+            let isAllowedWebContent = isLoopbackShell || isAuxiliaryWebContent
+            if navigationAction.navigationType == .linkActivated, !isAllowedWebContent {
                 decisionHandler(.cancel)
                 UIApplication.shared.open(url)
+                return
+            }
+
+            // The injected native bridge belongs only to Aloud's bundled
+            // loopback shell. Never let a redirect or script replace that
+            // main frame with a remote page that would inherit the bridge.
+            // Blob/data/about content remains available to sandboxed child
+            // frames, but it cannot replace the top-level Aloud document.
+            if navigationAction.targetFrame?.isMainFrame != false, !isLoopbackShell {
+                decisionHandler(.cancel)
                 return
             }
 
@@ -175,36 +253,42 @@ struct WebViewContainer: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             // The session is already active from launch; re-assert on each load
             // so a reload after an interruption still gets .playback.
+            webProcessReloads = 0
             AudioSession.shared.reactivate()
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             print("[Aloud] navigation failed: \(error)")
-            fallBackToHostedBuild(webView, reason: error)
+            reportFatalLoadError(error)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             print("[Aloud] provisional navigation failed: \(error)")
-            fallBackToHostedBuild(webView, reason: error)
+            reportFatalLoadError(error)
         }
 
-        /// The loopback server binding is only half the battle — App Transport
-        /// Security can still refuse the `http://127.0.0.1` load itself if the
-        /// Info.plist additions didn't make it into the built app. That failure
-        /// mode is a blank screen with nothing to go on, so treat *any* failure
-        /// to load the local origin as a cue to try the hosted build instead.
-        /// Once is enough: a second failure means there is no network either,
-        /// and retrying forever would just spin.
-        private func fallBackToHostedBuild(_ webView: WKWebView, reason: Error) {
-            guard !hasFallenBack else { return }
-            guard webView.url?.host == "127.0.0.1" || webView.url == nil else { return }
-            hasFallenBack = true
-            print("[Aloud] local load failed (\(reason.localizedDescription)) — trying the hosted build")
-            webView.load(URLRequest(url: Self.hostedFallbackURL))
+        /// iOS can terminate only WKWebView's WebContent process under memory
+        /// pressure. Native Kokoro is outside that process, so one reload is a
+        /// safe recovery; a second termination before that reload completes is
+        /// a real shell failure. A successful reload resets the allowance.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            print("[Aloud] WebContent process terminated (likely memory pressure)")
+            guard webProcessReloads == 0 else {
+                onFatalError("The iPad stopped Aloud's reader process twice. Reopen the app to start a clean session.")
+                return
+            }
+            webProcessReloads += 1
+            webView.reload()
         }
 
-        private var hasFallenBack = false
-        private static let hostedFallbackURL = URL(string: "https://westsmith.github.io/Aloud/")!
+        private func reportFatalLoadError(_ reason: Error) {
+            guard !hasReportedFatalError else { return }
+            hasReportedFatalError = true
+            onFatalError("Aloud could not load its bundled on-device reader. Close Aloud completely and reopen it.\n\n\(reason.localizedDescription)")
+        }
+
+        private var hasReportedFatalError = false
+        private var webProcessReloads = 0
 
         /// `target="_blank"` links have no window to open into inside the app.
         func webView(

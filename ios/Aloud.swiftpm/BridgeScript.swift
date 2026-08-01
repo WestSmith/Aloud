@@ -18,17 +18,53 @@ enum BridgeScript {
       var post = function (msg) {
         try {
           window.webkit.messageHandlers.aloudNative.postMessage(msg);
+          return true;
         } catch (e) {
           console.warn('[aloud-native] bridge post failed', e);
+          return false;
         }
       };
 
       var pendingVoices = null;
+      var pageNonce = (self.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
+      var nextKokoroRequest = 1;
+      var pendingKokoro = Object.create(null);
+
+      var kokoroRequest = function (cmd, payload, timeoutMs) {
+        return new Promise(function (resolve, reject) {
+          var requestId = pageNonce + ':' + (nextKokoroRequest++);
+          var timer = setTimeout(function () {
+            var pending = pendingKokoro[requestId];
+            if (!pending) return;
+            delete pendingKokoro[requestId];
+            post({ cmd: 'kokoroCancel', requestId: requestId });
+            var error = new Error(cmd === 'kokoroGenerate'
+              ? 'Native Kokoro took too long to create this segment.'
+              : 'Native Kokoro setup took too long.');
+            error.code = 'native_timeout';
+            error.retryable = true;
+            reject(error);
+          }, timeoutMs);
+          pendingKokoro[requestId] = { resolve: resolve, reject: reject, timer: timer };
+          var message = Object.assign({ cmd: cmd, requestId: requestId }, payload || {});
+          if (!post(message)) {
+            clearTimeout(timer);
+            delete pendingKokoro[requestId];
+            var error = new Error('The native Kokoro bridge is unavailable.');
+            error.code = 'native_bridge_unavailable';
+            error.retryable = true;
+            reject(error);
+          }
+        });
+      };
 
       var bridge = {
         /* index.html checks this to decide whether to offer the native engine.
            On the web it is undefined and nothing changes. */
         available: true,
+        nativeKokoro: true,
 
         /* --- commands out to Swift ------------------------------------- */
         speak: function (token, text, rate, voiceId) {
@@ -51,15 +87,54 @@ enum BridgeScript {
           post({ cmd: 'nowPlaying', title: title || '', progress: progress || 0, playing: !!playing });
         },
 
+        /* Full-quality Kokoro generation runs in Swift/MLX. Only a temporary
+           local WAV URL and token timestamps cross this boundary. */
+        kokoro: {
+          onProgress: function () {},
+          prepare: function () {
+            return kokoroRequest('kokoroPrepare', null, 30 * 60 * 1000);
+          },
+          generate: function (text, voice) {
+            return kokoroRequest('kokoroGenerate', { text: text || '', voice: voice || 'af_heart' }, 3 * 60 * 1000);
+          },
+          release: function (audioId) {
+            if (audioId) post({ cmd: 'kokoroRelease', audioId: audioId });
+          }
+        },
+
         /* --- events in from Swift -------------------------------------- */
         /* index.html assigns these. Defaults are no-ops so an event that lands
            before the reader is wired up cannot throw. */
         onEvent: function () {},
-        remote:  { play: function () {}, pause: function () {}, next: function () {}, prev: function () {} },
+        remote:  { play: function () {}, pause: function () {}, toggle: function () {}, next: function () {}, prev: function () {} },
 
         _emit: function (ev) {
+          if (ev && ev.type === 'kokoroProgress') {
+            try { bridge.kokoro.onProgress(ev); } catch (e) { console.warn('[aloud-native] Kokoro progress', e); }
+            return;
+          }
+          if (ev && ev.type === 'kokoroReply') {
+            var pending = pendingKokoro[ev.requestId];
+            if (!pending) return;       // stale reply from a reloaded page
+            delete pendingKokoro[ev.requestId];
+            clearTimeout(pending.timer);
+            if (ev.ok) pending.resolve(ev.result || {});
+            else {
+              var detail = ev.error || {};
+              var error = new Error(detail.message || 'Native Kokoro failed.');
+              error.code = detail.code || 'native_error';
+              error.retryable = !!detail.retryable;
+              pending.reject(error);
+            }
+            return;
+          }
           if (ev && ev.type === 'voices') {
-            if (pendingVoices) { pendingVoices(ev.voices || []); pendingVoices = null; }
+            if (pendingVoices) {
+              pendingVoices(ev.voices || []);
+              pendingVoices = null;
+            } else {
+              try { bridge.onEvent(ev); } catch (e) { console.warn('[aloud-native] voices event', e); }
+            }
             return;
           }
           try { bridge.onEvent(ev); } catch (e) { console.warn('[aloud-native] onEvent', e); }
@@ -74,6 +149,19 @@ enum BridgeScript {
       };
 
       Object.defineProperty(window, '__aloudNative', { value: bridge, writable: false, configurable: false });
+
+      addEventListener('pagehide', function () {
+        Object.keys(pendingKokoro).forEach(function (requestId) {
+          var pending = pendingKokoro[requestId];
+          clearTimeout(pending.timer);
+          post({ cmd: 'kokoroCancel', requestId: requestId });
+          delete pendingKokoro[requestId];
+          var error = new Error('The reader page was closed.');
+          error.name = 'EngineReset';
+          error.code = 'page_closed';
+          pending.reject(error);
+        });
+      });
     })();
     """#
 }

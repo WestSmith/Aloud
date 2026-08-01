@@ -1,8 +1,7 @@
 import AVFoundation
 
-/// A third voice engine, alongside Aloud's existing `device` (Web Speech) and
-/// `neural` (Kokoro) engines. It adds nothing at the expense of either — Kokoro
-/// stays exactly as it is, and this is simply available next to it.
+/// The Apple-voice engine alongside Web Speech and native Kokoro. It is a fast,
+/// model-free alternative, not Kokoro's fallback implementation.
 ///
 /// What it buys over Web Speech, which nominally reaches the same iOS voices:
 ///
@@ -14,8 +13,8 @@ import AVFoundation
 ///    (`buildTimeline` + `calibFactor`) that exists because iOS voices fire
 ///    boundary events erratically through the web API. Here they just work, so
 ///    the karaoke highlight is exact with no calibration at all.
-///  • It is instant and free — no 305 MB download, no WASM heap, so it works on
-///    a device that cannot hold the Kokoro model.
+///  • It is instant and free, so it works on a device that cannot hold the full
+///    Kokoro model.
 ///
 /// Kokoro still sounds better. This is the option for "I want to start reading
 /// right now" and for when the model will not fit.
@@ -26,15 +25,28 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
 
     private let synthesizer = AVSpeechSynthesizer()
 
-    /// Monotonic id of the utterance the web app currently cares about. Mirrors
-    /// `S.utterToken` on the JS side: anything arriving from an older utterance
-    /// is a late callback for speech we have already abandoned, and acting on it
-    /// would drag the highlight backwards.
-    private var currentToken: Int = 0
+    /// Tokens belong to utterance objects, not to the synthesizer as a whole.
+    /// A cancellation callback from an outgoing utterance can arrive after its
+    /// replacement is queued; a single mutable "current token" would then stamp
+    /// the old callback as new and could advance the reader unexpectedly.
+    private var tokens: [ObjectIdentifier: Int] = [:]
 
     override init() {
         super.init()
         synthesizer.delegate = self
+
+        if #available(iOS 17.0, *) {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(availableVoicesDidChange),
+                name: AVSpeechSynthesizer.availableVoicesDidChangeNotification,
+                object: nil
+            )
+        }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     // MARK: - Commands from the web app
@@ -48,11 +60,9 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
         //
         // `.immediate` — a queued stop would let the outgoing sentence run to its
         // end, audible as a stutter when the user scrubs or changes speed.
-        if synthesizer.isSpeaking {
+        if synthesizer.isSpeaking || synthesizer.isPaused {
             synthesizer.stopSpeaking(at: .immediate)
         }
-
-        currentToken = token
 
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = Self.avRate(forMultiplier: rate)
@@ -65,11 +75,11 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
             utterance.voice = Self.bestDefaultVoice()
         }
 
+        tokens[ObjectIdentifier(utterance)] = token
         synthesizer.speak(utterance)
     }
 
     func stop() {
-        currentToken += 1  // invalidate in-flight callbacks
         synthesizer.stopSpeaking(at: .immediate)
     }
 
@@ -85,9 +95,15 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
         synthesizer.continueSpeaking()
     }
 
-    /// Every installed voice, richest first, for the voice picker.
+    /// Every selectable installed voice, richest first, for the voice picker.
+    /// Personal Voice requires a separate, explicit authorization flow, so it
+    /// is intentionally omitted instead of advertising an unavailable choice.
     func availableVoices() -> [[String: Any]] {
-        AVSpeechSynthesisVoice.speechVoices()
+        let preferred = AVSpeechSynthesisVoice.currentLanguageCode()
+        let systemDefaultIdentifier = AVSpeechSynthesisVoice(language: preferred)?.identifier
+
+        return AVSpeechSynthesisVoice.speechVoices()
+            .filter { !Self.isPersonalVoice($0) }
             .map { voice -> [String: Any] in
                 let quality: String
                 switch voice.quality {
@@ -101,6 +117,8 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
                     "lang": voice.language,
                     "quality": quality,
                     "gender": Self.genderLabel(voice),
+                    "systemDefault": voice.identifier == systemDefaultIdentifier,
+                    "novelty": Self.isNoveltyVoice(voice),
                 ]
             }
             .sorted { lhs, rhs in
@@ -125,35 +143,41 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
         willSpeakRangeOfSpeechString characterRange: NSRange,
         utterance: AVSpeechUtterance
     ) {
+        guard let token = tokens[ObjectIdentifier(utterance)] else { return }
         // NSRange is UTF-16, which is exactly what JavaScript string indices are,
         // so charIndex needs no conversion to line up with the offsets the web
         // app computed when it built this sentence.
         onEvent?([
             "type": "boundary",
-            "token": currentToken,
+            "token": token,
             "charIndex": characterRange.location,
             "length": characterRange.length,
         ])
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
-        onEvent?(["type": "start", "token": currentToken])
+        guard let token = tokens[ObjectIdentifier(utterance)] else { return }
+        onEvent?(["type": "start", "token": token])
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        onEvent?(["type": "end", "token": currentToken])
+        guard let token = tokens.removeValue(forKey: ObjectIdentifier(utterance)) else { return }
+        onEvent?(["type": "end", "token": token])
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        onEvent?(["type": "cancel", "token": currentToken])
+        guard let token = tokens.removeValue(forKey: ObjectIdentifier(utterance)) else { return }
+        onEvent?(["type": "cancel", "token": token])
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didPause utterance: AVSpeechUtterance) {
-        onEvent?(["type": "paused", "token": currentToken])
+        guard let token = tokens[ObjectIdentifier(utterance)] else { return }
+        onEvent?(["type": "paused", "token": token])
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didContinue utterance: AVSpeechUtterance) {
-        onEvent?(["type": "resumed", "token": currentToken])
+        guard let token = tokens[ObjectIdentifier(utterance)] else { return }
+        onEvent?(["type": "resumed", "token": token])
     }
 
     // MARK: - Helpers
@@ -186,11 +210,16 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
     /// default, which is the one that makes iOS TTS sound dated.
     private static func bestDefaultVoice() -> AVSpeechSynthesisVoice? {
         let preferred = AVSpeechSynthesisVoice.currentLanguageCode()
-        let voices = AVSpeechSynthesisVoice.speechVoices().filter { $0.language == preferred }
+        let systemDefault = AVSpeechSynthesisVoice(language: preferred).flatMap { voice in
+            isPersonalVoice(voice) || isNoveltyVoice(voice) ? nil : voice
+        }
+        let voices = AVSpeechSynthesisVoice.speechVoices().filter {
+            $0.language == preferred && !isPersonalVoice($0) && !isNoveltyVoice($0)
+        }
         return voices.first { $0.quality == .premium }
             ?? voices.first { $0.quality == .enhanced }
+            ?? systemDefault
             ?? voices.first
-            ?? AVSpeechSynthesisVoice(language: preferred)
     }
 
     private static func genderLabel(_ voice: AVSpeechSynthesisVoice) -> String {
@@ -199,5 +228,24 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
         case .female: return "female"
         default:      return "unspecified"
         }
+    }
+
+    private static func isPersonalVoice(_ voice: AVSpeechSynthesisVoice) -> Bool {
+        if #available(iOS 17.0, *) {
+            return voice.voiceTraits.contains(.isPersonalVoice)
+        }
+        return false
+    }
+
+    private static func isNoveltyVoice(_ voice: AVSpeechSynthesisVoice) -> Bool {
+        if #available(iOS 17.0, *) {
+            return voice.voiceTraits.contains(.isNoveltyVoice)
+        }
+        return false
+    }
+
+    @available(iOS 17.0, *)
+    @objc private func availableVoicesDidChange() {
+        onEvent?(["type": "voices", "voices": availableVoices()])
     }
 }

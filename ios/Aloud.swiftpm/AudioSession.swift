@@ -28,6 +28,7 @@ final class AudioSession {
     /// these so the lock screen and headphone buttons drive the real player.
     var onPlay: (() -> Void)?
     var onPause: (() -> Void)?
+    var onTogglePlayPause: (() -> Void)?
     var onNextTrack: (() -> Void)?
     var onPreviousTrack: (() -> Void)?
 
@@ -78,10 +79,8 @@ final class AudioSession {
             return .success
         }
         center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            // The web app tracks its own playing state; a single toggle message
-            // keeps the two sides from disagreeing about who is authoritative.
-            guard let onPlay = self?.onPlay else { return .commandFailed }
-            onPlay()
+            guard let onTogglePlayPause = self?.onTogglePlayPause else { return .commandFailed }
+            onTogglePlayPause()
             return .success
         }
         center.nextTrackCommand.addTarget { [weak self] _ in
