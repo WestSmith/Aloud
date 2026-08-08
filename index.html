@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.23.0">
+<meta name="aloud-version" content="v6.24.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -59,6 +59,11 @@
     overflow-x: hidden;
     transition: background .3s;
   }
+  /* The native shell supplies content zoom itself. Disable WebKit's smart
+     double-tap page magnification there so a document gesture can never grow
+     the fixed Aloud toolbar/player. Browser/PWA pinch accessibility is left
+     untouched. */
+  html.native-shell, html.native-shell body { touch-action: manipulation; }
   button { font-family: inherit; color: inherit; background: none; border: none; cursor: pointer; }
   button:active { transform: scale(.96); }
   select { font-family: inherit; }
@@ -530,6 +535,7 @@
     box-shadow: 0 4px 24px rgba(0,0,0,.35);
     overflow-x: auto; -webkit-overflow-scrolling: touch;
   }
+  #content.html-mode.fit-wide .html-host { padding: 0; border-radius: 0; }
   [data-theme="light"] .html-host { box-shadow: 0 3px 18px rgba(40,30,90,.14); }
   /* interactive HTML view (v6.10.0): the document runs in a sandboxed frame.
      Height is driven from inside (see the karaoke agent) so the reader page
@@ -775,7 +781,7 @@
     <div id="lib-empty" style="display:none"></div>
   </div>
   <div class="hint" id="home-voice-hint">
-    <b>Two voice engines:</b> instant device voices, or the <b>Kokoro neural voice</b> (open-source, runs in your browser). PDFs open as real pages with highlighting right on them. Double-tap any word to fix its pronunciation.
+    <b>Two voice engines:</b> instant device voices, or the <b>Kokoro neural voice</b> (open-source, runs in your browser). PDFs open as real pages with highlighting right on them. Long-press any word to fix its pronunciation.
   </div>
   <div class="ver-line" id="home-version"></div>
 </div>
@@ -925,7 +931,7 @@
     <button class="switch" id="smallprint-switch" role="switch" aria-checked="false" aria-label="Read small print in PDFs"></button>
   </div>
   <div class="set-row" style="display:block">
-    <div class="lbl">Pronunciations<small>Double-tap (or long-press) any word while reading to teach Aloud how to say it. Your fixes are saved and applied to every voice engine.</small></div>
+    <div class="lbl">Pronunciations<small>Long-press any word while reading to teach Aloud how to say it. In PDF and plain-text views, double-tap works too. Your fixes are saved and applied to every voice engine.</small></div>
     <div id="dict-list"></div>
   </div>
   <div class="ver-line" id="settings-version" style="text-align:center"></div>
@@ -1074,6 +1080,11 @@ const store = {
 const NATIVE = (typeof window !== 'undefined' && window.__aloudNative && window.__aloudNative.available)
   ? window.__aloudNative
   : null;
+if (NATIVE) {
+  document.documentElement.classList.add('native-shell');
+  const viewport = document.querySelector('meta[name="viewport"]');
+  if (viewport) viewport.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';
+}
 
 /* the sentence currently handed to AVSpeechSynthesizer: token guards against
    late callbacks (identical role to S.utterToken in the device engine), and
@@ -1092,7 +1103,7 @@ let kokoroResumeOnForeground = false; // Metal inference cannot start while iOS 
 /* ---------------- state ---------------- */
 const S = {
   mode: 'flow',        // 'flow' | 'pdf'
-  zoom: { pct: 1, fit: 'none', applied: 1 },  // pdf/html view zoom (v6.6.0)
+  zoom: { pct: 1, fit: 'none', applied: 1, revision: 0 },  // pdf/html content view state
   words: [],           // [{el, text, sent}]
   sentences: [],       // [{start, end, text, span?}]
   curSent: -1,
@@ -1160,7 +1171,10 @@ const $ = id => document.getElementById(id);
 const content = $('content');
 const REDUCED_MOTION = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 
+let readingViewportCache = null;
+function invalidateReadingViewportBounds() { readingViewportCache = null; }
 function readingViewportBounds() {
+  if (readingViewportCache) return readingViewportCache;
   const topbar = $('topbar')?.getBoundingClientRect();
   const player = $('player')?.getBoundingClientRect();
   const rsvp = $('rsvp')?.getBoundingClientRect();
@@ -1171,8 +1185,18 @@ function readingViewportBounds() {
     if (S.rsvp.pos === 'top') top = Math.max(top, rsvp.bottom + 16);
     else bottom = Math.min(bottom, rsvp.top - 16);
   }
-  return { top, bottom, center: top + Math.max(0, bottom - top) / 2 };
+  return readingViewportCache = { top, bottom, center: top + Math.max(0, bottom - top) / 2 };
 }
+/* v6.23 made the reading band follow Aloud's dynamic phone/tablet chrome,
+   but measuring three fixed elements on every karaoke word forced repeated
+   synchronous layout in large interactive guides. Cache the band until the
+   viewport or one of those chrome boxes actually changes. */
+try {
+  const readingViewportObserver = new ResizeObserver(invalidateReadingViewportBounds);
+  ['topbar', 'player', 'rsvp'].forEach(id => { const el = $(id); if (el) readingViewportObserver.observe(el); });
+} catch {}
+window.addEventListener('resize', invalidateReadingViewportBounds);
+window.visualViewport?.addEventListener('resize', invalidateReadingViewportBounds);
 function scrollOptions(top) { return { top, behavior: REDUCED_MOTION ? 'auto' : 'smooth' }; }
 
 /* ---------------- tiny utils ---------------- */
@@ -1524,7 +1548,7 @@ function renderDictList() {
   const box = $('dict-list');
   if (!box) return;
   const keys = Object.keys(S.dict).sort();
-  if (!keys.length) { box.innerHTML = '<div class="dict-empty">Nothing yet. While reading, double-tap (or long-press) any word to teach Aloud how to say it.</div>'; return; }
+  if (!keys.length) { box.innerHTML = '<div class="dict-empty">Nothing yet. While reading, long-press any word to teach Aloud how to say it.</div>'; return; }
   box.innerHTML = '';
   keys.forEach(k => {
     const row = document.createElement('div');
@@ -2299,12 +2323,12 @@ const KARAOKE_SHADOW_CSS = `
   .aloud-html-root.aloud-text-resizing *,
   .aloud-html-root.aloud-text-resizing *::before,
   .aloud-html-root.aloud-text-resizing *::after { transition: none !important; }
-  .w { border-radius: 4px; cursor: pointer; padding: 0 1px; margin: 0 -1px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
-  .w:hover { background: rgba(124,108,246,.16); }
-  .w.sent-on { background: rgba(124,108,246,.14); }
-  .w.speaking { background: #705fe9 !important; color: #fff !important; text-shadow: none !important; }
+  .aloud-w { border-radius: 4px; cursor: pointer; padding: 0 1px; margin: 0 -1px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+  .aloud-w:hover { background: rgba(124,108,246,.16); }
+  .aloud-w.sent-on { background: rgba(124,108,246,.14); }
+  .aloud-w.speaking { background: #705fe9 !important; color: #fff !important; text-shadow: none !important; }
   /* SVG has no background box: a diagram label marks the spoken word by colour */
-  tspan.w.speaking { background: none !important; fill: #705fe9 !important; }
+  tspan.aloud-w.speaking { background: none !important; fill: #705fe9 !important; }
 `;
 
 /* ====================================================================
@@ -2441,7 +2465,7 @@ function ALOUD_FRAME_AGENT(cfg) {
 
   var st = document.createElement('style');
   st.textContent =
-    'html,body{height:auto!important;min-height:0!important;overflow:visible!important}' +
+    'html,body{height:auto!important;min-height:0!important;overflow:visible!important;touch-action:manipulation}' +
     'html.aloud-text-zoomed table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}' +
     'html.aloud-text-zoomed pre{max-width:100%;overflow-x:auto}' +
     'html.aloud-text-zoomed input,html.aloud-text-zoomed textarea,html.aloud-text-zoomed select{min-width:0;max-width:100%}' +
@@ -2467,7 +2491,8 @@ function ALOUD_FRAME_AGENT(cfg) {
      SVG/3D content. Scale computed text metrics instead: prose genuinely
      reflows inside the same viewport while media and Aloud's chrome stay
      at their original size. */
-  var textZoom = 1, textZoomRecords = [], textZoomRefreshT = 0, textZoomTouchClearT = 0, textZoomTransitionT = 0;
+  var textZoom = 1, textFitWidth = false, textFitRecord = null;
+  var textZoomRecords = [], textZoomRefreshT = 0, textZoomTouchClearT = 0, textZoomTransitionT = 0;
   var textZoomViewportWidth = document.documentElement.clientWidth;
   var textZoomTouched = new WeakSet(), textZoomByEl = new WeakMap();
   var TEXT_ZOOM_SKIP = /^(?:SCRIPT|STYLE|NOSCRIPT|SOURCE|TRACK)$/;
@@ -2570,7 +2595,76 @@ function ALOUD_FRAME_AGENT(cfg) {
       applyTextZoomRecords();
     }
     reportSoon();
-    post({ t: 'aloud:zoomed', scale: textZoom });
+  }
+
+  function restoreTextFitWidth() {
+    var r = textFitRecord, el = r && r.el;
+    if (!el || !el.style) return;
+    textZoomTouched.add(el);
+    if (r.widthValue) el.style.setProperty('width', r.widthValue, r.widthPriority);
+    else el.style.removeProperty('width');
+    if (r.maxWidthValue) el.style.setProperty('max-width', r.maxWidthValue, r.maxWidthPriority);
+    else el.style.removeProperty('max-width');
+    clearTextZoomTouchesSoon();
+  }
+
+  /* Remove only the dominant centered document-shell cap. A blanket
+     max-width:none would also stretch cards, tables and media; the shell must
+     be a direct body child containing most of the readable words, centered,
+     narrower than the body's content box, and carrying a finite max-width. */
+  function captureTextFitWidth() {
+    restoreTextFitWidth();
+    textFitRecord = null;
+    var body = document.body, br = body.getBoundingClientRect(), bcs = getComputedStyle(body);
+    var pl = parseFloat(bcs.paddingLeft) || 0, pr = parseFloat(bcs.paddingRight) || 0;
+    var innerLeft = br.left + pl, innerRight = br.right - pr, innerWidth = innerRight - innerLeft;
+    var total = els.length, best = null, bestCount = 0;
+    for (var i = 0; i < body.children.length; i++) {
+      var el = body.children[i], count = el.querySelectorAll('.' + CLS).length;
+      if (count < Math.max(6, total * 0.5) || count <= bestCount) continue;
+      var cs = getComputedStyle(el), maxWidth = parseFloat(cs.maxWidth), r = el.getBoundingClientRect();
+      if (cs.maxWidth === 'none' || !(maxWidth > 0) || r.width >= innerWidth - 8) continue;
+      var leftGap = r.left - innerLeft, rightGap = innerRight - r.right;
+      if (Math.abs(leftGap - rightGap) > Math.max(6, innerWidth * 0.02)) continue;
+      best = el; bestCount = count;
+    }
+    if (!best) return;
+    textFitRecord = {
+      el: best,
+      widthValue: best.style.getPropertyValue('width'),
+      widthPriority: best.style.getPropertyPriority('width'),
+      maxWidthValue: best.style.getPropertyValue('max-width'),
+      maxWidthPriority: best.style.getPropertyPriority('max-width')
+    };
+  }
+
+  function setTextFitWidth(on) {
+    on = !!on;
+    if (!on) {
+      restoreTextFitWidth();
+      textFitRecord = null;
+      textFitWidth = false;
+      document.documentElement.classList.remove('aloud-fit-width');
+      reportSoon();
+      return;
+    }
+    if (!textFitRecord) captureTextFitWidth();
+    if (textFitRecord && textFitRecord.el) {
+      var el = textFitRecord.el;
+      textZoomTouched.add(el);
+      el.style.setProperty('width', 'auto', 'important');
+      el.style.setProperty('max-width', 'none', 'important');
+      clearTextZoomTouchesSoon();
+    }
+    textFitWidth = true;
+    document.documentElement.classList.add('aloud-fit-width');
+    reportSoon();
+  }
+
+  function setDocumentView(scale, fitWidth, revision) {
+    setTextFitWidth(fitWidth);
+    setTextZoom(scale);
+    post({ t: 'aloud:zoomed', scale: textZoom, fitWidth: textFitWidth, revision: revision || 0 });
   }
 
   function reconcileExternalTextStyle(el) {
@@ -2712,6 +2806,10 @@ function ALOUD_FRAME_AGENT(cfg) {
     var w = document.documentElement.clientWidth;
     if (Math.abs(w - textZoomViewportWidth) > 1) {
       textZoomViewportWidth = w;
+      /* The parent widens the iframe and the frame receives that resize a
+         beat after the view-state message. If the shell cap was not binding
+         at the old width, detect it again now that it can actually bind. */
+      if (textFitWidth && !textFitRecord) setTextFitWidth(true);
       refreshTextZoomSoon();
     }
     reportSoon();
@@ -2733,7 +2831,16 @@ function ALOUD_FRAME_AGENT(cfg) {
     }
     return false;
   }
-  var pressT = null, pressed = null, lpFired = false;
+  function proseWord(el) {
+    if (!el || inControl(el)) return false;
+    for (var q = el.parentElement; q && q !== document.body; q = q.parentElement) {
+      if (/^(?:A|BUTTON|SUMMARY|INPUT|SELECT|TEXTAREA|LABEL|H1|H2|H3|H4|H5|H6|SVG|CANVAS|VIDEO|AUDIO)$/.test(q.tagName)) return false;
+      var role = q.getAttribute && q.getAttribute('role');
+      if (role && /^(?:button|link|checkbox|radio|switch|tab|option|slider)$/.test(role)) return false;
+    }
+    return true;
+  }
+  var pressT = null, pressed = null, lpFired = false, tapT = null;
   document.addEventListener('pointerdown', function (e) {
     var w = wordOf(e.target);
     if (!w) return;
@@ -2750,9 +2857,10 @@ function ALOUD_FRAME_AGENT(cfg) {
   document.addEventListener('dblclick', function (e) {
     var w = wordOf(e.target);
     if (!w) return;
+    clearTimeout(tapT); tapT = null;
+    if (!proseWord(w)) return;
     e.preventDefault(); e.stopPropagation();
-    lpFired = true;
-    post({ t: 'aloud:press', text: w.textContent });
+    post({ t: 'aloud:doubletap', word: +w.getAttribute('data-w') });
   }, true);
   document.addEventListener('click', function (e) {
     if (lpFired) { lpFired = false; e.preventDefault(); e.stopPropagation(); return; }
@@ -2770,7 +2878,11 @@ function ALOUD_FRAME_AGENT(cfg) {
       return;
     }
     var w = wordOf(e.target);
-    if (w && !inControl(w)) post({ t: 'aloud:tap', word: +w.getAttribute('data-w') });
+    if (w && !inControl(w)) {
+      var wi = +w.getAttribute('data-w');
+      clearTimeout(tapT);
+      tapT = setTimeout(function () { tapT = null; post({ t: 'aloud:tap', word: wi }); }, 260);
+    }
   }, true);
 
   /* ---- paint + geometry. One message per transition, ops before geom, so
@@ -2778,7 +2890,8 @@ function ALOUD_FRAME_AGENT(cfg) {
   window.addEventListener('message', function (e) {
     var m = e.data;
     if (!m) return;
-    if (m.t === 'aloud:zoom') { setTextZoom(m.scale); return; }
+    if (m.t === 'aloud:view') { setDocumentView(m.scale, m.fitWidth, m.revision); return; }
+    if (m.t === 'aloud:zoom') { setDocumentView(m.scale, textFitWidth, m.revision); return; }
     if (m.t !== 'aloud:apply') return;
     var ops = m.ops || [];
     for (var i = 0; i < ops.length; i++) {
@@ -2856,7 +2969,7 @@ function frameWordEl(wIdx) {
 function createHtmlTextZoom(root) {
   const skip = /^(?:SCRIPT|STYLE|NOSCRIPT|SOURCE|TRACK)$/;
   const media = /^(?:SVG|IMG|VIDEO|AUDIO|CANVAS|IFRAME|OBJECT|EMBED)$/i;
-  let records = [], scale = 1, transitionT = 0;
+  let records = [], scale = 1, fitWidth = false, fitRecord = null, transitionT = 0;
 
   function beginWrite() {
     clearTimeout(transitionT);
@@ -2899,8 +3012,63 @@ function createHtmlTextZoom(root) {
     }
   }
 
-  function apply(value, recapture = false) {
+  function restoreFitWidth() {
+    const r = fitRecord, el = r?.el;
+    if (!el?.style) return;
+    if (r.widthValue) el.style.setProperty('width', r.widthValue, r.widthPriority);
+    else el.style.removeProperty('width');
+    if (r.maxWidthValue) el.style.setProperty('max-width', r.maxWidthValue, r.maxWidthPriority);
+    else el.style.removeProperty('max-width');
+  }
+
+  function captureFitWidth() {
+    restoreFitWidth();
+    fitRecord = null;
+    const rr = root.getBoundingClientRect(), rcs = getComputedStyle(root);
+    const pl = parseFloat(rcs.paddingLeft) || 0, pr = parseFloat(rcs.paddingRight) || 0;
+    const innerLeft = rr.left + pl, innerRight = rr.right - pr, innerWidth = innerRight - innerLeft;
+    const total = root.querySelectorAll('[data-word]').length;
+    let best = null, bestCount = 0;
+    for (const el of root.children) {
+      const count = el.querySelectorAll('[data-word]').length;
+      if (count < Math.max(6, total * .5) || count <= bestCount) continue;
+      const cs = getComputedStyle(el), maxWidth = parseFloat(cs.maxWidth), r = el.getBoundingClientRect();
+      if (cs.maxWidth === 'none' || !(maxWidth > 0) || r.width >= innerWidth - 8) continue;
+      const leftGap = r.left - innerLeft, rightGap = innerRight - r.right;
+      if (Math.abs(leftGap - rightGap) > Math.max(6, innerWidth * .02)) continue;
+      best = el; bestCount = count;
+    }
+    if (!best) return;
+    fitRecord = {
+      el: best,
+      widthValue: best.style.getPropertyValue('width'),
+      widthPriority: best.style.getPropertyPriority('width'),
+      maxWidthValue: best.style.getPropertyValue('max-width'),
+      maxWidthPriority: best.style.getPropertyPriority('max-width'),
+    };
+  }
+
+  function setFitWidth(on) {
+    on = !!on;
+    if (!on) {
+      restoreFitWidth();
+      fitRecord = null;
+      fitWidth = false;
+      root.classList.remove('aloud-fit-width');
+      return;
+    }
+    if (!fitRecord) captureFitWidth();
+    if (fitRecord?.el) {
+      fitRecord.el.style.setProperty('width', 'auto', 'important');
+      fitRecord.el.style.setProperty('max-width', 'none', 'important');
+    }
+    fitWidth = true;
+    root.classList.add('aloud-fit-width');
+  }
+
+  function apply(value, wide = fitWidth, recapture = false) {
     const next = Math.max(.5, Math.min(3, +value || 1));
+    setFitWidth(wide);
     root.classList.toggle('aloud-text-zoomed', Math.abs(next - 1) >= .002);
     if (recapture || !records.length) capture();
     scale = next;
@@ -2920,10 +3088,14 @@ function createHtmlTextZoom(root) {
 
   capture();
   return {
-    set: apply,
-    refresh: value => apply(value, true),
-    destroy: () => { root.classList.remove('aloud-text-zoomed'); restore(); },
+    set: (value, wide) => apply(value, wide, false),
+    refresh: (value, wide) => apply(value, wide, true),
+    destroy: () => {
+      root.classList.remove('aloud-text-zoomed', 'aloud-fit-width');
+      restoreFitWidth(); fitRecord = null; fitWidth = false; restore();
+    },
     get scale() { return scale; },
+    get fitWidth() { return fitWidth; },
   };
 }
 
@@ -3015,8 +3187,15 @@ function renderHtmlInteractive(htmlText, opts = {}) {
       highlightWord(wIdx);
       S.playing = true; setPlayIcon(true);
       playCurrent(wIdx);
+    } else if (m.t === 'aloud:doubletap') {
+      htmlDoubleTapZoom(m.word | 0);
     } else if (m.t === 'aloud:press') {
       if (typeof m.text === 'string') setPronunciation(m.text);
+    } else if (m.t === 'aloud:zoomed') {
+      if (m.revision === S.zoom.revision) {
+        S.zoom.applied = clampZoom(Number(m.scale) || S.zoom.applied);
+        $('zoom-pct').textContent = Math.round(S.zoom.applied * 100) + '%';
+      }
     } else if (m.t === 'aloud:anchor') {
       const ir = iframe.getBoundingClientRect();
       const band = readingViewportBounds();
@@ -3144,7 +3323,9 @@ function renderHtmlNative(htmlText, opts = {}) {
       /* dot leaders stay visible but are not reading tokens */
       if (/^\s+$/.test(part) || /^[.·…]{2,}$/.test(part)) { frag.appendChild(document.createTextNode(part)); continue; }
       const w = inSvg ? document.createElementNS(SVGNS, 'tspan') : document.createElement('span');
-      w.setAttribute('class', 'w');   /* SVG className is read-only */
+      /* Namespace injected spans so a document's own generic `.w` rules
+         cannot restyle or resize every karaoke token. */
+      w.setAttribute('class', 'aloud-w');   /* SVG className is read-only */
       w.textContent = part;
       w.setAttribute('data-word', tokens.length);
       frag.appendChild(w);
@@ -3353,6 +3534,7 @@ function finishOpen(opts = {}) {
   $('reader').style.display = 'block';
   $('player').style.display = 'block';
   document.body.classList.add('document-open');
+  invalidateReadingViewportBounds();
   document.querySelectorAll('.doc-btn').forEach(b => { b.style.display = 'grid'; });
   const native = S.mode !== 'flow';
   $('btn-view').textContent = native ? '¶' : '📄';
@@ -3393,7 +3575,10 @@ function finishOpen(opts = {}) {
       startWord = saved.word;
       toast('⟲ Resumed where you left off. Tap the progress bar to move around.', 4000);
     } else {
-      toast(`Loaded — ${S.words.length.toLocaleString()} words. Tap a word to start there · double-tap to fix its pronunciation.`, 4500);
+      const gestures = S.mode === 'html'
+        ? 'Tap a word to start there · double-tap to resize just the document · long-press to fix pronunciation.'
+        : 'Tap a word to start there · double-tap or long-press to fix pronunciation.';
+      toast(`Loaded — ${S.words.length.toLocaleString()} words. ${gestures}`, 5000);
     }
   }
   const sIdx = S.words[startWord]?.sent ?? 0;
@@ -3907,29 +4092,71 @@ const KOKORO_WORKER_URL = './kokoro-worker.js';
 /* Native iOS adapter. Swift/MLX owns the full model and writes one temporary
    PCM16 WAV per generation. Fetching that local file avoids copying megabytes
    through WKScriptMessageHandler; after conversion the native file is released
-   and the rest of Aloud's proven Blob/cache/player pipeline stays unchanged. */
-function nativeKokoroPwords(tokens) {
-  const out = [];
-  for (const token of (tokens || [])) {
-    const start = Number(token.startSec), end = Number(token.endSec);
-    if (!isFinite(start)) continue;
-    const raw = String(token.phonemes || '').trim();
-    const pieces = raw ? raw.split(/\s+/).filter(Boolean) : [];
-    if (!pieces.length) {
-      const punctuation = String(token.text || '').replace(/\s+/g, '');
-      if (punctuation && !/[\p{L}\p{N}]/u.test(punctuation)) out.push({ ph: punctuation, t: start });
-      continue;
-    }
-    const stop = isFinite(end) && end >= start ? end : start;
-    const weights = pieces.map(p => Math.max(1, countPhones(p).v + countPhones(p).c));
-    const total = weights.reduce((a, b) => a + b, 0);
-    let elapsed = 0;
-    for (let i = 0; i < pieces.length; i++) {
-      out.push({ ph: pieces[i], t: start + (stop - start) * elapsed / total });
-      elapsed += weights[i];
-    }
+   and the rest of Aloud's proven Blob/cache/player pipeline stays unchanged.
+
+   Misaki's MToken stream is already the exact timing map for the text sent to
+   Swift. Its `whitespace` field is essential: `well-known` is three native
+   records (`well`, `-`, `known`) but ONE spoken/display group, and `example.`
+   is two records in one group. The old adapter discarded that field, flattened
+   the pieces into kokoro-js/espeak pwords and then asked alignExactStarts to
+   reconstruct boundaries it was never designed to infer. On the reported
+   guide that put model-exact Fenrir onsets over half a second onto the wrong
+   words at 1.5x.
+
+   Preserve the native groups instead. `spokenFor` is also the exact text layer
+   used to build the string sent to Swift, including number expansion and user
+   pronunciations, so the match is deterministic rather than phoneme-heuristic.
+   If a future Misaki version stops round-tripping that surface text, return
+   null and let the caller use the honest waveform fallback. */
+function alignNativeTokenStarts(displayTokens, nativeTokens, durationSec) {
+  const groups = [];
+  let group = null;
+  for (const token of (nativeTokens || [])) {
+    if (!group) group = { text: '', start: null };
+    group.text += String(token?.text || '');
+    const start = Number(token?.startSec);
+    const phonemes = String(token?.phonemes || '');
+    const voiced = /[\p{L}\p{N}]/u.test(phonemes);
+    if (group.start === null && voiced && isFinite(start)) group.start = start;
+    if (String(token?.whitespace || '')) { groups.push(group); group = null; }
   }
-  return out.length ? out : null;
+  if (group) groups.push(group);
+
+  const normalize = value => String(value || '').normalize('NFKC').toLocaleLowerCase('en-US');
+  const starts = new Array(displayTokens.length).fill(null);
+  let at = 0;
+  for (let i = 0; i < displayTokens.length; i++) {
+    const spoken = String(spokenFor(displayTokens[i]) || '').trim();
+    const pieces = spoken ? spoken.split(/\s+/).filter(Boolean) : [];
+    if (!pieces.length) continue;
+    let first = null;
+    for (const piece of pieces) {
+      const native = groups[at++];
+      if (!native || normalize(native.text) !== normalize(piece)) return null;
+      if (first === null && isFinite(native.start)) first = native.start;
+    }
+    starts[i] = first;
+  }
+  if (at !== groups.length) return null;
+
+  /* An unpronounceable glyph has no native onset. Keep its stable display
+     index and let it share the next voiced word's onset, as the other timing
+     paths do; a silent tail rides the preceding word. */
+  let next = null;
+  const nextStart = new Array(starts.length);
+  for (let i = starts.length - 1; i >= 0; i--) {
+    if (starts[i] !== null) next = starts[i];
+    nextStart[i] = next;
+  }
+  let previous = 0;
+  for (let i = 0; i < starts.length; i++) {
+    if (starts[i] === null) starts[i] = nextStart[i] !== null ? nextStart[i] : previous;
+    if (!isFinite(starts[i]) || starts[i] < 0) return null;
+    if (i && starts[i] < starts[i - 1]) starts[i] = starts[i - 1];
+    previous = starts[i];
+  }
+  if (!starts.length || starts[starts.length - 1] >= durationSec) return null;
+  return starts;
 }
 
 function nativeKokoroError(message, code = 'native_audio_failed') {
@@ -3969,7 +4196,7 @@ async function nativeKokoroGenerateOnce(text, voice) {
     return {
       audio,
       sampling_rate: sr,
-      pwords: nativeKokoroPwords(result.tokens),
+      nativeTokens: Array.isArray(result.tokens) ? result.tokens : null,
       nIds: 0,
       timing: 'model',
     };
@@ -4775,7 +5002,7 @@ async function generateNeuralNow(
     /* nothing pronounceable (all muted, or only glyphs/punctuation): don't
        spend a model call to synthesise silence */
     if (!text || !/[\p{L}\p{N}]/u.test(text)) { parts.push({ a, b, audio: new Float32Array(3600), sr: 24000, pwords: null, silent: true }); continue; }
-    let raw, pwords = null, nIds = 0;
+    let raw, pwords = null, nativeTokens = null, nIds = 0;
     if (S.kokoro.workerGenerate) {
       try {
         raw = await S.kokoro.workerGenerate(text, voice);
@@ -4788,6 +5015,7 @@ async function generateNeuralNow(
         throw err;
       }
       pwords = raw.pwords || null;
+      nativeTokens = raw.nativeTokens || null;
       nIds = raw.nIds || 0;
     } else {
       const st = S.kokoro.tsCap;
@@ -4805,7 +5033,7 @@ async function generateNeuralNow(
       pending.unshift([a, mid], [mid, b]);
       continue;
     }
-    parts.push({ a, b, audio: raw.audio, sr: raw.sampling_rate, pwords, timing: raw.timing || null });
+    parts.push({ a, b, audio: raw.audio, sr: raw.sampling_rate, pwords, nativeTokens, timing: raw.timing || null });
   }
   /* stitch chunks and time each one independently: model-exact word starts
      when the patched export provided the spoken words (alignExactStarts
@@ -4848,7 +5076,9 @@ async function generateNeuralNow(
     if (p.silent) cs = ctoks.map(() => 0);
     else {
       spokenChunks++;
-      cs = p.pwords ? alignExactStarts(ctoks, p.pwords, dSec) : null;
+      cs = p.nativeTokens
+        ? alignNativeTokenStarts(ctoks, p.nativeTokens, dSec)
+        : p.pwords ? alignExactStarts(ctoks, p.pwords, dSec) : null;
       if (cs) {
         exactChunks++;
         if (p.timing === 'model') modelChunks++;
@@ -5453,6 +5683,7 @@ function rsvpPlay(fromWord) {
 
 function applyRsvpPos() {
   document.body.classList.toggle('rsvp-bottom', S.rsvp.pos === 'bottom');
+  invalidateReadingViewportBounds();
   $('rsvp-pos').textContent = S.rsvp.pos === 'bottom' ? '▲' : '▼';
   $('rsvp-pos').title = S.rsvp.pos === 'bottom' ? 'Dock at the top' : 'Dock on the player';
 }
@@ -5857,8 +6088,10 @@ function applyZoom(save = true, recaptureHtml = false) {
   content.classList.toggle('fit-wide', S.mode === 'html' && S.zoom.fit === 'width');
   if (S.mode === 'html') {
     content.style.zoom = '';
-    if (S.frame) frameSend({ t: 'aloud:zoom', scale: z });
-    else if (S.htmlZoom) (recaptureHtml ? S.htmlZoom.refresh(z) : S.htmlZoom.set(z));
+    const fitWidth = S.zoom.fit === 'width';
+    S.zoom.revision = (S.zoom.revision || 0) + 1;
+    if (S.frame) frameSend({ t: 'aloud:view', scale: z, fitWidth, revision: S.zoom.revision });
+    else if (S.htmlZoom) (recaptureHtml ? S.htmlZoom.refresh(z, fitWidth) : S.htmlZoom.set(z, fitWidth));
   } else {
     content.style.zoom = Math.abs(z - 1) < 0.002 ? '' : String(z);
   }
@@ -5894,7 +6127,11 @@ function applyZoom(save = true, recaptureHtml = false) {
   }
 }
 
-function zoomTo(pct) { S.zoom.fit = 'none'; S.zoom.pct = clampZoom(pct); applyZoom(); }
+function zoomTo(pct) {
+  if (S.mode !== 'html') S.zoom.fit = 'none';
+  S.zoom.pct = clampZoom(pct);
+  applyZoom();
+}
 function zoomToggleFit(mode) {
   const wasFit = S.zoom.fit;
   S.zoom.fit = S.zoom.fit === mode ? 'none' : mode;
@@ -5902,6 +6139,14 @@ function zoomToggleFit(mode) {
      change rather than a scale, so leaving it must not discard the +/− zoom */
   if (S.zoom.fit === 'none' && !(S.mode === 'html' && wasFit === 'width')) S.zoom.pct = 1;
   applyZoom();
+}
+function htmlDoubleTapZoom(wordIdx) {
+  if (S.mode !== 'html') return;
+  S.zoom.fit = 'width';
+  S.zoom.pct = S.zoom.pct < 1.35 ? 1.5 : 1;
+  applyZoom();
+  const word = S.words[wordIdx]?.el;
+  if (word) setTimeout(() => maybeScroll(word, true), 80);
 }
 $('zoom-in').addEventListener('click', () => zoomTo(S.zoom.applied * ZOOM_STEP));
 $('zoom-out').addEventListener('click', () => zoomTo(S.zoom.applied / ZOOM_STEP));
@@ -6026,18 +6271,31 @@ $('voice-search').addEventListener('input', renderVoiceList);
 $('btn-settings').addEventListener('click', () => { renderDictList(); renderNeuralQuality(); openSheet('settings-sheet'); });
 document.querySelectorAll('#engine-seg button').forEach(b => b.addEventListener('click', () => { primeAudioGesture(); setEngine(b.dataset.engine); }));
 
-/* tap a word → play from there; double-tap / long-press → fix pronunciation.
-   composedPath() so this also works inside the HTML-view shadow root. */
+/* Tap a word to play from there. Original-layout HTML reserves double-tap for
+   content-only zoom; long-press still teaches a pronunciation. composedPath()
+   keeps the same gestures working inside the read-only HTML shadow root. */
 function wordFromEvent(e) {
   const path = e.composedPath ? e.composedPath() : [e.target];
   for (const el of path) {
     if (el === content || el === document) break;
-    if (el.nodeType === 1 && el.classList && el.classList.contains('w')) return el;
+    if (el.nodeType === 1 && el.classList &&
+        (el.classList.contains('w') || el.classList.contains('aloud-w')) &&
+        el.hasAttribute('data-word')) return el;
   }
   return null;
 }
+function htmlProseWord(w) {
+  if (!w) return false;
+  for (let q = w.parentElement; q; q = q.parentElement) {
+    if (/^(?:A|BUTTON|SUMMARY|INPUT|SELECT|TEXTAREA|LABEL|H1|H2|H3|H4|H5|H6|SVG|CANVAS|VIDEO|AUDIO)$/.test(q.tagName)) return false;
+    const role = q.getAttribute?.('role');
+    if (role && /^(?:button|link|checkbox|radio|switch|tab|option|slider)$/.test(role)) return false;
+    try { if (getComputedStyle(q).cursor === 'pointer') return false; } catch {}
+  }
+  return true;
+}
 let suppressClick = false;
-let pressTimer = null, pressTarget = null;
+let pressTimer = null, pressTarget = null, htmlTapTimer = null;
 content.addEventListener('pointerdown', e => {
   const w = wordFromEvent(e);
   if (!w) return;
@@ -6055,14 +6313,18 @@ content.addEventListener('pointerdown', e => {
 content.addEventListener('dblclick', e => {
   const w = wordFromEvent(e);
   if (!w) return;
+  if (S.mode === 'html') {
+    clearTimeout(htmlTapTimer); htmlTapTimer = null;
+    if (!htmlProseWord(w)) return;
+    e.preventDefault(); e.stopPropagation();
+    htmlDoubleTapZoom(+w.dataset.word);
+    return;
+  }
   e.preventDefault();
   suppressClick = true;
   setPronunciation(w.textContent);
 });
-content.addEventListener('click', e => {
-  if (suppressClick) { suppressClick = false; return; }
-  const w = wordFromEvent(e);
-  if (!w) return;
+function playFromWordElement(w) {
   const wIdx = +w.dataset.word;
   const sIdx = S.words[wIdx].sent;
   primeAudioGesture();
@@ -6071,6 +6333,15 @@ content.addEventListener('click', e => {
   highlightWord(wIdx);   /* no pre-assignment — assigning S.curWord first made the guard skip the tapped word */
   S.playing = true; setPlayIcon(true);
   playCurrent(wIdx);
+}
+content.addEventListener('click', e => {
+  if (suppressClick) { suppressClick = false; clearTimeout(htmlTapTimer); htmlTapTimer = null; return; }
+  const w = wordFromEvent(e);
+  if (!w) return;
+  if (S.mode === 'html') {
+    clearTimeout(htmlTapTimer);
+    htmlTapTimer = setTimeout(() => { htmlTapTimer = null; playFromWordElement(w); }, 260);
+  } else playFromWordElement(w);
 });
 
 /* progress bar: tap to jump, or drag to scrub (seek happens on release) */

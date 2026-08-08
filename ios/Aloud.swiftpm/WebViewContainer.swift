@@ -39,6 +39,12 @@ struct WebViewContainer: UIViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        // HTML text sizing is handled inside the document surface. Keep
+        // WKWebView's page magnification at 1× so a pinch or smart double-tap
+        // can never enlarge Aloud's fixed toolbar and player with the prose.
+        webView.scrollView.minimumZoomScale = 1
+        webView.scrollView.maximumZoomScale = 1
+        webView.scrollView.pinchGestureRecognizer?.isEnabled = false
         webView.isOpaque = false
         webView.backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.10, alpha: 1) // matches theme_color #12121a
         webView.scrollView.backgroundColor = webView.backgroundColor
