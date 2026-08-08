@@ -129,4 +129,11 @@ final class AudioSession {
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
+
+    /// Remove a document that is no longer open from the lock screen and
+    /// Control Centre without deactivating the app's playback audio session.
+    /// The next document can therefore publish metadata and play immediately.
+    func clearNowPlaying() {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
 }

@@ -32,6 +32,21 @@ enum BridgeScript {
       var nextKokoroRequest = 1;
       var pendingKokoro = Object.create(null);
 
+      var cancelKokoroRequests = function (matches, message, code) {
+        Object.keys(pendingKokoro).forEach(function (requestId) {
+          var pending = pendingKokoro[requestId];
+          if (!pending || !matches(pending)) return;
+          clearTimeout(pending.timer);
+          delete pendingKokoro[requestId];
+          post({ cmd: 'kokoroCancel', requestId: requestId });
+          var error = new Error(message);
+          error.name = 'EngineReset';
+          error.code = code;
+          error.retryable = false;
+          pending.reject(error);
+        });
+      };
+
       var kokoroRequest = function (cmd, payload, timeoutMs) {
         return new Promise(function (resolve, reject) {
           var requestId = pageNonce + ':' + (nextKokoroRequest++);
@@ -47,7 +62,7 @@ enum BridgeScript {
             error.retryable = true;
             reject(error);
           }, timeoutMs);
-          pendingKokoro[requestId] = { resolve: resolve, reject: reject, timer: timer };
+          pendingKokoro[requestId] = { cmd: cmd, resolve: resolve, reject: reject, timer: timer };
           var message = Object.assign({ cmd: cmd, requestId: requestId }, payload || {});
           if (!post(message)) {
             clearTimeout(timer);
@@ -86,6 +101,9 @@ enum BridgeScript {
         nowPlaying: function (title, progress, playing) {
           post({ cmd: 'nowPlaying', title: title || '', progress: progress || 0, playing: !!playing });
         },
+        clearNowPlaying: function () {
+          post({ cmd: 'clearNowPlaying' });
+        },
 
         /* Full-quality Kokoro generation runs in Swift/MLX. Only a temporary
            local WAV URL and token timestamps cross this boundary. */
@@ -96,6 +114,16 @@ enum BridgeScript {
           },
           generate: function (text, voice) {
             return kokoroRequest('kokoroGenerate', { text: text || '', voice: voice || 'af_heart' }, 3 * 60 * 1000);
+          },
+          /* A document transition must not turn a still-valid model setup into
+             an engine failure. Cancel only sentence generation owned by this
+             page; preparation continues and warms the shared native model. */
+          cancelGenerations: function () {
+            cancelKokoroRequests(
+              function (pending) { return pending.cmd === 'kokoroGenerate'; },
+              'The open document changed.',
+              'document_changed'
+            );
           },
           release: function (audioId) {
             if (audioId) post({ cmd: 'kokoroRelease', audioId: audioId });
@@ -115,7 +143,19 @@ enum BridgeScript {
           }
           if (ev && ev.type === 'kokoroReply') {
             var pending = pendingKokoro[ev.requestId];
-            if (!pending) return;       // stale reply from a reloaded page
+            if (!pending) {
+              /* Cancellation can race a successful reply already crossing the
+                 bridge. Nobody will fetch that WAV, so release it immediately
+                 instead of waiting for the native cache's age-based cleanup. */
+              /* Replies are broadcast to every Aloud scene. Only this page may
+                 release a request bearing its nonce; another scene may still
+                 be about to fetch its own successful result. */
+              var ownedRequest = String(ev.requestId || '').indexOf(pageNonce + ':') === 0;
+              if (ownedRequest && ev.ok && ev.result && ev.result.audioId) {
+                post({ cmd: 'kokoroRelease', audioId: ev.result.audioId });
+              }
+              return;
+            }
             delete pendingKokoro[ev.requestId];
             clearTimeout(pending.timer);
             if (ev.ok) pending.resolve(ev.result || {});
@@ -151,16 +191,11 @@ enum BridgeScript {
       Object.defineProperty(window, '__aloudNative', { value: bridge, writable: false, configurable: false });
 
       addEventListener('pagehide', function () {
-        Object.keys(pendingKokoro).forEach(function (requestId) {
-          var pending = pendingKokoro[requestId];
-          clearTimeout(pending.timer);
-          post({ cmd: 'kokoroCancel', requestId: requestId });
-          delete pendingKokoro[requestId];
-          var error = new Error('The reader page was closed.');
-          error.name = 'EngineReset';
-          error.code = 'page_closed';
-          pending.reject(error);
-        });
+        cancelKokoroRequests(
+          function () { return true; },
+          'The reader page was closed.',
+          'page_closed'
+        );
       });
     })();
     """#

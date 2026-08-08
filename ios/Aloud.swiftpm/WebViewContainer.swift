@@ -160,6 +160,9 @@ struct WebViewContainer: UIViewRepresentable {
                     playing: body["playing"] as? Bool ?? false
                 )
 
+            case "clearNowPlaying":
+                AudioSession.shared.clearNowPlaying()
+
             case "kokoroPrepare":
                 guard let requestID = body["requestId"] as? String else { return }
                 // A bridge message is delivered on the main thread. Refresh

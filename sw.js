@@ -1,6 +1,6 @@
 /* Aloud service worker — offline app shell + CDN module caching.
    Bump VERSION on each release to roll the cache. */
-const VERSION = 'aloud-v6.22.0';
+const VERSION = 'aloud-v6.23.0';
 const CORE = ['./', './index.html', './kokoro-worker.js', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
