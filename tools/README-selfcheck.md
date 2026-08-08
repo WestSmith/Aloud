@@ -1,3 +1,14 @@
+# native-token-timing-selfcheck
+
+Checks the production iOS Misaki-token mapper without downloading a model.
+It verifies whitespace grouping, hyphen/punctuation splits, multi-word spoken
+expansions, and silent display tokens against a small synthetic oracle. It
+also shifts a group deliberately so the scorer proves it can fail.
+
+```sh
+node tools/native-token-timing-selfcheck.mjs
+```
+
 # karaoke-selfcheck
 
 Measures the karaoke aligner's per-word error against **real Kokoro audio**,
