@@ -1,6 +1,6 @@
 # Aloud for iPad / iPhone
 
-Aloud v6.21.6 runs the full Kokoro voice model natively with Apple MLX. The
+Aloud v6.22.0 runs the full Kokoro voice model natively with Apple MLX. The
 reader, library, PDF/HTML views and visual design remain the same as the PWA,
 but the large model no longer loads or performs inference inside WebKit.
 
@@ -25,6 +25,20 @@ build), not an on-iPad Playgrounds build.
 MLX cannot run in the iOS Simulator. The package can be compiled for a generic
 arm64 iOS device on a Mac, but voice generation must be tested on a physical
 iPhone or iPad.
+
+## HTML document text size
+
+Version 6.22.0 replaces WebKit page magnification with document-aware text
+reflow for imported HTML study guides. The document text controls enlarge the
+guide's text and line spacing inside its existing viewport, while Aloud's top
+bar, player, responsive diagrams and other media keep their original size.
+Wide tables and preformatted blocks scroll within the guide instead of widening
+the reader, and flex-based headings and form controls stay usable on phones.
+
+The floating text-size control remains beside the document on iPad and becomes
+a compact horizontal control above the player on iPhone. The same percentage
+control is available under Settings → Text size. Interactive sandboxed guides
+and the read-only HTML view use the same reflow behavior.
 
 ## Native Kokoro
 

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.21.6">
+<meta name="aloud-version" content="v6.22.0">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -495,9 +495,33 @@
     padding: 5px; box-shadow: var(--shadow);
   }
   body.zoomable #zoom-bar { display: flex; }
-  @media (max-width: 699px) { #zoom-bar { display: none !important; } }
+  /* Phones get a compact document-text control above the player. The old
+     rule hid zoom completely below 700px, leaving pinch zoom as the only
+     option — which also enlarged the player and could push it off-screen. */
+  @media (max-width: 699px) {
+    #zoom-bar { display: none !important; }
+    body.zoomable.html-zoomable #zoom-bar {
+      display: flex !important; flex-direction: row; right: 8px;
+      bottom: calc(150px + env(safe-area-inset-bottom));
+    }
+    body.html-zoomable #zoom-bar .zsep,
+    body.html-zoomable #zoom-fitw,
+    body.html-zoomable #zoom-fitp { display: none !important; }
+    #zoom-bar button { width: 44px; height: 44px; }
+  }
+  /* A landscape phone is often wider than 699px but too short for the
+     vertical stack. Keep both HTML text size and PDF zoom reachable there. */
+  @media (min-width: 700px) and (max-height: 500px) {
+    body.zoomable #zoom-bar {
+      display: flex !important; flex-direction: row; right: 8px;
+      bottom: calc(150px + env(safe-area-inset-bottom));
+    }
+    body.zoomable #zoom-bar .zsep { display: none !important; }
+    body.html-zoomable #zoom-fitw,
+    body.html-zoomable #zoom-fitp { display: none !important; }
+  }
   #zoom-bar button {
-    width: 38px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+    width: 44px; height: 44px; border-radius: 10px; display: grid; place-items: center;
     color: var(--text-dim); font-size: 18px; font-weight: 650; line-height: 1;
   }
   #zoom-bar button:hover { background: var(--bg-elev2); color: var(--text); }
@@ -727,7 +751,7 @@
   <div class="grab"></div>
   <h3>Settings</h3>
   <div class="set-row">
-    <div class="lbl">Text size</div>
+    <div class="lbl">Text size<small id="text-size-note">Applies to the plain text view</small></div>
     <div class="stepper">
       <button id="font-minus">−</button><span id="font-size-label">19</span><button id="font-plus">+</button>
     </div>
@@ -995,6 +1019,7 @@ const S = {
   htmlViewPref: store.get('htmlView', 'native'),
   htmlInteractive: store.get('htmlInteractive', true),  // run a document's own JS in a sandboxed frame
   frame: null,         // interactive HTML view: {el, ops, geom, ready, lsKey, ls, onMsg}
+  htmlZoom: null,      // read-only HTML view: computed text-size reflow controller
   neuralQuality: store.get('neuralQuality', 'auto'),   // 'auto'|'lite'|'standard'|'high'
   fastEnds: 0,
   breather: store.get('breather', 1),   // pause/breather intensity multiplier (0 = off)
@@ -2098,6 +2123,16 @@ const KARAOKE_SHADOW_CSS = `
   :host { display: block; }
   .aloud-html-root { line-height: 1.65; -webkit-font-smoothing: antialiased; }
   .aloud-html-root img, .aloud-html-root video { max-width: 100%; height: auto; }
+  .aloud-html-root.aloud-text-zoomed table { display: block; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .aloud-html-root.aloud-text-zoomed pre { max-width: 100%; overflow-x: auto; }
+  .aloud-html-root.aloud-text-zoomed input,
+  .aloud-html-root.aloud-text-zoomed textarea,
+  .aloud-html-root.aloud-text-zoomed select { min-width: 0; max-width: 100%; }
+  .aloud-html-root.aloud-text-zoomed :where(h1, h2, h3, h4, h5, h6) { flex-wrap: wrap; overflow-wrap: anywhere; }
+  .aloud-html-root.aloud-text-resizing,
+  .aloud-html-root.aloud-text-resizing *,
+  .aloud-html-root.aloud-text-resizing *::before,
+  .aloud-html-root.aloud-text-resizing *::after { transition: none !important; }
   .w { border-radius: 4px; cursor: pointer; padding: 0 1px; margin: 0 -1px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
   .w:hover { background: rgba(124,108,246,.16); }
   .w.sent-on { background: rgba(124,108,246,.14); }
@@ -2240,7 +2275,12 @@ function ALOUD_FRAME_AGENT(cfg) {
 
   var st = document.createElement('style');
   st.textContent =
-    'html,body{height:auto!important;overflow:visible!important}' +
+    'html,body{height:auto!important;min-height:0!important;overflow:visible!important}' +
+    'html.aloud-text-zoomed table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}' +
+    'html.aloud-text-zoomed pre{max-width:100%;overflow-x:auto}' +
+    'html.aloud-text-zoomed input,html.aloud-text-zoomed textarea,html.aloud-text-zoomed select{min-width:0;max-width:100%}' +
+    'html.aloud-text-zoomed :where(h1,h2,h3,h4,h5,h6){flex-wrap:wrap;overflow-wrap:anywhere}' +
+    'html.aloud-text-resizing *,html.aloud-text-resizing *::before,html.aloud-text-resizing *::after{transition:none!important}' +
     '.' + CLS + '{border-radius:4px;cursor:pointer;padding:0 1px;margin:0 -1px;' +
       '-webkit-box-decoration-break:clone;box-decoration-break:clone}' +
     '.' + CLS + '.sent-on{background:rgba(124,108,246,.14)}' +
@@ -2253,6 +2293,168 @@ function ALOUD_FRAME_AGENT(cfg) {
        colour instead. Weight is left alone: it would reflow the figure. */
     'tspan.' + CLS + '.speaking{background:none!important;fill:#7c6cf6!important}';
   document.head.appendChild(st);
+
+  /* ---- document text zoom ---------------------------------------------
+     CSS zoom on the parent iframe used to magnify this entire browsing
+     surface as a bitmap-like layer. The frame kept its old 920px layout,
+     so the second + step overflowed an iPad and WebKit blurred responsive
+     SVG/3D content. Scale computed text metrics instead: prose genuinely
+     reflows inside the same viewport while media and Aloud's chrome stay
+     at their original size. */
+  var textZoom = 1, textZoomRecords = [], textZoomRefreshT = 0, textZoomTouchClearT = 0, textZoomTransitionT = 0;
+  var textZoomViewportWidth = document.documentElement.clientWidth;
+  var textZoomTouched = new WeakSet(), textZoomByEl = new WeakMap();
+  var TEXT_ZOOM_SKIP = /^(?:SCRIPT|STYLE|NOSCRIPT|SOURCE|TRACK)$/;
+  var TEXT_ZOOM_MEDIA = /^(?:SVG|IMG|VIDEO|AUDIO|CANVAS|IFRAME|OBJECT|EMBED)$/i;
+
+  function clearTextZoomTouchesSoon() {
+    clearTimeout(textZoomTouchClearT);
+    textZoomTouchClearT = setTimeout(function () { textZoomTouched = new WeakSet(); }, 0);
+  }
+
+  function beginTextZoomWrite() {
+    clearTimeout(textZoomTransitionT);
+    document.documentElement.classList.add('aloud-text-resizing');
+  }
+
+  function endTextZoomWriteSoon() {
+    clearTimeout(textZoomTransitionT);
+    textZoomTransitionT = setTimeout(function () { document.documentElement.classList.remove('aloud-text-resizing'); }, 0);
+  }
+
+  function restoreTextZoom() {
+    beginTextZoomWrite();
+    for (var i = 0; i < textZoomRecords.length; i++) {
+      var r = textZoomRecords[i], el = r.el;
+      if (!el || !el.style) continue;
+      textZoomTouched.add(el);
+      if (r.fontValue) el.style.setProperty('font-size', r.fontValue, r.fontPriority);
+      else el.style.removeProperty('font-size');
+      if (r.lineValue) el.style.setProperty('line-height', r.lineValue, r.linePriority);
+      else el.style.removeProperty('line-height');
+    }
+    clearTextZoomTouchesSoon();
+    endTextZoomWriteSoon();
+  }
+
+  function captureTextZoom() {
+    restoreTextZoom();
+    textZoomRecords = [];
+    textZoomByEl = new WeakMap();
+    /* Leave the HTML root alone: changing it would also enlarge every rem-
+       based panel, gap and media dimension. Body covers direct body text. */
+    var nodes = [document.body];
+    var found = document.body.querySelectorAll('*');
+    for (var i = 0; i < found.length; i++) nodes.push(found[i]);
+    for (var j = 0; j < nodes.length; j++) {
+      var el = nodes[j];
+      var freeze = el && TEXT_ZOOM_MEDIA.test(el.tagName);
+      if (!el || (el.namespaceURI === SVGNS && !freeze) || TEXT_ZOOM_SKIP.test(el.tagName)) continue;
+      if (el.classList && el.classList.contains(CLS)) continue;
+      var cs = getComputedStyle(el), fs = parseFloat(cs.fontSize), lh = parseFloat(cs.lineHeight);
+      if (!(fs > 0)) continue;
+      var rec = {
+        el: el, fontSize: fs, lineHeight: isFinite(lh) && lh > 0 ? lh : 0,
+        freeze: freeze,
+        fontValue: el.style.getPropertyValue('font-size'),
+        fontPriority: el.style.getPropertyPriority('font-size'),
+        lineValue: el.style.getPropertyValue('line-height'),
+        linePriority: el.style.getPropertyPriority('line-height')
+      };
+      textZoomRecords.push(rec);
+      textZoomByEl.set(el, rec);
+    }
+  }
+
+  function applyTextZoomRecords() {
+    beginTextZoomWrite();
+    for (var i = 0; i < textZoomRecords.length; i++) {
+      var r = textZoomRecords[i], el = r.el;
+      if (!el || !el.style) continue;
+      textZoomTouched.add(el);
+      var factor = r.freeze ? 1 : textZoom;
+      var fs = Math.round(r.fontSize * factor * 1000) / 1000;
+      r.appliedFontValue = fs + 'px';
+      r.appliedFontPriority = 'important';
+      el.style.setProperty('font-size', r.appliedFontValue, r.appliedFontPriority);
+      if (r.lineHeight) {
+        var lh = Math.round(r.lineHeight * factor * 1000) / 1000;
+        r.appliedLineValue = lh + 'px';
+        r.appliedLinePriority = 'important';
+        el.style.setProperty('line-height', r.appliedLineValue, r.appliedLinePriority);
+      } else {
+        r.appliedLineValue = null;
+        r.appliedLinePriority = null;
+      }
+    }
+    clearTextZoomTouchesSoon();
+    endTextZoomWriteSoon();
+  }
+
+  function setTextZoom(value) {
+    var next = Math.max(.5, Math.min(3, +value || 1));
+    document.documentElement.classList.toggle('aloud-text-zoomed', Math.abs(next - 1) >= .002);
+    if (Math.abs(next - 1) < .002) {
+      textZoom = 1;
+      restoreTextZoom();
+      textZoomRecords = [];
+    } else {
+      if (!textZoomRecords.length) captureTextZoom();
+      textZoom = next;
+      applyTextZoomRecords();
+    }
+    reportSoon();
+    post({ t: 'aloud:zoomed', scale: textZoom });
+  }
+
+  function reconcileExternalTextStyle(el) {
+    var r = el && textZoomByEl.get(el);
+    if (!r || Math.abs(textZoom - 1) < .002) return;
+    var fv = el.style.getPropertyValue('font-size');
+    var fp = el.style.getPropertyPriority('font-size');
+    if (fv !== r.appliedFontValue || fp !== r.appliedFontPriority) {
+      r.fontValue = fv;
+      r.fontPriority = fp;
+    }
+    var lv = el.style.getPropertyValue('line-height');
+    var lp = el.style.getPropertyPriority('line-height');
+    var expectedLV = r.appliedLineValue === null ? r.lineValue : r.appliedLineValue;
+    var expectedLP = r.appliedLineValue === null ? r.linePriority : r.appliedLinePriority;
+    if (lv !== expectedLV || lp !== expectedLP) {
+      r.lineValue = lv;
+      r.linePriority = lp;
+    }
+  }
+
+  function hasRunningTextTransition() {
+    if (!document.getAnimations) return false;
+    try {
+      var animations = document.getAnimations();
+      for (var i = 0; i < animations.length; i++) {
+        var a = animations[i];
+        if ((a.playState === 'running' || a.playState === 'pending') &&
+            typeof a.transitionProperty === 'string') return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function refreshTextZoomSoon() {
+    if (Math.abs(textZoom - 1) < .002) { textZoomRecords = []; return; }
+    clearTimeout(textZoomRefreshT);
+    textZoomRefreshT = setTimeout(function refreshAfterTransitions() {
+      /* A class mutation may be a flip-card or panel transition. Wait for
+         authored CSS transitions to finish before the brief baseline pass,
+         so text reflow never cancels the guide's own animation. */
+      if (hasRunningTextTransition()) {
+        textZoomRefreshT = setTimeout(refreshAfterTransitions, 90);
+        return;
+      }
+      captureTextZoom();
+      applyTextZoomRecords();
+      reportSoon();
+    }, 90);
+  }
 
   /* ---- auto-reveal ----------------------------------------------------
      When reading reaches a word inside a collapsed panel we don't guess the
@@ -2303,7 +2505,14 @@ function ALOUD_FRAME_AGENT(cfg) {
      page keeps one scrollbar and the overlays stay where they are ---- */
   var lastH = 0, hT = 0;
   function reportH() {
-    var h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 200);
+    // documentElement.scrollHeight is never shorter than the iframe viewport,
+    // so it prevents the parent frame from shrinking after text size decreases.
+    var bodyRect = document.body.getBoundingClientRect();
+    var bodyStyle = getComputedStyle(document.body);
+    var marginTop = parseFloat(bodyStyle.marginTop) || 0;
+    var marginBottom = parseFloat(bodyStyle.marginBottom) || 0;
+    var bodyBox = Math.max(document.body.scrollHeight, document.body.offsetHeight, bodyRect.height);
+    var h = Math.max(Math.ceil(bodyBox + marginTop + marginBottom), Math.ceil(bodyRect.bottom + marginBottom), 200);
     if (Math.abs(h - lastH) < 2) return;
     lastH = h;
     post({ t: 'aloud:h', h: h });
@@ -2312,17 +2521,35 @@ function ALOUD_FRAME_AGENT(cfg) {
   try { new ResizeObserver(reportSoon).observe(document.body); } catch (e) {}
   try {
     new MutationObserver(function (recs) {
+      var layoutChanged = false;
       for (var r = 0; r < recs.length; r++) {
-        var t = recs[r].target;
+        var rec = recs[r], t = rec.target;
         /* our own karaoke paint lands on word spans many times a second —
            measuring the document on each one would thrash layout */
         if (t && t.nodeType === 1 && t.classList && t.classList.contains(CLS)) continue;
-        reportSoon();
-        return;
+        /* text zoom writes only font-size/line-height inline styles. Ignore
+           those observer echoes; setTextZoom already schedules one measure. */
+        if (rec.attributeName === 'style' && textZoomTouched.has(t)) continue;
+        if (rec.attributeName === 'style') reconcileExternalTextStyle(t);
+        layoutChanged = true;
       }
+      if (!layoutChanged) return;
+      refreshTextZoomSoon();
+      reportSoon();
     }).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style', 'open', 'hidden'] });
   } catch (e) {}
   window.addEventListener('load', reportSoon);
+  window.addEventListener('resize', function () {
+    /* Parent height updates also fire a frame resize. Only a width change
+       alters text layout; re-baselining on height produced a feedback loop
+       in documents whose CSS transitions all properties. */
+    var w = document.documentElement.clientWidth;
+    if (Math.abs(w - textZoomViewportWidth) > 1) {
+      textZoomViewportWidth = w;
+      refreshTextZoomSoon();
+    }
+    reportSoon();
+  });
 
   /* ---- gestures. A tap only means "read from here" on ordinary prose: on
      anything the page made clickable (a card, a quiz option, a section
@@ -2384,7 +2611,9 @@ function ALOUD_FRAME_AGENT(cfg) {
      the rect we send back is measured AFTER any auto-reveal. ---- */
   window.addEventListener('message', function (e) {
     var m = e.data;
-    if (!m || m.t !== 'aloud:apply') return;
+    if (!m) return;
+    if (m.t === 'aloud:zoom') { setTextZoom(m.scale); return; }
+    if (m.t !== 'aloud:apply') return;
     var ops = m.ops || [];
     for (var i = 0; i < ops.length; i++) {
       var el = els[ops[i][0]];
@@ -2451,6 +2680,84 @@ function frameWordEl(wIdx) {
       remove: (c) => framePaint(wIdx, c, false),
       toggle: (c, on) => framePaint(wIdx, c, on),
     },
+  };
+}
+
+/* Read-only HTML lives in a shadow tree rather than the sandboxed frame, so
+   it uses the same reflow principle locally. Computed pixel baselines let us
+   enlarge documents that mix px/em/rem sizes without rewriting their CSS.
+   Media/SVG/canvas stay unscaled and sharp. */
+function createHtmlTextZoom(root) {
+  const skip = /^(?:SCRIPT|STYLE|NOSCRIPT|SOURCE|TRACK)$/;
+  const media = /^(?:SVG|IMG|VIDEO|AUDIO|CANVAS|IFRAME|OBJECT|EMBED)$/i;
+  let records = [], scale = 1, transitionT = 0;
+
+  function beginWrite() {
+    clearTimeout(transitionT);
+    root.classList.add('aloud-text-resizing');
+  }
+  function endWriteSoon() {
+    clearTimeout(transitionT);
+    transitionT = setTimeout(() => root.classList.remove('aloud-text-resizing'), 0);
+  }
+
+  function restore() {
+    beginWrite();
+    for (const r of records) {
+      const el = r.el;
+      if (!el?.style) continue;
+      if (r.fontValue) el.style.setProperty('font-size', r.fontValue, r.fontPriority);
+      else el.style.removeProperty('font-size');
+      if (r.lineValue) el.style.setProperty('line-height', r.lineValue, r.linePriority);
+      else el.style.removeProperty('line-height');
+    }
+    endWriteSoon();
+  }
+
+  function capture() {
+    restore();
+    records = [];
+    for (const el of [root, ...root.querySelectorAll('*')]) {
+      const freeze = !!el && media.test(el.tagName);
+      if (!el || (el.namespaceURI === SVGNS && !freeze) || skip.test(el.tagName) || el.hasAttribute('data-word')) continue;
+      const cs = getComputedStyle(el);
+      const fs = parseFloat(cs.fontSize), lh = parseFloat(cs.lineHeight);
+      if (!(fs > 0)) continue;
+      records.push({
+        el, freeze, fontSize: fs, lineHeight: Number.isFinite(lh) && lh > 0 ? lh : 0,
+        fontValue: el.style.getPropertyValue('font-size'),
+        fontPriority: el.style.getPropertyPriority('font-size'),
+        lineValue: el.style.getPropertyValue('line-height'),
+        linePriority: el.style.getPropertyPriority('line-height'),
+      });
+    }
+  }
+
+  function apply(value, recapture = false) {
+    const next = Math.max(.5, Math.min(3, +value || 1));
+    root.classList.toggle('aloud-text-zoomed', Math.abs(next - 1) >= .002);
+    if (recapture || !records.length) capture();
+    scale = next;
+    if (Math.abs(scale - 1) < .002) { restore(); return; }
+    beginWrite();
+    for (const r of records) {
+      const factor = r.freeze ? 1 : scale;
+      const fs = Math.round(r.fontSize * factor * 1000) / 1000;
+      r.el.style.setProperty('font-size', fs + 'px', 'important');
+      if (r.lineHeight) {
+        const lh = Math.round(r.lineHeight * factor * 1000) / 1000;
+        r.el.style.setProperty('line-height', lh + 'px', 'important');
+      }
+    }
+    endWriteSoon();
+  }
+
+  capture();
+  return {
+    set: apply,
+    refresh: value => apply(value, true),
+    destroy: () => { root.classList.remove('aloud-text-zoomed'); restore(); },
+    get scale() { return scale; },
   };
 }
 
@@ -2532,7 +2839,7 @@ function renderHtmlInteractive(htmlText, opts = {}) {
       if (typeof m.text === 'string') setPronunciation(m.text);
     } else if (m.t === 'aloud:anchor') {
       const ir = iframe.getBoundingClientRect();
-      window.scrollTo({ top: window.scrollY + ir.top + (m.top || 0) * (S.zoom?.applied || 1) - 90, behavior: 'smooth' });
+      window.scrollTo({ top: window.scrollY + ir.top + (m.top || 0) - 90, behavior: 'smooth' });
     } else if (m.t === 'aloud:ls') {
       if (m.data && typeof m.data === 'object') store.set(f.lsKey, m.data);
     }
@@ -2556,9 +2863,8 @@ function frameApplyScroll(m) {
   const f = S.frame;
   if (!f) return;
   const ir = f.el.getBoundingClientRect();
-  const z = S.zoom?.applied || 1;
-  const top = ir.top + (m.top || 0) * z;
-  const bottom = ir.top + (m.bottom || 0) * z;
+  const top = ir.top + (m.top || 0);
+  const bottom = ir.top + (m.bottom || 0);
   const bandTop = 90 + (S.rsvp.open && S.rsvp.pos === 'top' ? 150 : 0);
   const bandBottom = window.innerHeight - 210 - (S.rsvp.open && S.rsvp.pos === 'bottom' ? 145 : 0);
   if (!m.force && top >= bandTop && bottom <= bandBottom) return;
@@ -2673,6 +2979,7 @@ function renderHtmlNative(htmlText, opts = {}) {
     if (a) e.preventDefault();
   });
 
+  S.htmlZoom = createHtmlTextZoom(wrap);
   buildFromTokenStream(tokens, wordEls);
   finishOpen(opts);
 }
@@ -2711,11 +3018,13 @@ function resetDocState() {
     if (S.frame.onMsg) window.removeEventListener('message', S.frame.onMsg);
     S.frame = null;
   }
+  if (S.htmlZoom) { try { S.htmlZoom.destroy(); } catch {} S.htmlZoom = null; }
   content.classList.remove('pdf-mode');
   content.classList.remove('html-mode');
   content.classList.remove('fit-wide');
   content.style.zoom = '';
   document.body.classList.remove('zoomable');
+  document.body.classList.remove('html-zoomable');
   if (S.zoom) S.zoom.applied = 1;
   S.chapters = [];
 }
@@ -2796,8 +3105,10 @@ function finishOpen(opts = {}) {
     S.zoom.fit = zsaved?.fit || 'none';
     S.zoom.pct = Math.min(3, Math.max(0.5, zsaved?.pct || 1));
     document.body.classList.add('zoomable');
+    document.body.classList.toggle('html-zoomable', S.mode === 'html');
     applyZoom(false);
   }
+  refreshTextSizeControl();
 
   /* lock screen / control center: show what's being read */
   if ('mediaSession' in navigator) {
@@ -5160,10 +5471,11 @@ $('btn-view').addEventListener('click', async () => {
 });
 
 /* ====================================================================
-   ZOOM (v6.6.0) — PDF & original-layout HTML views.
-   CSS `zoom` on #content: it reflows layout (unlike transform), every
-   overlay span scales with its page, and getBoundingClientRect /
-   scrollIntoView keep working, so karaoke highlighting is untouched.
+   DOCUMENT SIZE — PDF page zoom + original-layout HTML text reflow.
+   PDFs retain CSS zoom because their canvas/text overlays are one page.
+   HTML instead scales computed text metrics inside its frame/shadow tree:
+   the guide reflows at a fixed viewport width, while responsive media and
+   Aloud's own top/player controls remain sharp and stationary.
    ==================================================================== */
 const ZOOM_MIN = 0.5, ZOOM_MAX = 3, ZOOM_STEP = 1.15;
 const clampZoom = z => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
@@ -5198,19 +5510,34 @@ function effectiveZoom() {
 }
 
 let zoomRerenderT = 0;
-function applyZoom(save = true) {
+function applyZoom(save = true, recaptureHtml = false) {
   if (!zoomable()) return;
   const z = effectiveZoom();
   S.zoom.applied = z;
-  content.style.zoom = Math.abs(z - 1) < 0.002 ? '' : String(z);
   /* fit-width for HTML: let the document reflow into the whole window */
   content.classList.toggle('fit-wide', S.mode === 'html' && S.zoom.fit === 'width');
+  if (S.mode === 'html') {
+    content.style.zoom = '';
+    if (S.frame) frameSend({ t: 'aloud:zoom', scale: z });
+    else if (S.htmlZoom) (recaptureHtml ? S.htmlZoom.refresh(z) : S.htmlZoom.set(z));
+  } else {
+    content.style.zoom = Math.abs(z - 1) < 0.002 ? '' : String(z);
+  }
   $('zoom-pct').textContent = Math.round(z * 100) + '%';
   $('zoom-fitw').classList.toggle('on', S.zoom.fit === 'width');
   $('zoom-fitp').classList.toggle('on', S.zoom.fit === 'page');
   $('zoom-fitw').setAttribute('aria-pressed', S.zoom.fit === 'width');
   $('zoom-fitp').setAttribute('aria-pressed', S.zoom.fit === 'page');
   $('zoom-fitp').style.display = S.mode === 'pdf' ? '' : 'none';
+  const htmlText = S.mode === 'html';
+  $('zoom-bar').setAttribute('aria-label', htmlText ? 'Document text size' : 'Zoom');
+  $('zoom-in').title = htmlText ? 'Increase document text size (+)' : 'Zoom in (+)';
+  $('zoom-in').setAttribute('aria-label', htmlText ? 'Increase document text size' : 'Zoom in');
+  $('zoom-out').title = htmlText ? 'Decrease document text size (−)' : 'Zoom out (−)';
+  $('zoom-out').setAttribute('aria-label', htmlText ? 'Decrease document text size' : 'Zoom out');
+  $('zoom-pct').title = htmlText ? 'Reset document text size to 100% (0)' : 'Reset zoom to 100% (0)';
+  $('zoom-pct').setAttribute('aria-label', htmlText ? 'Reset document text size to 100%' : 'Reset zoom to 100%');
+  refreshTextSizeControl();
   if (save) store.set(S.mode === 'pdf' ? 'zoomPdf' : 'zoomHtml', { pct: S.zoom.pct, fit: S.zoom.fit });
   /* PDF: re-render nearby pages at the new resolution (debounced so a
      burst of +/+/+ redraws once). Far pages re-render lazily via the IO. */
@@ -5245,9 +5572,9 @@ $('zoom-fitp').addEventListener('click', () => zoomToggleFit('page'));
 
 let zoomResizeT = 0;
 window.addEventListener('resize', () => {
-  if (!zoomable() || S.zoom.fit === 'none') return;
+  if (!zoomable() || (S.mode !== 'html' && S.zoom.fit === 'none')) return;
   clearTimeout(zoomResizeT);
-  zoomResizeT = setTimeout(() => applyZoom(false), 180);
+  zoomResizeT = setTimeout(() => applyZoom(false, S.mode === 'html'), 180);
 });
 
 /* RSVP wiring */
@@ -5451,8 +5778,14 @@ const FONT_STACKS = {
   atkinson: "'Atkinson Hyperlegible', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
   dyslexic: "'OpenDyslexic', 'Trebuchet MS', Verdana, sans-serif",
 };
-$('font-plus').addEventListener('click', () => { contentSize = Math.min(40, contentSize + 1); applyFont(); });
-$('font-minus').addEventListener('click', () => { contentSize = Math.max(12, contentSize - 1); applyFont(); });
+$('font-plus').addEventListener('click', () => {
+  if (S.mode === 'html') zoomTo(S.zoom.applied * ZOOM_STEP);
+  else { contentSize = Math.min(40, contentSize + 1); applyFont(); }
+});
+$('font-minus').addEventListener('click', () => {
+  if (S.mode === 'html') zoomTo(S.zoom.applied / ZOOM_STEP);
+  else { contentSize = Math.max(12, contentSize - 1); applyFont(); }
+});
 $('font-select').addEventListener('change', e => { contentFont = e.target.value; applyFont(); });
 $('bold-switch').addEventListener('click', e => {
   const on = !store.get('boldText', false);
@@ -5464,10 +5797,19 @@ function applyFont() {
   if (!FONT_STACKS[contentFont]) contentFont = 'serif';
   document.documentElement.style.setProperty('--content-size', contentSize + 'px');
   document.documentElement.style.setProperty('--content-font', FONT_STACKS[contentFont]);
-  $('font-size-label').textContent = contentSize;
   $('font-select').value = contentFont;
   store.set('fontSize', contentSize);
   store.set('contentFont', contentFont);
+  refreshTextSizeControl();
+}
+function refreshTextSizeControl() {
+  const html = S.mode === 'html';
+  $('font-size-label').textContent = html ? Math.round((S.zoom?.applied || 1) * 100) + '%' : contentSize;
+  $('text-size-note').textContent = html
+    ? 'Reflows the original HTML without enlarging Aloud’s controls or diagrams'
+    : 'Applies to the plain text view';
+  $('font-plus').setAttribute('aria-label', html ? 'Increase document text size' : 'Increase plain text size');
+  $('font-minus').setAttribute('aria-label', html ? 'Decrease document text size' : 'Decrease plain text size');
 }
 $('theme-toggle').addEventListener('click', () => {
   const dark = document.body.dataset.theme !== 'light';
