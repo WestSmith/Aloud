@@ -16,6 +16,7 @@ DEST="$REPO_ROOT/ios/Aloud.swiftpm/web"
 
 ASSETS=(
   index.html
+  kokoro-worker.js
   sw.js
   manifest.json
   icon-192.png

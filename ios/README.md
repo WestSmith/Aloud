@@ -1,200 +1,241 @@
 # Aloud for iPad / iPhone
 
-A native app wrapper around the Aloud web app, built to fix the problems that
-cannot be fixed from inside Safari.
+Aloud v6.22.0 runs the full Kokoro voice model natively with Apple MLX. The
+reader, library, PDF/HTML views and visual design remain the same as the PWA,
+but the large model no longer loads or performs inference inside WebKit.
 
-`Aloud.swiftpm` is a **Swift Playgrounds App package**. It opens two ways from
-the same directory, with no separate Xcode project to keep in step:
+The supported entry point is `Aloud.xcworkspace` in Xcode on a Mac. The app is
+then compiled, signed and installed onto the iPad by Xcode.
 
-- **Swift Playgrounds on the iPad** — builds and installs straight onto the
-  device. No Mac required at any point.
-- **Xcode on a Mac** — `File ▸ Open…` the `Aloud.swiftpm` directory. It builds,
-  signs, and archives like a normal app target.
+Do not open this native-MLX build in Swift Playgrounds on the iPad. MLX brings
+native C, C++, Metal and shim targets that Xcode supports but the iPad
+Playgrounds build service does not reliably support. The previous package also
+placed the 327 MB model inside the editable document, which made that importer
+failure worse. Native Kokoro needs an Xcode-built app (or a TestFlight/App Store
+build), not an on-iPad Playgrounds build.
 
----
+## Requirements
 
-## Why a native app at all
+- A Mac with Xcode 26.6 or newer
+- A connected iPhone or iPad running iOS/iPadOS 18+
+- An Apple ID/development team selected in Xcode for device signing
+- Internet for the first build and the one-time Kokoro model download
+- At least 700 MB free while Kokoro performs its first-time setup
 
-The web app is genuinely good and stays the primary target. Three things,
-though, are simply not reachable from a web page on iOS.
+MLX cannot run in the iOS Simulator. The package can be compiled for a generic
+arm64 iOS device on a Mac, but voice generation must be tested on a physical
+iPhone or iPad.
 
-### 1. Sound that the mute switch can't kill
+## HTML document text size
 
-This is the "loads, but no sound" bug.
+Version 6.22.0 replaces WebKit page magnification with document-aware text
+reflow for imported HTML study guides. The document text controls enlarge the
+guide's text and line spacing inside its existing viewport, while Aloud's top
+bar, player, responsive diagrams and other media keep their original size.
+Wide tables and preformatted blocks scroll within the guide instead of widening
+the reader, and flex-based headings and form controls stay usable on phones.
 
-Audio from a web page runs in an **ambient** audio session, and ambient audio
-obeys the silent switch. A muted iPad plays nothing: no error, no crash, the
-karaoke highlight still sweeps across the words in perfect silence. Nothing a
-web page can call opts out of that.
+The floating text-size control remains beside the document on iPad and becomes
+a compact horizontal control above the player on iPhone. The same percentage
+control is available under Settings → Text size. Interactive sandboxed guides
+and the read-only HTML view use the same reflow behavior.
 
-A native app sets `AVAudioSession` to `.playback` (`AudioSession.swift`), which
-is defined to ignore the silent switch, and `.spokenAudio` mode, which gets the
-interruption behaviour audiobooks want. Because the WKWebView's audio runs
-inside that same session, this fixes **both** engines at once — Kokoro included.
+## Native Kokoro
 
-### 2. Autoplay that survives generation latency
+The native app's `✨ Neural · Kokoro` engine now works like this:
 
-Aloud generates a sentence and *then* calls `play()`, seconds after the tap that
-started playback, so the call no longer traces back to a user gesture and Safari
-refuses it. `index.html` works around this with a silent-WAV priming trick
-(`primeAudioGesture`). The native app just sets
-`mediaTypesRequiringUserActionForPlayback = []` and the restriction is gone.
+1. The first time you press Play with Kokoro selected, Swift downloads the
+   pinned full-quality model directly into the app's private storage.
+2. Swift verifies the model's exact size and SHA-256 before opening it.
+3. `KokoroSwift` generates 24 kHz speech with Apple MLX, off the UI thread.
+4. The model's own duration timestamps are returned with each token.
+5. Swift writes a short-lived local WAV and gives the reader its loopback URL.
+6. The existing Aloud player handles playback, seeking, rate changes, karaoke,
+   sentence caching, background batches and lock-screen continuity.
 
-### 3. Lock-screen playback
+Only a WAV URL and timestamp metadata cross the native bridge. The 327 MB model
+and its MLX tensors never enter WebKit, which removes the memory ceiling and
+silent-worker failure behind the endlessly pulsing play button.
 
-`UIBackgroundModes: audio` plus `MPRemoteCommandCenter` means playback continues
-with the screen off, and the lock screen controls drive the real transport.
+Playback intentionally remains in Aloud's persistent HTML audio element. That
+transport already implements the hard reader behavior—tap-to-read seeking,
+pause/resume, pitch-preserving 1–4× speed, sentence transitions, pre-generation,
+screen-lock batches and the karaoke clock. Moving inference native fixes the
+broken component without replacing those working semantics.
 
----
+iOS does not allow new Metal inference after the app enters the background.
+Aloud therefore pre-generates a runway while it is foregrounded, plays only
+that buffered Kokoro audio while locked, and pauses on the same sentence if the
+runway runs out. It resumes generation after the app becomes active again;
+content is never skipped. The native engine also caps MLX's buffer cache and
+clears recyclable buffers after each sentence to avoid memory growth over long
+reading sessions.
 
-## Architecture
+Version 6.21.6 follows SwiftUI's aggregate scene phase rather than the obsolete
+UIApplicationDelegate active callbacks, which UIKit does not call for
+scene-based apps. If Aloud becomes temporarily inactive during the one-time
+download, verification, or model opening, Kokoro now retains the pending request
+and continues automatically when any Aloud window is active again.
 
+The Apple `📱 iOS` voice engine remains available as a model-free alternative,
+including installed Premium and Enhanced voices.
+
+## Model and dependency pins
+
+The small Xcode source package contains:
+
+- `voices.npz` (28 US/UK English voices)
+  - 14,629,684 bytes
+  - SHA-256
+    `56dbfa2f2970af2e395397020393d368c5f441d09b3de4e9b77f6222e790f10f`
+
+On first use it downloads the full BF16 model:
+
+- `kokoro-v1_0.safetensors`
+  - 327,115,152 bytes
+  - SHA-256
+    `4e9ecdf03b8b6cf906070390237feda473dc13327cb8d56a43deaa374c02acd8`
+
+`NativeKokoroEngine` checks the model's exact size and SHA-256 before calling
+upstream's model initializer. This is important because KokoroSwift 1.0.11
+force-unwraps required tensors and would otherwise terminate on a bad file.
+
+The model deliberately stays outside the editable `.swiftpm` document. The
+previous 347 MB document put the Playgrounds importer and App Preview under
+avoidable pressure on top of MLX's unsupported native dependency graph. The
+corrected Xcode source package is small, and opening it does not prepare Kokoro
+automatically. A deliberate Play tap starts the setup.
+
+The downloader fetches the pinned model revision, resumes a partial file with
+HTTP byte ranges, verifies the same size and hash, then moves it atomically into
+Application Support. After that one-time setup, Kokoro works offline.
+
+The iOS package vendors two small source packages:
+
+- KokoroSwift 1.0.11 at
+  `4d6d1d8ff8cd012014180c9cd4cf0151e7682354`
+- MisakiSwift 1.0.6 at
+  `6835a1ce4a8854075c89f18ff75c74b13ef58e15`
+
+Their inference code and resource bytes are unchanged. Their app-local package
+manifests use automatic/static linkage and copy resources under the non-reserved
+`ModelResources` name; five bundle lookups use that renamed directory. This
+preserves every model byte while avoiding Xcode's invalid flat-bundle signature.
+The remote dependency graph includes a Swift 6.2 manifest, which is another
+reason this release pins Xcode 26.6 rather than promising iPad Playgrounds
+compatibility.
+The app pins mlx-swift 0.30.6, which fixes incorrect NAX detection and corrupted
+output on affected iPhones as well as the Xcode 26 link problem present in the
+older 0.30.2 dependency.
+
+## Package layout
+
+```text
+ios/
+├── Aloud.xcworkspace/             open this in Xcode
+└── Aloud.swiftpm/
+    ├── Package.swift
+    ├── Info.plist
+    ├── AloudApp.swift
+    ├── ContentView.swift
+    ├── WebViewContainer.swift       WKWebView + native command routing
+    ├── BridgeScript.swift           nonce-keyed JS promises and events
+    ├── NativeKokoroEngine.swift     verification, MLX inference, WAV files
+    ├── NativeSpeechEngine.swift     Apple Premium/Enhanced voices
+    ├── LocalWebServer.swift         reader shell + native WAV route
+    ├── AudioSession.swift           background/remote controls
+    ├── NativeKokoroAssets/
+    │   └── voices.npz
+    ├── Vendor/
+    │   ├── KokoroSwift/
+    │   └── MisakiSwift/
+    ├── Resources/Assets.xcassets
+    └── web/                          bundled copy of the PWA UI
 ```
-Aloud.swiftpm/
-├── Package.swift              iOSApplication product (needs AppleProductTypes —
-│                              Playgrounds/Xcode only, not plain SwiftPM)
-├── Info.plist                 background audio, ATS, file sharing
-├── AloudApp.swift             launch order: audio session → server → web view
-├── ContentView.swift          loading / loaded / failed states
-├── WebViewContainer.swift     WKWebView + the Swift half of the bridge
-├── BridgeScript.swift         the JS half, injected at document start
-├── LocalWebServer.swift       loopback static server for the bundled app
-├── AudioSession.swift         .playback session + lock-screen controls
-├── NativeSpeechEngine.swift   AVSpeechSynthesizer engine
-└── web/                       bundled copy of the web app (see "Keeping in sync")
-```
 
-### Why a loopback HTTP server rather than `loadFileURL`
+## Why the loopback server exists
 
-A `file://` origin in WKWebView has **no IndexedDB, no Cache Storage and no
-service worker**. Aloud needs all three: the Continue library lives in
-IndexedDB, and transformers.js caches the ~305 MB Kokoro weights in Cache
-Storage. Loading from `file://` would quietly reduce the app to a stateless
-reader that re-downloads the model on every launch.
+The app loads its bundled reader from `http://127.0.0.1`, not `file://`. This
+gives the library a normal origin with IndexedDB and lets the same HTML/CSS/JS
+run in the app and on the web. The listener is pinned to loopback and cannot be
+reached from the local network.
 
-`http://127.0.0.1:<port>/` is a *potentially trustworthy* origin under the
-secure-context rules, so the page gets the full storage API surface, exactly as
-it does on GitHub Pages. The listener is pinned to the loopback interface, so
-nothing is reachable off-device.
+The origin stays fixed at private port 38473 so saved books and settings remain
+available after a relaunch. This release no longer uses Network.framework's
+fixed-port listener path: repeated real-device launches could leave that path
+stuck with a false “address already in use” error. A small POSIX listener with
+`SO_REUSEADDR` avoids that iPad-only failure while remaining loopback-only.
 
-If every candidate port fails to bind, `AppModel` falls back to loading
-<https://westsmith.github.io/Aloud/> so the app still works with a network
-connection. Only offline launch is lost.
+The package declares incoming and outgoing App Sandbox connections for Xcode's
+Mac Catalyst destination. Incoming permits this loopback listener; outgoing
+permits the pinned Kokoro model download. Xcode limits those entitlements to
+macOS builds, and the listener still binds only to `127.0.0.1`.
 
----
+Native Kokoro clips are exposed only under `/__aloud_kokoro/<UUID>.wav`. The
+server rejects traversal and arbitrary cache paths, sends `no-store`, and the
+service worker explicitly bypasses the route. Swift deletes each clip as soon
+as the reader has converted it into its normal sentence cache.
 
-## The third voice engine
+## Keeping the bundled web UI in sync
 
-Kokoro is untouched and remains the best-sounding option. The native engine is
-an **addition** next to it, not a replacement — the voice sheet now has three
-segments (`⚡ Device`, `✨ Neural`, `📱 iOS`), and the third only appears when
-the bridge is present. On the web, `window.__aloudNative` is undefined and every
-native branch in `index.html` is dead code.
-
-What it adds over the existing Web Speech (`device`) engine, which nominally
-reaches the same iOS voices:
-
-- **Premium and Enhanced voices.** Safari's `speechSynthesis` only ever exposes
-  the compact system set. `AVSpeechSynthesisVoice.speechVoices()` sees
-  everything installed under *Settings ▸ Accessibility ▸ Spoken Content ▸
-  Voices*.
-- **Exact karaoke timing.** `willSpeakRangeOfSpeechString` is a real word
-  boundary callback. The web `device` engine carries a whole estimated-timing
-  fallback (`buildTimeline` + `calibFactor`) precisely because iOS fires
-  boundary events unreliably through the web API. None of that machinery is used
-  here.
-- **Instant and free** — no download, no WASM heap, so it works on a device that
-  cannot hold the Kokoro model.
-
-`NSRange` is UTF-16, which is exactly what JavaScript string indices are, so
-`charIndex` lines up with the offsets the web app computed with no conversion.
-
----
-
-## Keeping the bundled copy in sync
-
-The app ships its own copy of the web app under `Aloud.swiftpm/web/`. Refresh it
-after editing the root `index.html`:
+Edit the root web app, then refresh the app's bundled copy:
 
 ```sh
-./ios/sync-web-assets.sh          # copy
-./ios/sync-web-assets.sh --check  # verify only, non-zero exit on drift
+./ios/sync-web-assets.sh
+./ios/sync-web-assets.sh --check
 ```
 
-`.github/workflows/ios-sync-check.yml` runs the `--check` form on every push, so
-drift shows up as a failed check rather than as an app that mysteriously lags a
-release behind.
+The sync check is also run in GitHub Actions.
 
----
+## Installing on an iPad with Xcode
 
-## Building
+1. Unzip the release on the Mac.
+2. Open `Aloud.xcworkspace` in Xcode. Do not open the `.swiftpm` folder in
+   Swift Playgrounds.
+3. Connect and unlock the iPad, then select it as the run destination.
+4. In Signing, choose your Apple development team.
+5. Press Run. Xcode resolves and compiles the pinned MLX dependencies on the
+   Mac, then installs the finished app on the iPad.
+6. In Aloud, open a document, select **Native Kokoro**, and press Play. Keep
+   Aloud open while the progress bar completes the one-time model download.
 
-### On the iPad (no Mac)
+Kokoro downloads its pinned 312 MiB model once; subsequent launches use the
+verified copy stored on the device. A free personal-team installation normally
+expires after seven days and must be rebuilt, which is an Apple signing limit.
 
-1. Get the repo onto the iPad — Working Copy, or clone into Files, or just
-   AirDrop the `Aloud.swiftpm` folder across.
-2. Open `Aloud.swiftpm` in **Swift Playgrounds**.
-3. Press ▶︎ to run, or **⋯ ▸ Build to Device** to install it to the Home Screen
-   with a real icon.
+The command-line generic-device compile used for validation is:
 
-Swift Playgrounds signs with a personal team, so the installed app expires after
-7 days and needs a rebuild. That is an Apple limitation, not a project one.
+```sh
+xcodebuild -workspace Aloud.xcworkspace \
+  -scheme Aloud \
+  -destination 'generic/platform=iOS' \
+  -configuration Release \
+  CODE_SIGNING_ALLOWED=NO build
+```
 
-### On a Mac
+Plain `swift build` is not supported because `.iOSApplication` and
+`AppleProductTypes` are supplied by Xcode/Swift Playgrounds rather than
+open-source SwiftPM.
 
-1. `File ▸ Open…` the `ios/Aloud.swiftpm` directory in Xcode.
-2. Set your team under *Signing & Capabilities*.
-3. Build and run to a connected iPad, or archive for TestFlight.
+## Validation status
 
-Note that `swift build` from a terminal will **not** work — `AppleProductTypes`
-ships only with Swift Playgrounds and Xcode, not with open-source SwiftPM. That
-is expected.
+- Full Release compile for generic arm64 iOS: passing
+- Clean signed iOS Simulator build and reader launch: passing
+- Mac Catalyst signature and loopback reader-server test: passing
+- Kokoro/Misaki resource-bundle signatures and model-file hashes: passing
+- Xcode workspace load and scheme discovery: passing
+- Fresh build from the exact model-free release staging folder: passing
+- Web/native bridge JavaScript parse check: passing
+- Bundled web-asset sync check: passing
+- Model download pin and bundled voice asset hash: passing
+- Physical-device Kokoro audio and timing: required before calling the build
+  field-verified
 
----
+The last item matters: a Simulator cannot execute MLX, so compilation alone
+cannot prove real speech output, speed or timestamp behavior.
 
-## App icon
+## Licences
 
-`Package.swift` omits `appIcon` entirely, so Swift Playgrounds supplies a
-default. That is on purpose: every icon spelling (`.placeholder(icon:)`,
-`.asset(_:)`) is an enum case whose name varies between Swift Playgrounds
-versions, and a wrong guess fails the build before the app has ever run.
-
-The easy fix is in Swift Playgrounds itself — tap the app's settings and pick an
-icon from the UI. To use the real Aloud icon in Xcode instead, you need a
-**1024×1024** source (the repo's icons top out at 512×512, so they need
-regenerating first); add `Assets.xcassets` with an `AppIcon` app-icon set, then
-add `appIcon: .asset("AppIcon")` back to the product.
-
----
-
-## Not done / worth knowing
-
-- **It builds and runs, but nobody has heard it.** Xcode 26.6 builds the
-  package clean for the iOS Simulator, and it launches on an iPad Air (M4):
-  the loopback server binds (`localhost:49200`), `BridgeScript` injects,
-  the reader renders, and `MPNowPlayingInfoCenter` picks up the session.
-  What none of that covers is *sound*. The silent-switch fix in
-  `AudioSession.swift` is the whole reason this app exists, and it is exactly
-  the part a screenshot cannot verify — so first audio on real hardware is
-  still the open question, not the build.
-- **First paint took roughly 25–30 s in the Simulator.** Parsing a 2.1 MB
-  `index.html` on simulated hardware is the obvious suspect, but that is
-  reasoning, not measurement — it has not been timed on a real iPad, and this
-  repo has been burned before by the difference.
-- **Qwen TTS** is not wired up, and it is not a drop-in. Qwen3-TTS is a hosted
-  API (Alibaba DashScope) rather than a local model, so it would mean network
-  calls, an API key, and per-character cost — a different privacy and offline
-  story from Kokoro, which runs entirely on-device. There is no
-  browser-runnable Qwen TTS in transformers.js today. If the goal is *better
-  voices*, the Premium AVSpeech voices and Kokoro already cover it offline; if
-  the goal is *cloud-quality voices* and the tradeoff is acceptable, it belongs
-  behind an explicit opt-in with a key field, and is worth its own change.
-- **COOP/COEP headers are deliberately not sent** by the local server. They
-  would unlock `SharedArrayBuffer` and multi-threaded WASM (a faster Kokoro),
-  but they also make every cross-origin load — jsDelivr's kokoro-js,
-  HuggingFace's weights — fail unless it opts in correctly. Worth trying as a
-  measured experiment in `LocalWebServer.send`, not worth defaulting to.
-- **Native engine speed mapping is approximate.** `AVSpeechUtterance.rate` is
-  0…1 with a non-linear response above default, so `avRate(forMultiplier:)` is a
-  piecewise fit. It affects how fast the voice actually is, not sync accuracy —
-  the highlight follows real boundary callbacks either way.
+KokoroSwift is MIT. MisakiSwift, MLXUtilsLibrary and the Kokoro model/voice
+assets are Apache-2.0. mlx-swift is MIT. The vendored licence files remain next
+to their source, and release packages should retain the third-party notices.

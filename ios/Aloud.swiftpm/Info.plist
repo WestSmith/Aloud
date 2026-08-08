@@ -10,15 +10,13 @@
 		<string>audio</string>
 	</array>
 
-	<!-- The web app loads kokoro-js from jsDelivr and the Kokoro weights from
-	     HuggingFace over HTTPS. Those are ordinary secure loads and need no
-	     exception.
+	<!-- Native Kokoro downloads its pinned full-quality model over HTTPS on
+	     first use, verifies its exact size and SHA-256, and retains it in
+	     Application Support. HTTPS needs no ATS exception.
 
 	     NSAllowsLocalNetworking covers 127.0.0.1 only: the app serves its own
-	     bundled copy of index.html from a loopback HTTP server so the page gets
-	     a real HTTP origin (IndexedDB for the library, Cache Storage for the
-	     Kokoro weights — neither works on a file:// origin). Loopback traffic
-	     never leaves the device. -->
+	     bundled reader and short-lived native Kokoro WAV files from a loopback
+	     HTTP server. Loopback traffic never leaves the device. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

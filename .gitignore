@@ -14,3 +14,9 @@ node_modules/
 package.json
 package-lock.json
 m/
+
+# The editable Swift Playgrounds package must not contain the 327 MB model:
+# loading a document that large can terminate the Playgrounds editor. The app
+# downloads the pinned model on first use and verifies its exact size/hash.
+# Keep any local validation copy ignored as well as excluded by Package.swift.
+ios/Aloud.swiftpm/NativeKokoroAssets/kokoro-v1_0.safetensors

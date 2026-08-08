@@ -1,7 +1,7 @@
 /* Aloud service worker — offline app shell + CDN module caching.
    Bump VERSION on each release to roll the cache. */
-const VERSION = 'aloud-v6.7.0';
-const CORE = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
+const VERSION = 'aloud-v6.22.0';
+const CORE = ['./', './index.html', './kokoro-worker.js', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(CORE)).then(() => self.skipWaiting()));
@@ -18,6 +18,9 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
+  // Native Kokoro WAVs are temporary files. Never retain one after Swift has
+  // released it, and never replace a missing clip with the app shell.
+  if (url.pathname.includes('/__aloud_kokoro/')) return;
   // model weights: transformers.js manages its own Cache Storage — don't double-cache 90MB
   if (url.hostname.endsWith('huggingface.co') || url.hostname.endsWith('hf.co')) return;
 

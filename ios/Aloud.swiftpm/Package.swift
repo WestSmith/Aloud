@@ -5,9 +5,9 @@
 // produce them. Don't lower this speculatively; 5.9 language mode is what the
 // sources are written against.
 
-// This is a Swift Playgrounds *App* package. It opens two ways:
-//   • Swift Playgrounds on the iPad — build and install straight onto the device, no Mac.
-//   • Xcode on a Mac — File ▸ Open this .swiftpm directory; it builds like any app target.
+// This is an Apple *App* package opened through ../Aloud.xcworkspace in Xcode.
+// Native Kokoro depends on MLX's C/C++/Metal targets, so the iPad Playgrounds
+// build service is not a supported compiler for this project.
 //
 // `AppleProductTypes` is only available in those two contexts (it is not part of
 // open-source SwiftPM), which is why a plain `swift build` from a terminal won't
@@ -17,44 +17,81 @@
 // audio, orientations, ATS — is in Info.plist next to this file, so the two
 // toolchains agree.
 
+import Foundation
 import PackageDescription
 import AppleProductTypes
 
+// Developers may keep a private validation copy of the model beside the
+// sources. Exclude it only when it is actually present: distributed archives
+// omit the model and should not emit SwiftPM's "Invalid Exclude" warning.
+let localModelPath = "NativeKokoroAssets/kokoro-v1_0.safetensors"
+let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+let localModelExcludes = FileManager.default.fileExists(
+    atPath: packageRoot.appendingPathComponent(localModelPath).path
+) ? [localModelPath] : []
+
 let package = Package(
     name: "Aloud",
-    platforms: [.iOS("16.0")],
+    platforms: [.iOS("18.0")],
     products: [
         .iOSApplication(
             name: "Aloud",
             targets: ["AppModule"],
             bundleIdentifier: "com.westsmith.aloud",
-            displayVersion: "1.0",
-            bundleVersion: "1",
-            // appIcon/accentColor/teamIdentifier are deliberately omitted. Every
-            // one of them is optional, and each is a spelling of an enum case
-            // that varies between Swift Playgrounds versions — i.e. a way for
-            // the build to fail before it has run once. Swift Playgrounds fills
-            // in a default icon; set a real one from its own UI (or see
-            // ios/README.md) once the app is running.
+            displayVersion: "6.22.0",
+            bundleVersion: "11",
+            appIcon: .asset("AppIcon"),
             supportedDeviceFamilies: [.pad, .phone],
             supportedInterfaceOrientations: [
                 .portrait,
+                .portraitUpsideDown,
                 .landscapeLeft,
                 .landscapeRight,
+            ],
+            // The reader shell and native Kokoro WAVs are served by a private
+            // listener pinned to 127.0.0.1. These App Sandbox capabilities are
+            // needed when Xcode runs the iOS app as Mac Catalyst; they do not
+            // expose the listener to the LAN. Outgoing access is also needed
+            // there for the one-time pinned model download.
+            capabilities: [
+                .incomingNetworkConnections(),
+                .outgoingNetworkConnections(),
             ],
             additionalInfoPlistContentFilePath: "Info.plist"
         )
     ],
+    dependencies: [
+        .package(path: "Vendor/KokoroSwift"),
+        .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.30.6"),
+        .package(url: "https://github.com/mlalma/MLXUtilsLibrary.git", exact: "0.0.6"),
+    ],
     targets: [
         .executableTarget(
             name: "AppModule",
+            dependencies: [
+                .product(name: "KokoroSwift", package: "KokoroSwift"),
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXUtilsLibrary", package: "MLXUtilsLibrary"),
+            ],
             path: ".",
-            exclude: ["Info.plist"],
+            exclude: [
+                "Info.plist",
+                "Vendor",
+            ] + localModelExcludes,
             resources: [
                 // .copy (not .process) — the local web server serves these by
                 // relative path, so the directory layout must survive the build
                 // exactly as it is on disk.
-                .copy("web")
+                .copy("web"),
+                // The compact 28-voice embedding set ships with the app. The
+                // full 327 MB model deliberately does not live inside the
+                // editable .swiftpm document: native dependencies and a file
+                // that large are a poor fit for the Playgrounds importer.
+                // NativeKokoroEngine
+                // downloads the pinned BF16 model once, verifies its exact
+                // size and SHA-256, and keeps it in Application Support.
+                .copy("NativeKokoroAssets/voices.npz"),
+                .copy("NativeKokoroAssets/THIRD_PARTY_NOTICES.md")
             ]
         )
     ]

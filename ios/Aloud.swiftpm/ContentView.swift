@@ -17,8 +17,10 @@ struct ContentView: View {
                     .tint(.white)
                     .controlSize(.large)
 
-            case .local(let url), .remote(let url):
-                WebViewContainer(source: url)
+            case .local(let url):
+                WebViewContainer(source: url) { message in
+                    model.fail(message)
+                }
                     .ignoresSafeArea(edges: .bottom)
 
             case .failed(let message):
