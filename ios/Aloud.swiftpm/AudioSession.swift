@@ -33,33 +33,67 @@ final class AudioSession {
     var onPreviousTrack: (() -> Void)?
 
     private var configured = false
+    private let resetHandlerLock = NSLock()
+    private var resetHandlers: [UUID: () -> Void] = [:]
 
     func activate() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .spokenAudio, options: [])
-            try session.setActive(true, options: [])
-        } catch {
-            // Non-fatal: audio may still work, it just won't survive the mute
-            // switch or a screen lock. Worth surfacing in the console rather
-            // than dying, since the reader itself is still perfectly usable.
-            print("[Aloud] AVAudioSession setup failed: \(error)")
-        }
+        configureSession(reason: "initial setup", activate: true, forceConfiguration: true)
 
         guard !configured else { return }
         configured = true
 
         registerRemoteCommands()
-        observeInterruptions()
+        observeSessionNotifications()
     }
 
     /// Re-assert the session after an interruption (call, Siri, another app).
     /// iOS deactivates us on interruption and does not always restore cleanly.
-    func reactivate() {
+    @discardableResult
+    func reactivate() -> Bool {
+        configureSession(reason: "reactivation", activate: true)
+    }
+
+    @discardableResult
+    func addMediaServicesResetHandler(_ handler: @escaping () -> Void) -> UUID {
+        let identifier = UUID()
+        resetHandlerLock.lock()
+        resetHandlers[identifier] = handler
+        resetHandlerLock.unlock()
+        return identifier
+    }
+
+    func removeMediaServicesResetHandler(_ identifier: UUID) {
+        resetHandlerLock.lock()
+        resetHandlers.removeValue(forKey: identifier)
+        resetHandlerLock.unlock()
+    }
+
+    /// Category and mode are normally persistent, but a media-services reset
+    /// invalidates the audio-session configuration as well as underlying audio
+    /// objects. Reapply the complete contract rather than only setting active.
+    @discardableResult
+    private func configureSession(
+        reason: String,
+        activate: Bool,
+        forceConfiguration: Bool = false
+    ) -> Bool {
+        let session = AVAudioSession.sharedInstance()
         do {
-            try AVAudioSession.sharedInstance().setActive(true, options: [])
+            // Avoid needlessly reconfiguring an already-correct active route on
+            // every foreground transition. A media-services reset forces this
+            // call because its old property values are not a recovery contract.
+            if forceConfiguration || session.category != .playback || session.mode != .spokenAudio {
+                try session.setCategory(.playback, mode: .spokenAudio, options: [])
+            }
+            if activate {
+                try session.setActive(true, options: [])
+            }
+            return true
         } catch {
-            print("[Aloud] AVAudioSession reactivate failed: \(error)")
+            // Non-fatal: the reader remains usable and a later foreground or
+            // interruption callback gets another chance to restore playback.
+            print("[Aloud] AVAudioSession \(reason) failed: \(error)")
+            return false
         }
     }
 
@@ -95,10 +129,13 @@ final class AudioSession {
         }
     }
 
-    private func observeInterruptions() {
-        NotificationCenter.default.addObserver(
+    private func observeSessionNotifications() {
+        let notifications = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+
+        notifications.addObserver(
             forName: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
+            object: session,
             queue: .main
         ) { [weak self] note in
             guard
@@ -114,6 +151,28 @@ final class AudioSession {
             @unknown default:
                 break
             }
+        }
+
+        notifications.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            print("[Aloud] Audio media services reset; rebuilding playback objects")
+            // Apple requires orphaned players to be recreated and playback to
+            // remain stopped until the user asks for it again. Restore the
+            // category/mode now, notify WebKit to discard its Audio element,
+            // and let the next Play command reactivate the session.
+            self.configureSession(
+                reason: "media-services reset",
+                activate: false,
+                forceConfiguration: true
+            )
+            self.resetHandlerLock.lock()
+            let handlers = Array(self.resetHandlers.values)
+            self.resetHandlerLock.unlock()
+            for handler in handlers { handler() }
         }
     }
 

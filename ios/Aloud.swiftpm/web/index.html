@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.24.0">
+<meta name="aloud-version" content="v6.24.2">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1099,6 +1099,26 @@ let kokoroStopgapNoticed = false;   // one notice per session, not one per sente
 let kokoroStopgapActive = false;
 let kokoroCoverTimer = null;        // delay before covering — see KOKORO_COVER_DELAY_MS
 let kokoroResumeOnForeground = false; // Metal inference cannot start while iOS is backgrounded
+/* `document.hidden` changes before UIKit finishes reopening Metal. Keep the
+   authoritative native activity event separately so a visible-but-not-active
+   scene cannot submit another MLX job into the transition. The page normally
+   boots while active; subsequent transitions are reported by Swift. */
+let nativeKokoroAppActive = !NATIVE?.nativeKokoro || !document.hidden;
+let nativeKokoroBusy = false;
+let nativeKokoroBusySeconds = 0;
+let nativeKokoroBusyNoticeAt = 0;
+let nativeKokoroBusyTimer = null;
+/* A bridge cancellation settles its JavaScript promise immediately, but the
+   serial native MLX call may still be unwinding. Give every native generation
+   intent an epoch so a Play/word retarget cannot deduplicate onto the
+   cancelled promise that belonged to the previous transport action. */
+let nativeKokoroGenerationEpoch = 0;
+let nativePlayIntent = 0;
+let nativePlayActivationPending = false;
+let nativeKokoroInactiveAt = 0;
+let nativeNeuralAudioNeedsRefresh = false;
+let nativeNeuralPausedAt = 0;
+const NATIVE_AUDIO_STALE_AFTER_MS = 15000;
 
 /* ---------------- state ---------------- */
 const S = {
@@ -3181,12 +3201,7 @@ function renderHtmlInteractive(htmlText, opts = {}) {
     } else if (m.t === 'aloud:tap') {
       const wIdx = m.word | 0;
       if (!S.words[wIdx]) return;
-      primeAudioGesture();
-      pauseAll();
-      setSentence(S.words[wIdx].sent);
-      highlightWord(wIdx);
-      S.playing = true; setPlayIcon(true);
-      playCurrent(wIdx);
+      requestPlaybackFromWord(wIdx);
     } else if (m.t === 'aloud:doubletap') {
       htmlDoubleTapZoom(m.word | 0);
     } else if (m.t === 'aloud:press') {
@@ -3368,7 +3383,7 @@ function splitSentences(text) {
 }
 
 function resetDocState() {
-  kokoroResumeOnForeground = false;
+  clearNativeKokoroBusyWait();
   S.docGeneration++;
   S.neuralGenToken++;
   S.words = []; S.sentences = []; S.curSent = -1; S.curWord = -1;
@@ -3412,7 +3427,7 @@ function saveReadingProgress() {
    interrupted safely; docGeneration discards its result while the existing
    serial queue prevents a second model call from overlapping it. */
 function cancelDocumentWork() {
-  kokoroResumeOnForeground = false;
+  clearNativeKokoroBusyWait();
   kokoroStopgapActive = false;
   clearTimeout(kokoroCoverTimer);
   try { NATIVE?.kokoro?.cancelGenerations?.(); } catch {}
@@ -3437,9 +3452,13 @@ function leaveDocument({ announce = true, focusLibrary = true } = {}) {
   sleepClear();
   if (S.rsvp.open) setRsvpOpen(false);
   cancelDocumentWork();
+  /* A long iOS suspension can leave WebKit's media element alive in JS but
+     detached from a functioning media pipeline. Library is a full document
+     boundary, so this is the safe place to discard it; the next Play gesture
+     creates and primes a clean element. */
+  disposeNeuralAudio();
   resetDocState();
 
-  try { if (S.audio) { S.audio.pause(); S.audio.currentTime = 0; } } catch {}
   content.replaceChildren();
   S.mode = 'flow';
   S.lastFile = null;
@@ -3779,11 +3798,51 @@ function initNativeEngine() {
   NATIVE.onEvent = (ev) => {
     if (!ev) return;
     if (ev.type === 'voices') { adoptNativeVoices(ev.voices); return; }
-    if (ev.type === 'appActivity') {
+    if (ev.type === 'audioServicesReset') {
+      /* The media server invalidated WebKit's underlying player. Preserve the
+         reading position, but require an explicit Play gesture to rebuild and
+         reactivate audio as Apple recommends. */
+      clearNativeKokoroBusyWait();
+      pauseAll();
+      disposeNeuralAudio();
+      toast('Audio was reset by iPadOS. Tap Play to continue from this word.', 7000);
+      return;
+    }
+    if (ev.type === 'appActivity' || ev.type === 'kokoroHealth') {
+      const active = !!ev.active;
+      const becameActive = !nativeKokoroAppActive && active;
+      if (!active && !nativeKokoroInactiveAt) nativeKokoroInactiveAt = Date.now();
+      if (becameActive) {
+        const inactiveFor = nativeKokoroInactiveAt ? Date.now() - nativeKokoroInactiveAt : 0;
+        if (inactiveFor >= NATIVE_AUDIO_STALE_AFTER_MS) nativeNeuralAudioNeedsRefresh = true;
+        nativeKokoroInactiveAt = 0;
+      }
+      nativeKokoroAppActive = active;
+      nativeKokoroBusy = !!ev.kokoroBusy;
+      nativeKokoroBusySeconds = Math.max(0, Number(ev.kokoroBusySeconds) || 0);
       // Swift owns the authoritative iPad lifecycle state. Its activation
       // event cannot race ahead of the native MLX gate the way a guessed
       // visibility timeout can.
-      if (ev.active) resumeKokoroAfterForeground(0);
+      if (ev.active) {
+        /* Audio playback is independent of the MLX queue. If this page just
+           returned from suspension, re-arm/restart its existing clip even
+           when an older speculative generation is still finishing. */
+        if (becameActive && S.playing && S.engine === 'neural' && S.audioPlay && S.audio && !S.audio.ended) {
+          S.audio.playbackRate = S.rate;
+          resumePersistentNeuralAudio();
+        }
+        if (nativeKokoroBusy) {
+          /* The prior, non-interruptible MLX call is still occupying the
+             serial queue. Do not auto-resume by adding another request behind
+             it. Native emits one kokoroHealth event when that call exits. */
+          holdKokoroForBusyQueue();
+        } else {
+          clearTimeout(nativeKokoroBusyTimer);
+          nativeKokoroBusyTimer = null;
+          resumeKokoroAfterForeground(0);
+          if (S.playing && S.engine === 'neural') neuralPump();
+        }
+      } else suspendNativeKokoroWork();
       return;
     }
     const U = nativeUtter;
@@ -3816,14 +3875,26 @@ function initNativeEngine() {
 
   /* lock screen, headphones, CarPlay */
   NATIVE.remote = {
-    play:  () => { if (S.sentences.length && !S.playing) togglePlay(); },
-    pause: () => { kokoroResumeOnForeground = false; if (S.sentences.length && S.playing) togglePlay(); },
-    toggle: () => { if (S.sentences.length) togglePlay(); },
-    next:  () => { if (S.sentences.length) { kokoroResumeOnForeground = false; advanceSentence(1, true); } },
-    prev:  () => { if (S.sentences.length) { kokoroResumeOnForeground = false; advanceSentence(-1, true); } },
+    play:  () => { if (S.sentences.length && !S.playing && !nativePlayActivationPending && !kokoroResumeOnForeground) togglePlay({ allowBackground: true }); },
+    pause: () => { if (S.sentences.length && (S.playing || nativePlayActivationPending || kokoroResumeOnForeground)) togglePlay({ allowBackground: true }); },
+    toggle: () => { if (S.sentences.length) togglePlay({ allowBackground: true }); },
+    next:  () => remoteAdvanceSentence(1),
+    prev:  () => remoteAdvanceSentence(-1),
   };
 
   NATIVE.listVoices().then(adoptNativeVoices).catch(e => console.warn('native voices', e));
+}
+
+/* Lock-screen skips should retarget a busy-held Kokoro start, not cancel it.
+   S.playing is temporarily false while the native queue drains, so the
+   retained resume intent is what starts the newly selected sentence on idle. */
+function remoteAdvanceSentence(dir) {
+  if (!S.sentences.length) return;
+  /* Ordinary playback must stop the old clip/utterance before starting the
+     selected sentence. A busy-held start has S.playing=false, so it keeps its
+     queued intent and is merely retargeted for the eventual idle retry. */
+  if (S.playing) { pauseAll(); S.playing = true; }
+  advanceSentence(dir, true);
 }
 
 function updateNativeNowPlaying() {
@@ -4006,6 +4077,30 @@ const KOKORO_VOICES = [
 function clearNeuralCache() {
   S.neuralCache.forEach(c => URL.revokeObjectURL(c.url));
   S.neuralCache.clear();
+}
+
+const NEURAL_CACHE_ENTRY_LIMIT = 24;
+const NEURAL_PCM_CACHE_BUDGET = NATIVE?.nativeKokoro ? 32 * 1024 * 1024 : 64 * 1024 * 1024;
+function trimNeuralCache() {
+  const bytesOf = entry => Number(entry?.pcmBytes) ||
+    Math.max(44, Math.ceil((Number(entry?.durationSec) || 0) * 24000 * 2) + 44);
+  let bytes = 0;
+  S.neuralCache.forEach(entry => { bytes += bytesOf(entry); });
+  /* Always retain the just-created entry and the URL actively playing even if
+     one pathological sentence alone exceeds the budget. The former is about
+     to play; revoking the latter can strand WebKit mid-clip. */
+  while (S.neuralCache.size > 1 &&
+         (S.neuralCache.size > NEURAL_CACHE_ENTRY_LIMIT || bytes > NEURAL_PCM_CACHE_BUDGET)) {
+    const keys = [...S.neuralCache.keys()];
+    const newest = keys[keys.length - 1];
+    const activeUrl = S.audio?.src || '';
+    const oldest = keys.find(key => key !== newest && S.neuralCache.get(key)?.url !== activeUrl);
+    if (oldest == null) break;
+    const entry = S.neuralCache.get(oldest);
+    bytes -= bytesOf(entry);
+    URL.revokeObjectURL(entry.url);
+    S.neuralCache.delete(oldest);
+  }
 }
 
 function invalidateNeuralSpeech() {
@@ -4212,6 +4307,11 @@ async function nativeKokoroGenerateOnce(text, voice) {
 
 async function nativeKokoroGenerate(text, voice) {
   for (let attempt = 0; ; attempt++) {
+    /* Cancellation can reject the bridge promise while its non-interruptible
+       MLX call is still unwinding. Re-check before the built-in retry so Pause
+       or a lifecycle/busy transition cannot enqueue a replacement request. */
+    const gateError = nativeKokoroGenerationGateError();
+    if (gateError) throw gateError;
     try {
       return await nativeKokoroGenerateOnce(text, voice);
     } catch (error) {
@@ -4899,23 +4999,37 @@ let genTail = Promise.resolve();
 function generateNeural(sentIdx) {
   const docGeneration = S.docGeneration;
   const speechGeneration = S.speechGeneration;
+  const nativeGenerationEpoch = nativeKokoroGenerationEpoch;
   const voice = S.neuralVoice;
   const key = neuralCacheKey(sentIdx, voice, docGeneration, speechGeneration);
   const cached = S.neuralCache.get(key);
   if (cached) return Promise.resolve(cached);
-  const pending = S.neuralPending.get(key);
+  /* Cache entries survive Pause, but native in-flight promises do not: a
+     cancelled promise can reject after a new tap requests the same sentence.
+     Keeping the epoch only in the pending key preserves safe cache reuse. */
+  const pendingKey = NATIVE?.nativeKokoro ? `${key}|native:${nativeGenerationEpoch}` : key;
+  const pending = S.neuralPending.get(pendingKey);
   if (pending) return pending;
-  const job = genTail.catch(() => {}).then(() => generateNeuralNow(sentIdx, key, docGeneration, speechGeneration, voice));
+  const job = genTail.catch(() => {}).then(() => generateNeuralNow(
+    sentIdx, key, docGeneration, speechGeneration, voice, nativeGenerationEpoch
+  ));
   genTail = job.catch(() => {});
-  S.neuralPending.set(key, job);
-  job.finally(() => S.neuralPending.delete(key)).catch(() => {});
+  S.neuralPending.set(pendingKey, job);
+  job.finally(() => {
+    /* The map can be cleared and repopulated before an old job settles. Never
+       let that old finally delete a newer owner of the same pending key. */
+    if (S.neuralPending.get(pendingKey) === job) S.neuralPending.delete(pendingKey);
+  }).catch(() => {});
   return job;
 }
 
-/* keep a runway of generated sentences ahead of the listen position —
-   deeper at higher speeds, and it keeps building even while paused */
+/* Browser ONNX keeps a runway of generated sentences ahead of the listen
+   position. Native MLX deliberately generates only the sentence requested by
+   playback: speculative inference can still be inside one non-interruptible
+   Metal evaluation when the iPad is paused or backgrounded. */
 async function neuralPump() {
   if (S.pumpBusy || S.kokoro.state !== 'ready' || S.engine !== 'neural' || rsvpSilentActive()) return;
+  if (NATIVE?.nativeKokoro) return;
   S.pumpBusy = true;
   try {
     const depth = Math.min(10, 2 + Math.ceil(S.rate * 2));
@@ -4937,17 +5051,30 @@ async function neuralPump() {
    far past the limit (a factum backsheet measures 800+ phonemes). Split
    such sentences into ranges that each fit comfortably, preferring cuts
    after trailing punctuation. Returns [start, end) index pairs. */
-function kokoroChunkRanges(tokens, cap = 300) {
-  const estOf = t => {
-    const e = phonemeCache.get(spokenFor(t).toLowerCase());
-    return (e ? e.v + e.c : Math.max(2, spokenFor(t).length)) + 1;
-  };
+/* Native MLX has a much higher activation peak per phoneme than browser ONNX.
+   ~140 estimated phonemes keeps sentence chunks below the measured iPad memory
+   cliff; browser inference retains its proven 300-token packing. The existing
+   stitcher removes each extra chunk's lead pad and offsets its word timings. */
+function kokoroTokenEstimate(token) {
+  const spoken = String(spokenFor(token) || '');
+  const e = phonemeCache.get(spoken.toLowerCase());
+  if (e) return e.v + e.c + 1;
+  const letters = Array.from(spoken.normalize('NFKC')).filter(ch => /\p{L}/u.test(ch));
+  const spelledInitialism = NATIVE?.nativeKokoro && letters.length >= 8 &&
+    letters.every(ch => ch === ch.toLocaleUpperCase('en-US'));
+  /* Misaki spells unknown proper-name initialisms letter by letter. A letter
+     name such as W costs about seven phones, so raw character count is not a
+     safe native-memory estimate for long all-caps identifiers. */
+  return (spelledInitialism ? letters.length * 8 : Math.max(2, spoken.length)) + 1;
+}
+
+function kokoroChunkRanges(tokens, cap = NATIVE?.nativeKokoro ? 140 : 300) {
   const ranges = [];
   let i = 0;
   while (i < tokens.length) {
     let est = 0, cut = -1, j = i;
     for (; j < tokens.length; j++) {
-      est += estOf(tokens[j]);
+      est += kokoroTokenEstimate(tokens[j]);
       if (est > cap && j > i) break;
       if (/[,.;:!?…]["”'’)\]]*$/.test(tokens[j])) cut = j + 1;
     }
@@ -4959,14 +5086,58 @@ function kokoroChunkRanges(tokens, cap = 300) {
   return ranges;
 }
 
+/* A range can only cut between display words. Rare legal identifiers, hashes,
+   or custom pronunciations can be hundreds of characters with no whitespace,
+   leaving one display token larger than the native memory cap. Preserve all
+   of its spoken text, but synthesize it as consecutive bounded clips; the
+   display token keeps the onset of the first clip. */
+function splitOversizeKokoroToken(token, cap = NATIVE?.nativeKokoro ? 140 : 300) {
+  const spoken = String(spokenFor(token) || '').trim();
+  if (!spoken) return [];
+  const estimate = kokoroTokenEstimate;
+  if (estimate(spoken) <= cap) return [spoken];
+
+  const result = [];
+  let current = '';
+  const flush = () => { if (current) { result.push(current); current = ''; } };
+  for (const word of spoken.split(/\s+/).filter(Boolean)) {
+    if (estimate(word) > cap) {
+      flush();
+      const chars = Array.from(word);
+      const wordEstimate = estimate(word);
+      /* With G2P available, scale by its measured phone density. Without it,
+         use a conservative three-phones-per-character ceiling for acronyms. */
+      const measured = phonemeCache.has(word.toLowerCase());
+      const take = measured
+        ? Math.max(1, Math.floor(chars.length * Math.max(8, cap - 8) / wordEstimate))
+        /* Native Misaki does not populate the browser cache. A worst-case
+           initialism can say each character as a multi-phone letter name;
+           eight phones per character safely covers repeated W (about seven
+           phones in the vendored US lexicon) plus tokenizer overhead. */
+        : Math.max(1, Math.floor(Math.max(8, cap - 8) / 8));
+      for (let at = 0; at < chars.length; at += take) result.push(chars.slice(at, at + take).join(''));
+      continue;
+    }
+    const candidate = current ? `${current} ${word}` : word;
+    if (current && estimate(candidate) > cap) flush();
+    current = current ? `${current} ${word}` : word;
+  }
+  flush();
+  return result.length ? result : [spoken];
+}
+
 async function generateNeuralNow(
   sentIdx,
   key,
   docGeneration = S.docGeneration,
   speechGeneration = S.speechGeneration,
-  voice = S.neuralVoice
+  voice = S.neuralVoice,
+  nativeGenerationEpoch = nativeKokoroGenerationEpoch
 ) {
-  if (docGeneration !== S.docGeneration || speechGeneration !== S.speechGeneration)
+  const generationChanged = () =>
+    docGeneration !== S.docGeneration || speechGeneration !== S.speechGeneration ||
+    (NATIVE?.nativeKokoro && nativeGenerationEpoch !== nativeKokoroGenerationEpoch);
+  if (generationChanged())
     throw Object.assign(new Error('speech changed'), { name: 'EngineReset' });
   /* always generate at 1× — playback speed comes from pitch-preserving
      playbackRate, so word timings stay exact at ANY speed and the cache
@@ -4986,31 +5157,57 @@ async function generateNeuralNow(
      while the one-time download is genuinely in flight. 250ms used to lose
      the race on first run and silently degrade timing to syllable guesses. */
   try { await ensurePhonemes(tokens, 4000); } catch {}
-  if (docGeneration !== S.docGeneration || speechGeneration !== S.speechGeneration)
+  if (generationChanged())
     throw Object.assign(new Error('speech changed'), { name: 'EngineReset' });
   /* generate in context-window-sized chunks (usually exactly one). If a
      chunk still comes back truncated (512 ids — estimates can undershoot
      espeak's expansions), split it in half and redo just that chunk. */
-  const pending = kokoroChunkRanges(tokens);
+  const chunkCap = NATIVE?.nativeKokoro ? 140 : 300;
+  const jobsForRanges = ranges => ranges.flatMap(([a, b]) => {
+    if (b - a !== 1) return [{ a, b, text: null, timingTokens: null, continuation: false }];
+    const fragments = splitOversizeKokoroToken(tokens[a], chunkCap);
+    if (fragments.length <= 1)
+      return [{ a, b, text: null, timingTokens: null, continuation: false }];
+    return fragments.map((text, index) => ({
+      a, b, text, timingTokens: [text], continuation: index > 0,
+    }));
+  });
+  const pending = jobsForRanges(kokoroChunkRanges(tokens, chunkCap));
   const parts = [];
   while (pending.length) {
-    if (docGeneration !== S.docGeneration || speechGeneration !== S.speechGeneration)
+    if (generationChanged())
       throw Object.assign(new Error('speech changed'), { name: 'EngineReset' });
-    const [a, b] = pending.shift();
-    const ctoks = tokens.slice(a, b);
-    const text = ctoks.map(spokenFor).join(' ').trim();
+    const job = pending.shift();
+    const { a, b } = job;
+    const ctoks = job.timingTokens || tokens.slice(a, b);
+    const text = job.text ?? ctoks.map(spokenFor).join(' ').trim();
     /* nothing pronounceable (all muted, or only glyphs/punctuation): don't
        spend a model call to synthesise silence */
-    if (!text || !/[\p{L}\p{N}]/u.test(text)) { parts.push({ a, b, audio: new Float32Array(3600), sr: 24000, pwords: null, silent: true }); continue; }
+    if (!text || !/[\p{L}\p{N}]/u.test(text)) {
+      parts.push({ ...job, audio: new Float32Array(3600), sr: 24000, pwords: null, silent: true });
+      continue;
+    }
     let raw, pwords = null, nativeTokens = null, nIds = 0;
     if (S.kokoro.workerGenerate) {
       try {
+        const gateError = nativeKokoroGenerationGateError();
+        if (gateError) throw gateError;
         raw = await S.kokoro.workerGenerate(text, voice);
       } catch (err) {
         if (err?.code === 'too_many_tokens' && b - a > 1) {
           const mid = a + Math.ceil((b - a) / 2);
-          pending.unshift([a, mid], [mid, b]);
+          pending.unshift(...jobsForRanges([[a, mid], [mid, b]]));
           continue;
+        }
+        if (err?.code === 'too_many_tokens' && job.text) {
+          const smaller = splitOversizeKokoroToken(job.text, Math.max(24, Math.floor(chunkCap / 2)));
+          if (smaller.length > 1) {
+            pending.unshift(...smaller.map((fragment, index) => ({
+              a, b, text: fragment, timingTokens: [fragment],
+              continuation: job.continuation || index > 0,
+            })));
+            continue;
+          }
         }
         throw err;
       }
@@ -5026,14 +5223,14 @@ async function generateNeuralNow(
         pwords = kokoroSpokenWords(st.idChar, st.cap.ids, st.cap.dur, raw.audio.length, raw.sampling_rate);
       }
     }
-    if (docGeneration !== S.docGeneration || speechGeneration !== S.speechGeneration)
+    if (generationChanged())
       throw Object.assign(new Error('speech changed'), { name: 'EngineReset' });
     if (nIds >= 510 && b - a > 1) {
       const mid = a + Math.ceil((b - a) / 2);
-      pending.unshift([a, mid], [mid, b]);
+      pending.unshift(...jobsForRanges([[a, mid], [mid, b]]));
       continue;
     }
-    parts.push({ a, b, audio: raw.audio, sr: raw.sampling_rate, pwords, nativeTokens, timing: raw.timing || null });
+    parts.push({ ...job, audio: raw.audio, sr: raw.sampling_rate, pwords, nativeTokens, timing: raw.timing || null });
   }
   /* stitch chunks and time each one independently: model-exact word starts
      when the patched export provided the spoken words (alignExactStarts
@@ -5071,7 +5268,7 @@ async function generateNeuralNow(
     const p = parts[pi];
     const offSec = off / sr;
     const dSec = p.audio.length / sr;
-    const ctoks = tokens.slice(p.a, p.b);
+    const ctoks = p.timingTokens || tokens.slice(p.a, p.b);
     let cs = null;
     if (p.silent) cs = ctoks.map(() => 0);
     else {
@@ -5087,7 +5284,9 @@ async function generateNeuralNow(
     }
     /* cs[] is in this chunk's own time base, so shift by where the chunk
        lands in the joined clip MINUS what was cut off its front */
-    for (let k = 0; k < ctoks.length; k++) starts[p.a + k] = Math.max(offSec, cs[k] + offSec - trims[pi]);
+    if (!p.continuation) {
+      for (let k = 0; k < ctoks.length; k++) starts[p.a + k] = Math.max(offSec, cs[k] + offSec - trims[pi]);
+    }
     off += p.audio.length - skips[pi];
   }
   const durationSec = total / sr;
@@ -5100,17 +5299,13 @@ async function generateNeuralNow(
   /* silence actually present at the head of this clip — the ceiling on how
      much of it playback may skip */
   const leadSec = leadSilenceSec(audio, sr);
-  const entry = { url, starts, durationSec, timing, leadSec };
-  if (docGeneration !== S.docGeneration || speechGeneration !== S.speechGeneration) {
+  const entry = { url, starts, durationSec, timing, leadSec, pcmBytes: 44 + audio.length * 2 };
+  if (generationChanged()) {
     URL.revokeObjectURL(url);
     throw Object.assign(new Error('speech changed'), { name: 'EngineReset' });
   }
   S.neuralCache.set(key, entry);
-  if (S.neuralCache.size > 24) {
-    const oldest = S.neuralCache.keys().next().value;
-    URL.revokeObjectURL(S.neuralCache.get(oldest).url);
-    S.neuralCache.delete(oldest);
-  }
+  trimNeuralCache();
   return entry;
 }
 
@@ -5131,14 +5326,136 @@ async function generateNeuralNow(
 const SILENT_WAV = 'data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YSADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
 let NA = null;              // the persistent neural <audio>
 let audioPrimed = false;
+let neuralResumeEpoch = 0;  // invalidates a pending long-pause play watchdog
+let neuralAudioRecoveryPending = false;
+
+function cancelNativeKokoroGenerations() {
+  if (!NATIVE?.nativeKokoro) return;
+  nativeKokoroGenerationEpoch++;
+  try { NATIVE.kokoro.cancelGenerations(); } catch {}
+}
+
+function nativeKokoroCanGenerate() {
+  return !NATIVE?.nativeKokoro
+    || (nativeKokoroAppActive && !nativeKokoroBusy && !document.hidden);
+}
+
+/* A generation queued before Pause must not begin after Pause. Browser Kokoro
+   retains its existing paused runway; this gate is native-only because MLX
+   work is the operation iOS cannot safely carry across scene suspension. */
+function nativeKokoroGenerationGateError() {
+  if (!NATIVE?.nativeKokoro) return null;
+  if (!S.playing) {
+    const error = new Error('Native Kokoro generation was paused.');
+    error.name = 'EngineReset';
+    error.code = 'playback_paused';
+    error.retryable = false;
+    return error;
+  }
+  if (nativeKokoroBusy)
+    return nativeKokoroError('Kokoro is finishing earlier speech on this iPad.', 'native_busy');
+  if (!nativeKokoroAppActive || document.hidden)
+    return nativeKokoroError('Return to Aloud before creating more Kokoro speech.', 'app_inactive');
+  return null;
+}
+
+/* Throw away the WebKit media pipeline without touching the reusable Kokoro
+   sentence cache. Old-element events are ignored by identity guards installed
+   in ensureNeuralAudio(). */
+function disposeNeuralAudio() {
+  neuralResumeEpoch++;
+  nativeNeuralAudioNeedsRefresh = false;
+  nativeNeuralPausedAt = 0;
+  const old = NA;
+  const play = S.audioPlay;
+  NA = null;
+  S.audio = null;
+  S.audioPlay = null;
+  audioPrimed = false;
+  if (play?.batchUrl) { try { URL.revokeObjectURL(play.batchUrl); } catch {} }
+  if (!old) return;
+  try { old.pause(); } catch {}
+  try { old.removeAttribute('src'); old.load(); } catch {}
+}
+
+/* Pausing a not-yet-generated current sentence needs a foreground retry;
+   pausing while a real clip is playing can leave that clip alone for native
+   background audio and cancel only its speculative runway. */
+function suspendNativeKokoroWork() {
+  if (!NATIVE?.nativeKokoro) return;
+  const waitingForCurrent = S.engine === 'neural' && S.playing && !S.audioPlay;
+  if (waitingForCurrent) {
+    pauseAll();
+    kokoroResumeOnForeground = true;
+  } else cancelNativeKokoroGenerations();
+}
+
+function clearNativeKokoroBusyWait() {
+  kokoroResumeOnForeground = false;
+  clearTimeout(nativeKokoroBusyTimer);
+  nativeKokoroBusyTimer = null;
+  $('btn-play').classList.remove('loading');
+}
+
+function armNativeKokoroBusyTimeout() {
+  if (nativeKokoroBusyTimer) return;
+  nativeKokoroBusyTimer = setTimeout(() => {
+    nativeKokoroBusyTimer = null;
+    if (!kokoroResumeOnForeground || S.engine !== 'neural') {
+      $('btn-play').classList.remove('loading');
+      return;
+    }
+    /* An idle event normally consumes this intent immediately. If that event
+       was lost, do not leave a permanent spinner merely because the timeout
+       can now see that the native queue is already free. */
+    if (!nativeKokoroBusy && nativeKokoroAppActive && !document.hidden) {
+      resumeKokoroAfterForeground(0);
+      return;
+    }
+    if (!nativeKokoroAppActive || document.hidden) return; // foreground event owns it
+    clearNativeKokoroBusyWait();
+    pauseAll();
+    toast('⚠️ Native Kokoro did not recover after the iPad resumed. Your place is saved—choose the 📱 iOS voice to continue now, or reopen Aloud to restart Kokoro.', 14000);
+  }, 45000);
+}
+
+function holdKokoroForBusyQueue() {
+  if (!NATIVE?.nativeKokoro || !nativeKokoroBusy) return;
+  const waitingForCurrent = S.engine === 'neural' && S.playing && !S.audioPlay;
+  const shouldResume = waitingForCurrent || kokoroResumeOnForeground;
+  if (waitingForCurrent) pauseAll();
+  cancelNativeKokoroGenerations();
+  if (!shouldResume) return;
+  kokoroResumeOnForeground = true;
+  /* pauseAll() above restores the ordinary Play appearance, but this is not
+     an idle pause: the requested word is queued behind one non-interruptible
+     MLX call. Keep that pending intent visible until idle, timeout, or an
+     explicit transport action settles it. */
+  $('btn-play').classList.add('loading');
+  armNativeKokoroBusyTimeout();
+  const now = Date.now();
+  if (now - nativeKokoroBusyNoticeAt > 8000) {
+    nativeKokoroBusyNoticeAt = now;
+    const age = nativeKokoroBusySeconds > 1 ? ` (${nativeKokoroBusySeconds}s)` : '';
+    toast(`Kokoro is finishing earlier speech${age}. Aloud will resume when it is ready.`, 6500);
+  }
+}
 
 function handleNeuralFailure(error, invalidateAudio = false) {
   if (!S.playing || S.engine !== 'neural') return;
-  const waitForForeground = !!NATIVE?.nativeKokoro && (document.hidden || error?.code === 'app_inactive');
+  const waitForForeground = !!NATIVE?.nativeKokoro &&
+    (document.hidden || !nativeKokoroAppActive || nativeKokoroBusy ||
+     error?.code === 'app_inactive' || error?.code === 'native_busy');
   if (invalidateAudio) invalidateNeuralSpeech();
   pauseAll();
   if (waitForForeground) {
     kokoroResumeOnForeground = true;
+    if (nativeKokoroBusy) holdKokoroForBusyQueue();
+    /* The matching kokoroHealth(idle) event can overtake this rejected
+       promise. If it already did, no later lifecycle event will consume the
+       resume intent, so enqueue the one retry now. The zero-delay hop also
+       lets the rejected generation leave genTail before retrying. */
+    else if (!document.hidden && nativeKokoroAppActive) resumeKokoroAfterForeground(0);
     return;
   }
   const detail = String(error?.message || error || 'unknown error').replace(/\s+/g, ' ').slice(0, 160);
@@ -5146,12 +5463,15 @@ function handleNeuralFailure(error, invalidateAudio = false) {
 }
 
 function resumeKokoroAfterForeground(delayMs = 250) {
-  if (document.hidden || !kokoroResumeOnForeground) return;
-  kokoroResumeOnForeground = false;
+  if (document.hidden || !kokoroResumeOnForeground ||
+      (NATIVE?.nativeKokoro && (!nativeKokoroAppActive || nativeKokoroBusy))) return;
+  clearNativeKokoroBusyWait();
+  const intent = nativePlayIntent;
   /* Browser builds only have visibility state and retain a short grace period.
      The native app calls this with zero delay after Swift opens the MLX gate. */
   setTimeout(() => {
-    if (document.hidden || S.engine !== 'neural' || !S.sentences.length || S.playing) return;
+    if (intent !== nativePlayIntent || document.hidden || S.engine !== 'neural' || !S.sentences.length || S.playing ||
+        (NATIVE?.nativeKokoro && (!nativeKokoroAppActive || nativeKokoroBusy))) return;
     S.playing = true;
     setPlayIcon(true);
     playCurrent(S.curWord);
@@ -5159,31 +5479,51 @@ function resumeKokoroAfterForeground(delayMs = 250) {
 }
 
 document.addEventListener('visibilitychange', () => {
-  resumeKokoroAfterForeground(250);
+  if (document.hidden && NATIVE?.nativeKokoro) {
+    if (!nativeKokoroInactiveAt) nativeKokoroInactiveAt = Date.now();
+    nativeKokoroAppActive = false;
+    suspendNativeKokoroWork();
+  } else if (NATIVE?.nativeKokoro) {
+    /* Aggregate scenePhase can stay active while another iPad window is in
+       front, so returning to this page explicitly asks Swift to republish the
+       authoritative state instead of waiting for a transition that may not fire. */
+    try { NATIVE.refreshAppActivity?.(); } catch {}
+  } else resumeKokoroAfterForeground(250);
 });
 
 function ensureNeuralAudio() {
   if (NA) return NA;
-  NA = new Audio();
-  NA.preload = 'auto';
-  try { NA.preservesPitch = true; NA.webkitPreservesPitch = true; } catch {}
-  const syncClock = () => { const P = S.audioPlay; if (P) { P.clock.media = NA.currentTime; P.clock.wall = performance.now(); } };
-  NA.addEventListener('timeupdate', () => {
+  const na = NA = new Audio();
+  na.preload = 'auto';
+  try { na.preservesPitch = true; na.webkitPreservesPitch = true; } catch {}
+  const current = () => NA === na;
+  const syncClock = () => {
+    if (!current()) return;
+    const P = S.audioPlay;
+    if (P) { P.clock.media = na.currentTime; P.clock.wall = performance.now(); }
+  };
+  na.addEventListener('timeupdate', () => {
+    if (!current()) return;
     const P = S.audioPlay;
     /* the element only reports a moving currentTime once it is genuinely
        producing sound — that is the signal that makes wall-clock
        extrapolation safe (see naMediaPos) */
-    if (P && NA.currentTime > 0) P.rolling = true;
+    if (P && P.hasPlayed && na.currentTime > 0) {
+      P.rolling = true;
+    }
     syncClock();
   });
-  NA.addEventListener('seeked', () => { syncClock(); if (S.audioPlay) S.audioPlay.shownAbs = -1; });   // real seek → regression allowed
-  NA.addEventListener('play', () => { syncClock(); naTickStart(); });
+  na.addEventListener('seeked', () => { if (!current()) return; syncClock(); if (S.audioPlay) S.audioPlay.shownAbs = -1; });   // real seek → regression allowed
+  na.addEventListener('play', () => { if (!current()) return; syncClock(); naTickStart(); });
   /* 'playing' is the first frame of actual audio. Everything between play()
      and here was silent load/decode time, so discard any word the tick
      showed during it and restart the clock from the real position. */
-  NA.addEventListener('playing', () => {
+  na.addEventListener('playing', () => {
+    if (!current()) return;
     const P = S.audioPlay;
     if (!P) return;
+    nativeNeuralPausedAt = 0;
+    P.hasPlayed = true;
     P.rolling = true;
     P.shownAbs = -1;
     syncClock();
@@ -5193,13 +5533,18 @@ function ensureNeuralAudio() {
      predicting. 'pause' matters most — S.audioPlay outlives a pause, so
      without this a resume would extrapolate from a wall-clock stamp taken
      before the pause and jump the highlight the full 1.5s cap ahead. */
-  ['waiting', 'stalled', 'suspend', 'pause'].forEach(ev => NA.addEventListener(ev, () => {
+  ['waiting', 'stalled', 'suspend', 'pause'].forEach(ev => na.addEventListener(ev, () => {
+    if (!current()) return;
     const P = S.audioPlay;
     if (P) { P.rolling = false; syncClock(); }
   }));
-  NA.addEventListener('ended', () => {
+  na.addEventListener('ended', () => {
+    if (!current()) return;
     const P = S.audioPlay;
     if (!P) return;                                   // prime clip / stale
+    nativeNeuralPausedAt = 0;
+    nativeNeuralAudioNeedsRefresh = false;
+    if (P.hasPlayed) neuralAudioRecoveryPending = false;
     if (P.batchUrl) URL.revokeObjectURL(P.batchUrl);
     S.audioPlay = null;
     if (!S.playing || S.engine !== 'neural') return;
@@ -5213,15 +5558,17 @@ function ensureNeuralAudio() {
     if (document.hidden && !rsvpSilentActive()) { batchNext(); return; }
     advanceAfterBreather();
   });
-  NA.addEventListener('error', () => {
+  na.addEventListener('error', () => {
+    if (!current()) return;
     const P = S.audioPlay;
     if (!P) return;
+    nativeNeuralPausedAt = 0;
     if (P.batchUrl) URL.revokeObjectURL(P.batchUrl);
     S.audioPlay = null;
     handleNeuralFailure(nativeKokoroError('The generated audio could not be decoded.'), true);
   });
-  S.audio = NA;
-  return NA;
+  S.audio = na;
+  return na;
 }
 
 /* call from real user gestures: lets iOS bless the element so the delayed,
@@ -5238,6 +5585,121 @@ function primeAudioGesture() {
     /* only pause if real playback hasn't taken the element over meanwhile */
     na.play().then(() => { if (!S.audioPlay) na.pause(); }).catch(() => { audioPrimed = false; });
   } catch { audioPrimed = false; }
+}
+
+/* WebKit can preserve an Audio object's JavaScript state across a long iOS
+   suspension after its underlying media pipeline has died. play() may remain
+   pending, or even resolve, without currentTime moving. Watch every foreground
+   native start—not just a mid-sentence resume. A failed attempt rebuilds once;
+   if the replacement also cannot advance, Aloud pauses instead of recursing. */
+function armNativeNeuralAudioWatchdog(na, play, resumeWord = S.curWord) {
+  if (!NATIVE?.nativeKokoro || !na || !play || document.hidden || !nativeKokoroAppActive)
+    return null;
+  const epoch = ++neuralResumeEpoch;
+  let lastTime = Number(na.currentTime) || 0;
+  let observedPlaying = false;
+  let healthyAdvance = 0;
+  let poll = null, deadline = null, done = false;
+
+  const ownsAttempt = () => epoch === neuralResumeEpoch && NA === na &&
+    S.audioPlay === play && S.playing && S.engine === 'neural';
+  const cleanup = () => {
+    if (done) return;
+    done = true;
+    clearInterval(poll);
+    clearTimeout(deadline);
+  };
+  const recover = reason => {
+    if (!ownsAttempt() || document.hidden || !nativeKokoroAppActive) { cleanup(); return; }
+    cleanup();
+    console.warn('[Aloud] rebuilding stalled neural audio', reason || 'no media progress');
+    if (neuralAudioRecoveryPending) {
+      disposeNeuralAudio();
+      pauseAll();
+      toast('⚠️ iPadOS did not restart audio. Tap Play to try again.', 8000);
+      return;
+    }
+    neuralAudioRecoveryPending = true;
+    disposeNeuralAudio();
+    if (!S.playing || S.engine !== 'neural' || !S.sentences.length) return;
+    /* This delayed recovery is permitted by the native WKWebView configuration;
+       prime as well so the new element remains compatible with WebKit builds
+       that still track media activation per element. */
+    primeAudioGesture();
+    playCurrent(resumeWord);
+  };
+  const rearmDeadline = () => {
+    if (done) return;
+    clearTimeout(deadline);
+    const timer = setTimeout(() => {
+      if (done || deadline !== timer) return;
+      /* Timers can be delayed while WebKit's main thread is busy. Sample the
+         media clock once at the deadline so queued interval work cannot make
+         healthy audio look frozen merely because JavaScript woke up late. */
+      checkProgress();
+      if (!done && deadline === timer)
+        recover('playback did not advance for 4 seconds');
+    }, 4000);
+    deadline = timer;
+  };
+  const checkProgress = () => {
+    if (!ownsAttempt() || document.hidden || !nativeKokoroAppActive) { cleanup(); return; }
+    if (na.ended) {
+      /* A very short clip can finish between polls. If it reached `playing`,
+         the rebuilt media pipeline proved healthy and earns a fresh recovery
+         attempt for a future, unrelated suspension. */
+      if (play.hasPlayed) neuralAudioRecoveryPending = false;
+      cleanup();
+      return;
+    }
+    const now = Number(na.currentTime) || 0;
+    if (!play.hasPlayed) return;
+    /* A metadata seek can jump currentTime before the first audible frame.
+       Baseline only after `playing`, then require later advancement. Keep the
+       watchdog for the entire owned clip: a WebKit pipeline can play a brief
+       burst and freeze later, not only fail at startup. */
+    if (!observedPlaying) {
+      observedPlaying = true;
+      lastTime = now;
+      rearmDeadline();
+      return;
+    }
+    if (now < lastTime - 0.1) {                     // a legitimate media seek
+      lastTime = now;
+      healthyAdvance = 0;
+      rearmDeadline();
+    }
+    else if (!na.paused && now > lastTime + 0.025) {
+      const advanced = now - lastTime;
+      lastTime = now;
+      /* Only sustained post-`playing` advancement may clear the one-rebuild
+         latch. Cap each observation so a seek cannot authorize an endless
+         rebuild loop after a replacement merely coughs out a few frames. */
+      healthyAdvance += Math.min(advanced, 0.25);
+      if (healthyAdvance >= 0.75) {
+        neuralAudioRecoveryPending = false;
+        nativeNeuralAudioNeedsRefresh = false;
+      }
+      rearmDeadline();
+    }
+  };
+
+  poll = setInterval(checkProgress, 100);
+  rearmDeadline();
+  return { cleanup, recover };
+}
+
+function resumePersistentNeuralAudio() {
+  const na = S.audio, play = S.audioPlay;
+  if (!NATIVE?.nativeKokoro || !na || !play || document.hidden || !nativeKokoroAppActive) return false;
+  const watch = armNativeNeuralAudioWatchdog(na, play, S.curWord);
+  if (!watch) return false;
+  try {
+    Promise.resolve(na.play()).catch(error => watch.recover(error?.message || 'play() rejected'));
+  } catch (error) {
+    watch.recover(error?.message || 'play() threw');
+  }
+  return true;
 }
 
 /* browsers update audio.currentTime only ~4×/sec — far too coarse for word
@@ -5418,6 +5880,10 @@ async function speakNeural(sentIdx, fromWord) {
     entry = await generateNeural(sentIdx);
   } catch (err) {
     console.error(err);
+    /* A word tap/pause can replace this request while its native rejection is
+       still crossing the bridge. The newer genToken owns both transport and
+       spinner; an old error must not clear or pause that selected word. */
+    if (genToken !== S.neuralGenToken || S.curSent !== sentIdx || !S.playing || S.engine !== 'neural') return;
     $('btn-play').classList.remove('loading');
     if (err && err.name === 'EngineReset') return;   // deliberate teardown (quality switch) — not a playback error
     /* Never lose content. A transient native failure already received one
@@ -5440,6 +5906,7 @@ async function speakNeural(sentIdx, fromWord) {
   const P = S.audioPlay = {
     segs: [{ sentIdx, sentStart: sent.start, t0: 0, starts: entry.starts }],
     shownAbs: -1,
+    hasPlayed: false,
     rolling: false,                     // set on 'playing': audio truly started
     clock: { media: 0, wall: performance.now() },
   };
@@ -5469,14 +5936,22 @@ async function speakNeural(sentIdx, fromWord) {
   if (seekTo > 0.04 && seekTo < entry.durationSec * 0.9) {
     na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) na.currentTime = seekTo; }, { once: true });
   }
+  const audioWatch = armNativeNeuralAudioWatchdog(na, P, startFrom);
   try {
     await na.play();
   } catch (e) {
     console.warn(e);
-    if (S.audioPlay === P) S.audioPlay = null;
+    if (audioWatch && S.audioPlay === P && NA === na) {
+      audioWatch.recover(e?.message || 'play() rejected');
+      return;
+    }
+    audioWatch?.cleanup();
+    if (S.audioPlay !== P || NA !== na) return;
+    S.audioPlay = null;
     handleNeuralFailure(e);
     return;
   }
+  if (S.audioPlay !== P || NA !== na) { audioWatch?.cleanup(); return; }
   highlightWord(startFrom);
   showTimingBadge(entry.timing);
 
@@ -5569,7 +6044,7 @@ async function speakNeuralStitched(run) {
   const na = ensureNeuralAudio();
   na.pause();
   if (S.audioPlay?.batchUrl) URL.revokeObjectURL(S.audioPlay.batchUrl);
-  const playState = S.audioPlay = { segs, batchUrl: url, shownAbs: -1, rolling: false, clock: { media: 0, wall: performance.now() } };
+  const playState = S.audioPlay = { segs, batchUrl: url, shownAbs: -1, hasPlayed: false, rolling: false, clock: { media: 0, wall: performance.now() } };
   na.src = url;
   na.playbackRate = S.rate;
   setSentence(run[0]);
@@ -5578,16 +6053,28 @@ async function speakNeuralStitched(run) {
     : tms.every(t => t === 'exact') ? 'exact'
     : tms.every(t => t === 'estimated') ? 'estimated'
     : 'mixed');
+  const audioWatch = armNativeNeuralAudioWatchdog(
+    na,
+    playState,
+    segs[0]?.sentStart ?? S.curWord
+  );
   try {
     await na.play();
   } catch (e) {
     console.warn(e);
+    if (audioWatch && S.audioPlay === playState && NA === na) {
+      audioWatch.recover(e?.message || 'play() rejected');
+      return;
+    }
+    audioWatch?.cleanup();
+    if (S.audioPlay !== playState || NA !== na) return;
     if (S.audioPlay === playState) {
       S.audioPlay = null;
       URL.revokeObjectURL(url);
     }
     throw e;
   }
+  if (S.audioPlay !== playState || NA !== na) { audioWatch?.cleanup(); return; }
   neuralPump();   // keep generating ahead while the batch plays
 }
 
@@ -5739,6 +6226,9 @@ function playCurrent(fromWord) {
 
 function pauseAll() {
   S.playing = false;
+  nativePlayIntent++;
+  nativePlayActivationPending = false;
+  neuralResumeEpoch++;
   setPlayIcon(false);
   $('btn-play').classList.remove('loading');
   S.utterToken++; stopEstLoop();
@@ -5746,6 +6236,9 @@ function pauseAll() {
   if (NATIVE) { try { NATIVE.stop(); } catch {} nativeUtter = null; }
   clearTimeout(kokoroCoverTimer);   // a pause must not spawn a cover voice later
   S.neuralGenToken++;
+  cancelNativeKokoroGenerations();
+  if (S.engine === 'neural' && S.audioPlay && !nativeNeuralPausedAt)
+    nativeNeuralPausedAt = Date.now();
   if (S.audio) S.audio.pause();
   S.rsvp.token++;
   S.breatherToken++;
@@ -5812,6 +6305,7 @@ function advanceSentence(dir, keepPlaying) {
     next = (p === -1) ? (dir > 0 ? S.sentences.length : 0) : p;
   }
   if (next >= S.sentences.length) {
+    clearNativeKokoroBusyWait();
     pauseAll();
     setSentence(S.sentences.length - 1);
     toast('🏁 Finished! That’s the end of the document.');
@@ -5829,24 +6323,116 @@ function advanceSentence(dir, keepPlaying) {
   if (keepPlaying && S.playing) playCurrent();
 }
 
-function togglePlay() {
-  kokoroResumeOnForeground = false; // an explicit transport action wins over auto-resume
+function neuralCanResumeWithoutGeneration() {
+  if (S.audioPlay && S.audio && !S.audio.ended && S.audio.src) return true;
+  return S.curSent >= 0 && S.neuralCache.has(neuralCacheKey(S.curSent));
+}
+
+function beginRequestedPlayback(options) {
+  const allowBackground = !!options?.allowBackground;
+  const forceRestart = !!options?.forceRestart;
+  const nativeKokoroBlocked = NATIVE?.nativeKokoro && (document.hidden || !nativeKokoroAppActive);
+  if (S.engine === 'neural' && nativeKokoroBlocked &&
+      !(allowBackground && neuralCanResumeWithoutGeneration())) {
+    kokoroResumeOnForeground = true;
+    try { NATIVE.refreshAppActivity?.(); } catch {}
+    return;
+  }
+  neuralAudioRecoveryPending = false;
+  primeAudioGesture();
+  /* resume mid-sentence only when there's a live play (S.audioPlay) — the
+     element also carries the silent prime clip, which must not "resume" */
+  if (!forceRestart && S.engine === 'neural' && !rsvpSilentActive() && S.audioPlay && S.audio && S.audio.currentTime > 0 && !S.audio.ended && S.audio.src) {
+    S.playing = true; setPlayIcon(true);
+    S.audio.playbackRate = S.rate;
+    if (!resumePersistentNeuralAudio()) S.audio.play().catch(() => playCurrent(S.curWord));
+    neuralPump(); // Pause stopped the runway; refill it as soon as listening resumes.
+  } else {
+    playCurrent(S.curWord);
+  }
+}
+
+function requestPlaybackStart(options) {
+  const allowBackground = !!options?.allowBackground;
+  const forceRestart = !!options?.forceRestart;
+  /* A paused Audio element that crossed a long iOS suspension may retain a
+     plausible JS state while its media pipeline is dead. On the next explicit
+     foreground gesture, discard only that player (the sentence cache and word
+     position remain) so the fresh element can be blessed by this same tap. */
+  const pausedTooLong = nativeNeuralPausedAt &&
+    Date.now() - nativeNeuralPausedAt >= NATIVE_AUDIO_STALE_AFTER_MS;
+  if (!allowBackground && NATIVE?.nativeKokoro &&
+      (nativeNeuralAudioNeedsRefresh || pausedTooLong)) disposeNeuralAudio();
+  /* Preserve the iOS user-activation token before crossing the asynchronous
+     native audio-session bridge. The real sentence still waits for Swift's
+     activation acknowledgement below; this silent prime only blesses the
+     persistent WebKit player while the Play/word-tap gesture is live. */
+  primeAudioGesture();
+  if (!NATIVE?.reactivateAudio) { beginRequestedPlayback({ allowBackground, forceRestart }); return; }
+  const intent = ++nativePlayIntent;
+  nativePlayActivationPending = true;
+  $('btn-play').classList.add('loading');
+  Promise.resolve(NATIVE.reactivateAudio(allowBackground)).then(status => {
+    if (intent !== nativePlayIntent || !nativePlayActivationPending) return;
+    nativePlayActivationPending = false;
+    $('btn-play').classList.remove('loading');
+    nativeKokoroAppActive = status?.active !== false;
+    beginRequestedPlayback({ allowBackground, forceRestart });
+  }).catch(error => {
+    if (intent !== nativePlayIntent) return;
+    nativePlayActivationPending = false;
+    $('btn-play').classList.remove('loading');
+    setPlayIcon(false);
+    const detail = String(error?.message || error || 'Audio could not start.').replace(/\s+/g, ' ').slice(0, 140);
+    toast(`⚠️ ${detail} Tap Play to retry.`, 8000);
+  });
+}
+
+/* Word taps are playback gestures too. Position immediately, then use the
+   same start path as the Play button: silently prime WebKit while the gesture
+   is live, but wait for native audio-session acknowledgement before starting
+   the requested sentence. */
+function requestPlaybackFromWord(wIdx) {
+  if (!S.words[wIdx]) return;
+  clearNativeKokoroBusyWait();
+  pauseAll();
+  setSentence(S.words[wIdx].sent);
+  highlightWord(wIdx);
+  requestPlaybackStart({ forceRestart: true });
+}
+
+function togglePlay(options) {
+  const allowBackground = !!options?.allowBackground;
+  const cancelQueuedStart = kokoroResumeOnForeground;
+  clearNativeKokoroBusyWait(); // an explicit transport action wins over auto-resume
   if (!S.sentences.length) return;
+  /* Tapping the visibly waiting Play control a second time cancels that queued
+     start. Word taps take the retarget path above and create a fresh intent. */
+  if (cancelQueuedStart) { setPlayIcon(false); return; }
+  if (nativePlayActivationPending) {
+    nativePlayIntent++;
+    nativePlayActivationPending = false;
+    $('btn-play').classList.remove('loading');
+    setPlayIcon(false);
+    return;
+  }
   if (S.playing) {
-    if (S.engine === 'neural' && S.audio && !S.audio.ended) {
-      S.playing = false; setPlayIcon(false); S.audio.pause(); $('btn-play').classList.remove('loading');
+    /* A neural download-cover/future busy fallback can be speaking through
+       AVSpeechSynthesizer while the silently primed Audio element still
+       exists. In that case Pause must reach pauseAll()/NATIVE.stop rather
+       than only pausing the unrelated WebAudio element. */
+    if (S.engine === 'neural' && !nativeUtter && S.audio && !S.audio.ended) {
+      S.playing = false;
+      nativePlayIntent++;
+      neuralResumeEpoch++;
+      setPlayIcon(false);
+      if (S.audioPlay && !nativeNeuralPausedAt) nativeNeuralPausedAt = Date.now();
+      S.audio.pause();
+      cancelNativeKokoroGenerations();
+      $('btn-play').classList.remove('loading');
     } else pauseAll();
   } else {
-    primeAudioGesture();
-    /* resume mid-sentence only when there's a live play (S.audioPlay) — the
-       element also carries the silent prime clip, which must not "resume" */
-    if (S.engine === 'neural' && !rsvpSilentActive() && S.audioPlay && S.audio && S.audio.currentTime > 0 && !S.audio.ended && S.audio.src) {
-      S.playing = true; setPlayIcon(true);
-      S.audio.playbackRate = S.rate;
-      S.audio.play().catch(() => playCurrent(S.curWord));
-    } else {
-      playCurrent(S.curWord);
-    }
+    requestPlaybackStart({ allowBackground });
   }
 }
 
@@ -5866,7 +6452,7 @@ function setPlayIcon(playing) {
 
 function setEngine(engine, { prepare = true } = {}) {
   const wasPlaying = S.playing;
-  kokoroResumeOnForeground = false;
+  clearNativeKokoroBusyWait();
   pauseAll();
   S.engine = engine;
   store.set('engine', engine);
@@ -6326,13 +6912,7 @@ content.addEventListener('dblclick', e => {
 });
 function playFromWordElement(w) {
   const wIdx = +w.dataset.word;
-  const sIdx = S.words[wIdx].sent;
-  primeAudioGesture();
-  pauseAll();
-  setSentence(sIdx);
-  highlightWord(wIdx);   /* no pre-assignment — assigning S.curWord first made the guard skip the tapped word */
-  S.playing = true; setPlayIcon(true);
-  playCurrent(wIdx);
+  requestPlaybackFromWord(wIdx);
 }
 content.addEventListener('click', e => {
   if (suppressClick) { suppressClick = false; clearTimeout(htmlTapTimer); htmlTapTimer = null; return; }
@@ -6769,18 +7349,95 @@ applyFont();
    uploaded anywhere) so the home screen can offer one-tap Continue.
    ==================================================================== */
 const idb = {
-  open() {
-    return this._p ||= new Promise((res, rej) => {
-      const r = indexedDB.open('aloud', 1);
-      r.onupgradeneeded = () => r.result.createObjectStore('files');
-      r.onsuccess = () => res(r.result);
-      r.onerror = () => rej(r.error);
-    });
+  _p: null,
+  _db: null,
+  _generation: 0,
+  invalidate(db = this._db) {
+    /* A late failure from an old suspended transaction must not tear down a
+       newer connection (or an in-flight reconnect whose _db is still null). */
+    if (db && this._db !== db) {
+      try { db.close(); } catch {}
+      return;
+    }
+    this._generation++;
+    if (!db || this._db === db) this._db = null;
+    this._p = null;
+    try { db?.close(); } catch {}
   },
-  async put(key, val) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('files', 'readwrite'); t.objectStore('files').put(val, key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
-  async get(key) { const db = await this.open(); return new Promise((res, rej) => { const q = db.transaction('files').objectStore('files').get(key); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
-  async del(key) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('files', 'readwrite'); t.objectStore('files').delete(key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
-  async keys() { const db = await this.open(); return new Promise((res, rej) => { const q = db.transaction('files').objectStore('files').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
+  open() {
+    if (this._p) return this._p;
+    const generation = this._generation;
+    const promise = new Promise((res, rej) => {
+      const r = indexedDB.open('aloud', 1);
+      const timer = setTimeout(() => {
+        if (this._p === promise) this.invalidate();
+        rej(new Error('The document library took too long to open.'));
+      }, 4000);
+      r.onupgradeneeded = () => r.result.createObjectStore('files');
+      r.onsuccess = () => {
+        clearTimeout(timer);
+        const db = r.result;
+        if (generation !== this._generation || this._p !== promise) {
+          try { db.close(); } catch {}
+          rej(new Error('The document library connection was replaced.'));
+          return;
+        }
+        this._db = db;
+        db.onclose = () => { if (this._db === db) this.invalidate(db); };
+        db.onversionchange = () => this.invalidate(db);
+        res(db);
+      };
+      r.onerror = () => {
+        clearTimeout(timer);
+        if (this._p === promise) this._p = null;
+        rej(r.error || new Error('The document library could not open.'));
+      };
+    });
+    this._p = promise;
+    /* Also release a synchronously rejected open (for example SecurityError).
+       Every caller may observe the same rejected promise, but only that exact
+       cached promise is cleared; none of them may cancel a newer reconnect. */
+    promise.catch(() => { if (this._p === promise) this._p = null; });
+    return promise;
+  },
+  async tx(mode, action, retry = true) {
+    let db;
+    try {
+      db = await this.open();
+      return await new Promise((res, rej) => {
+        let settled = false, result;
+        const transaction = db.transaction('files', mode);
+        const request = action(transaction.objectStore('files'));
+        const finish = (ok, value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          ok ? res(value) : rej(value);
+        };
+        const timer = setTimeout(() => {
+          try { transaction.abort(); } catch {}
+          this.invalidate(db);
+          finish(false, new Error('The document library stopped responding.'));
+        }, 4000);
+        request.onsuccess = () => { result = request.result; };
+        request.onerror = () => finish(false, request.error || transaction.error);
+        transaction.oncomplete = () => finish(true, result);
+        transaction.onabort = () => finish(false, transaction.error || new Error('The document library operation was cancelled.'));
+        transaction.onerror = () => finish(false, transaction.error || new Error('The document library operation failed.'));
+      });
+    } catch (error) {
+      /* open() owns cleanup when no connection was acquired. Concurrent
+         callers share that failed promise, so letting each one invalidate an
+         already-started retry would make recovery livelock. */
+      if (db) this.invalidate(db);
+      if (retry) return this.tx(mode, action, false);
+      throw error;
+    }
+  },
+  put(key, val) { return this.tx('readwrite', store => store.put(val, key)); },
+  get(key) { return this.tx('readonly', store => store.get(key)); },
+  del(key) { return this.tx('readwrite', store => store.delete(key)); },
+  keys() { return this.tx('readonly', store => store.getAllKeys()); },
 };
 /* How many files the Continue list remembers. The list itself is a handful of
    strings per file; the expensive part is the re-openable COPY (see

@@ -109,6 +109,24 @@ nonisolated final class BARTModel: Module {
   }
     
   func generate(inputIds: MLXArray, maxLength: Int = 50, temperature: Float = 1.0) -> MLXArray {
+    // Preserve MisakiSwift's original nonthrowing API for callers that do not
+    // need lifecycle cancellation.
+    try! generate(
+      inputIds: inputIds,
+      maxLength: maxLength,
+      temperature: temperature,
+      checkpoint: {}
+    )
+  }
+
+  func generate(
+    inputIds: MLXArray,
+    maxLength: Int = 50,
+    temperature: Float = 1.0,
+    checkpoint: () throws -> Void
+  ) throws -> MLXArray {
+    try checkpoint()
+
     // Encode input
     let encoderOutput = encode(inputIds)
     
@@ -130,6 +148,8 @@ nonisolated final class BARTModel: Module {
       let scaledLogits = nextTokenLogits / temperature
       
       // Sample next token, take the max probability value
+      // MLX graphs are lazy: this item() is the actual evaluation boundary.
+      try checkpoint()
       let nextToken = scaledLogits.argMax().item(Int32.self)
       
       // Stop if EOS token

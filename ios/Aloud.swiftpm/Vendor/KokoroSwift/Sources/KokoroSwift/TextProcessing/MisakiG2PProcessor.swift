@@ -37,6 +37,14 @@ final class MisakiG2PProcessor : G2PProcessor {
     guard let misaki else { throw G2PProcessorError.processorNotInitialized }
     return misaki.phonemize(text: input)
   }
+
+  func process(
+    input: String,
+    checkpoint: () throws -> Void
+  ) throws -> (String, [MToken]?) {
+    guard let misaki else { throw G2PProcessorError.processorNotInitialized }
+    return try misaki.phonemize(text: input, checkpoint: checkpoint)
+  }
 }
 
 #endif

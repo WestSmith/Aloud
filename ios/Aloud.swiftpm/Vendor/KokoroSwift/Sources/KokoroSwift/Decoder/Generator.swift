@@ -32,13 +32,15 @@ class Generator {
     numKernels = resblockKernelSizes.count
     numUpsamples = upsampleRates.count
 
-    let upsampleScaleNum = MLX.product(MLXArray(upsampleRates)) * genIstftHopSize
-    let upsampleScaleNumVal: Int = upsampleScaleNum.item()
+    // These are static architecture constants, not tensors. Keeping their
+    // exact integer products in Swift avoids three unnecessary lazy MLX
+    // evaluations while the model is being opened.
+    let upsampleScaleNumVal = upsampleRates.reduce(genIstftHopSize, *)
 
     mSource = SourceModuleHnNSF(
       weights: weights,
       samplingRate: KokoroTTS.Constants.samplingRate,
-      upsampleScale: upsampleScaleNum.item(),
+      upsampleScale: Float(upsampleScaleNumVal),
       harmonicNum: 8,
       voicedThreshold: 10
     )
@@ -79,7 +81,7 @@ class Generator {
 
       let cCur = ch
       if i + 1 < upsampleRates.count {
-        let strideF0: Int = MLX.product(MLXArray(upsampleRates)[(i + 1)...]).item()
+        let strideF0 = upsampleRates[(i + 1)...].reduce(1, *)
         noiseConvs.append(
           Conv1dInference(
             inputChannels: genIstftNFft + 2,

@@ -23,7 +23,7 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
     /// Emits JSON-ready events back to the web app.
     var onEvent: (([String: Any]) -> Void)?
 
-    private let synthesizer = AVSpeechSynthesizer()
+    private var synthesizer = AVSpeechSynthesizer()
 
     /// Tokens belong to utterance objects, not to the synthesizer as a whole.
     /// A cancellation callback from an outgoing utterance can arrive after its
@@ -93,6 +93,21 @@ final class NativeSpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
     func resume() {
         guard synthesizer.isPaused else { return }
         synthesizer.continueSpeaking()
+    }
+
+    /// A media-server restart orphans AVSpeechSynthesizer just like any other
+    /// audio player. Recreate it in place and discard callbacks belonging to
+    /// utterances the reset made impossible to finish.
+    func resetAfterMediaServicesReset() {
+        let orphaned = synthesizer
+        orphaned.delegate = nil
+        if orphaned.isSpeaking || orphaned.isPaused {
+            orphaned.stopSpeaking(at: .immediate)
+        }
+        tokens.removeAll()
+        let replacement = AVSpeechSynthesizer()
+        replacement.delegate = self
+        synthesizer = replacement
     }
 
     /// Every selectable installed voice, richest first, for the voice picker.

@@ -69,6 +69,13 @@ final class NativeKokoroEngine {
     }
 
     private let queue = DispatchQueue(label: "com.westsmith.aloud.kokoro", qos: .userInitiated)
+    // Lifecycle/health events must never wait behind the MLX queue. Keeping
+    // their own serial order also guarantees that a foreground `busy` report is
+    // delivered before the matching one-shot `idle` report.
+    private let lifecycleEventQueue = DispatchQueue(
+        label: "com.westsmith.aloud.kokoro.lifecycle-events",
+        qos: .userInitiated
+    )
     private let cancellationLock = NSLock()
     private var cancelledRequestIDs = Set<String>()
     private let activityLock = NSLock()
@@ -76,6 +83,13 @@ final class NativeKokoroEngine {
     // hashing a model. That lets the next safe checkpoint see the transition
     // before it submits new Metal work. Default closed protects cold launch.
     private var appActive = false
+    private let healthLock = NSLock()
+    // This deliberately describes only a generation after it enters its
+    // non-interruptible MLX section, not ordinary work waiting on `queue`.
+    // Lifecycle diagnostics must remain readable even when that serial queue is
+    // itself the thing being diagnosed.
+    private var generationStartedAt: Date?
+    private var reportIdleWhenGenerationFinishes = false
 
     // Accessed only on `queue`.
     private var state: State = .idle
@@ -107,26 +121,35 @@ final class NativeKokoroEngine {
     /// UIKit/SwiftUI lifecycle code must set this false as soon as the app
     /// resigns active. iOS rejects newly submitted Metal command buffers while
     /// an app is in the background, even when background audio is enabled.
-    func setAppActive(_ active: Bool) {
+    func setAppActive(_ active: Bool, publishEvenIfUnchanged: Bool = false) {
         activityLock.lock()
         let changed = appActive != active
         appActive = active
         activityLock.unlock()
 
+        // Do not enqueue the lifecycle event behind model verification or MLX
+        // inference. JavaScript needs the foreground signal in order to recover
+        // its transport, and `appActive` above is already the authoritative gate
+        // before this event can cross the bridge.
+        /* Bridge commands such as generate and audio reactivation refresh this
+           value defensively. They must not masquerade as lifecycle changes:
+           an unchanged busy report can overtake the command's reply and make
+           JavaScript cancel the fresh request it just started. Only real
+           transitions and an explicit health refresh publish an event. */
+        let health = (changed || publishEvenIfUnchanged)
+            ? publishActivity(active)
+            : (busy: false, busySeconds: 0)
+        if changed {
+            let detail = health.busy ? " (MLX busy for \(health.busySeconds)s)" : ""
+            print("[Aloud] Native Kokoro app activity: \(active ? "active" : "inactive")\(detail)")
+        }
+
         queue.async { [weak self] in
             guard let self else { return }
             // A newer lifecycle callback may have overtaken this queued work
-            // while hashing or inference occupied the serial queue. Emit and
-            // act only on the current authoritative value, never a stale event.
+            // while hashing or inference occupied the serial queue. Act only
+            // on the current authoritative value, never a stale event.
             guard self.isAppActive == active else { return }
-
-            if changed {
-                print("[Aloud] Native Kokoro app activity: \(active ? "active" : "inactive")")
-            }
-            // The web reader can use this authoritative native event instead of
-            // guessing from WKWebView visibility, which precedes UIKit's active
-            // transition on a physical iPad.
-            self.emitEvent(["type": "appActivity", "active": active])
 
             guard self.state == .waitingForForeground else { return }
             guard !self.waitingPrepareIDs.isEmpty else {
@@ -170,8 +193,25 @@ final class NativeKokoroEngine {
     }
 
     func generate(requestID: String, text: String, voiceName: String) {
+        // Reject at the bridge boundary as well as on the serial queue below.
+        // This keeps requests made during suspension from accumulating behind a
+        // long inference and makes the page's foreground retry settle promptly.
+        guard isAppActive else {
+            replyFailure(
+                requestID: requestID,
+                code: "app_inactive",
+                message: "Return to Aloud before creating more Kokoro speech.",
+                retryable: true
+            )
+            return
+        }
+
         queue.async { [weak self] in
             guard let self else { return }
+            var generationWasStarted = false
+            defer {
+                if generationWasStarted { self.markGenerationFinished() }
+            }
             guard !self.consumeCancellation(requestID) else { return }
             guard self.state == .ready, let tts = self.tts else {
                 self.replyFailure(
@@ -233,12 +273,34 @@ final class NativeKokoroEngine {
                         retryable: true
                     )
                 }
+                // Pause/background cancellation can race the validation and
+                // progress work above. This is the first checkpoint; the
+                // vendored pipeline repeats it immediately before each forced
+                // lazy MLX evaluation.
+                guard !self.consumeCancellation(requestID) else { return }
                 let language: Language = voiceName.lowercased().hasPrefix("b") ? .enGB : .enUS
+                self.markGenerationStarted()
+                generationWasStarted = true
                 let (samples, tokens) = try tts.generateAudio(
                     voice: voice,
                     language: language,
                     text: cleanText,
-                    speed: 1.0
+                    speed: 1.0,
+                    checkpoint: {
+                        // Observe cancellation without consuming its tombstone.
+                        // The catch below remains the generation's one terminal
+                        // consumer and the queued cancel cleanup stays idempotent.
+                        if self.isCancellationPending(requestID) {
+                            throw NativeKokoroGenerationCancelled()
+                        }
+                        guard self.isAppActive else {
+                            throw NativeKokoroFailure(
+                                code: "app_inactive",
+                                message: "Return to Aloud before creating more Kokoro speech.",
+                                retryable: true
+                            )
+                        }
+                    }
                 )
 
                 guard !samples.isEmpty else {
@@ -281,6 +343,9 @@ final class NativeKokoroEngine {
                 )
                 if !delivered { try? FileManager.default.removeItem(at: finalURL) }
                 self.trimAudioCache(keeping: 32)
+            } catch is NativeKokoroGenerationCancelled {
+                _ = self.consumeCancellation(requestID)
+                return
             } catch KokoroTTS.KokoroTTSError.tooManyTokens {
                 self.replyFailure(
                     requestID: requestID,
@@ -307,7 +372,8 @@ final class NativeKokoroEngine {
     }
 
     /// MLX calls cannot be interrupted safely in the middle of a GPU kernel.
-    /// Cancellation therefore makes the eventual result stale and deletes it.
+    /// Cancellation is observed at the next vendor evaluation checkpoint; a
+    /// kernel already in flight still runs to its natural completion.
     func cancel(requestID: String) {
         cancellationLock.lock()
         cancelledRequestIDs.insert(requestID)
@@ -894,6 +960,14 @@ final class NativeKokoroEngine {
         return cancelledRequestIDs.remove(requestID) != nil
     }
 
+    /// Read-only counterpart used by checkpoints inside the vendored pipeline.
+    /// It deliberately leaves the tombstone for the generation's catch path.
+    private func isCancellationPending(_ requestID: String) -> Bool {
+        cancellationLock.lock()
+        defer { cancellationLock.unlock() }
+        return cancelledRequestIDs.contains(requestID)
+    }
+
     private func clearCancellation(_ requestID: String) {
         cancellationLock.lock()
         cancelledRequestIDs.remove(requestID)
@@ -904,6 +978,61 @@ final class NativeKokoroEngine {
         activityLock.lock()
         defer { activityLock.unlock() }
         return appActive
+    }
+
+    /// Lock-only health data for lifecycle logging and the `appActivity` bridge
+    /// event. Reading it never waits for the MLX queue, so a value that remains
+    /// busy across a foreground transition is useful evidence of a stranded
+    /// native inference without adding a new bridge command.
+    @discardableResult
+    private func publishActivity(_ active: Bool) -> (busy: Bool, busySeconds: Int) {
+        healthLock.lock()
+        defer { healthLock.unlock() }
+        let busySeconds = generationStartedAt.map {
+            max(0, Int(Date().timeIntervalSince($0)))
+        } ?? 0
+        let busy = generationStartedAt != nil
+        if active && busy {
+            reportIdleWhenGenerationFinishes = true
+        } else if !active {
+            reportIdleWhenGenerationFinishes = false
+        }
+
+        // Enqueue while holding healthLock. markGenerationFinished uses the
+        // same lock before enqueuing `kokoroHealth`, preserving busy -> idle
+        // delivery order without ever invoking an event handler under a lock.
+        let event: [String: Any] = [
+            "type": "appActivity",
+            "active": active,
+            "kokoroBusy": busy,
+            "kokoroBusySeconds": busySeconds,
+        ]
+        lifecycleEventQueue.async { [weak self] in self?.emitEvent(event) }
+        return (busy, busySeconds)
+    }
+
+    private func markGenerationStarted() {
+        healthLock.lock()
+        generationStartedAt = Date()
+        healthLock.unlock()
+    }
+
+    private func markGenerationFinished() {
+        healthLock.lock()
+        generationStartedAt = nil
+        let shouldReportIdle = reportIdleWhenGenerationFinishes && isAppActive
+        reportIdleWhenGenerationFinishes = false
+        if shouldReportIdle {
+            let event: [String: Any] = [
+                "type": "kokoroHealth",
+                "active": true,
+                "busy": false,
+                "kokoroBusy": false,
+                "kokoroBusySeconds": 0,
+            ]
+            lifecycleEventQueue.async { [weak self] in self?.emitEvent(event) }
+        }
+        healthLock.unlock()
     }
 
     /// A prior process cannot still be serving these files, but another live
@@ -949,6 +1078,8 @@ final class NativeKokoroEngine {
         }
     }
 }
+
+private struct NativeKokoroGenerationCancelled: Error {}
 
 private struct NativeKokoroFailure: LocalizedError {
     let code: String

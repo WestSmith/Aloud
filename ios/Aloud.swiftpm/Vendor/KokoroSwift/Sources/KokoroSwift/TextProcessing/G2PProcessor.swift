@@ -27,4 +27,25 @@ protocol G2PProcessor {
   /// - Returns: A phonetic string representation of the input text and optionally arrays of tokens.
   /// - Throws: `G2PProcessorError.processorNotInitialized` if `setLanguage(_:)` has not been called.
   func process(input: String) throws -> (String, [MToken]?)
+
+  /// Converts input text while checking lifecycle/cancellation before any
+  /// implementation-specific forced model evaluations.
+  func process(
+    input: String,
+    checkpoint: () throws -> Void
+  ) throws -> (String, [MToken]?)
+}
+
+extension G2PProcessor {
+  /// Non-MLX processors inherit a compatible checkpoint wrapper. Misaki
+  /// overrides this so its fallback model can check between decoder steps.
+  func process(
+    input: String,
+    checkpoint: () throws -> Void
+  ) throws -> (String, [MToken]?) {
+    try checkpoint()
+    let result = try process(input: input)
+    try checkpoint()
+    return result
+  }
 }

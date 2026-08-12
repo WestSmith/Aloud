@@ -78,6 +78,7 @@ struct WebViewContainer: UIViewRepresentable {
         private let shellOrigin: URL
         private let onFatalError: (String) -> Void
         private var kokoroEventHandlerID: UUID?
+        private var audioResetHandlerID: UUID?
 
         init(shellOrigin: URL, onFatalError: @escaping (String) -> Void) {
             self.shellOrigin = shellOrigin
@@ -102,6 +103,13 @@ struct WebViewContainer: UIViewRepresentable {
             AudioSession.shared.onTogglePlayPause = { [weak self] in self?.remote("toggle") }
             AudioSession.shared.onNextTrack = { [weak self] in self?.remote("next") }
             AudioSession.shared.onPreviousTrack = { [weak self] in self?.remote("prev") }
+            if audioResetHandlerID == nil {
+                audioResetHandlerID = AudioSession.shared.addMediaServicesResetHandler { [weak self] in
+                    guard let self else { return }
+                    self.speech.resetAfterMediaServicesReset()
+                    self.emit(["type": "audioServicesReset"])
+                }
+            }
         }
 
         func detach() {
@@ -116,11 +124,18 @@ struct WebViewContainer: UIViewRepresentable {
             AudioSession.shared.onTogglePlayPause = nil
             AudioSession.shared.onNextTrack = nil
             AudioSession.shared.onPreviousTrack = nil
+            if let audioResetHandlerID {
+                AudioSession.shared.removeMediaServicesResetHandler(audioResetHandlerID)
+                self.audioResetHandlerID = nil
+            }
         }
 
         deinit {
             if let kokoroEventHandlerID {
                 kokoro.removeEventHandler(kokoroEventHandlerID)
+            }
+            if let audioResetHandlerID {
+                AudioSession.shared.removeMediaServicesResetHandler(audioResetHandlerID)
             }
         }
 
@@ -168,6 +183,28 @@ struct WebViewContainer: UIViewRepresentable {
 
             case "clearNowPlaying":
                 AudioSession.shared.clearNowPlaying()
+
+            case "reactivateAudio":
+                // This command is sent from an explicit Play action. In
+                // particular, it is the user-authorized activation point after
+                // a rare media-services reset.
+                let requestID = body["requestId"] as? String ?? ""
+                let appActive = UIApplication.shared.applicationState == .active
+                let allowBackground = body["allowBackground"] as? Bool ?? false
+                kokoro.setAppActive(appActive)
+                let ok = (appActive || allowBackground) && AudioSession.shared.reactivate()
+                emit([
+                    "type": "audioSessionReply",
+                    "requestId": requestID,
+                    "ok": ok,
+                    "active": appActive,
+                ])
+
+            case "refreshAppActivity":
+                kokoro.setAppActive(
+                    UIApplication.shared.applicationState == .active,
+                    publishEvenIfUnchanged: true
+                )
 
             case "kokoroPrepare":
                 guard let requestID = body["requestId"] as? String else { return }

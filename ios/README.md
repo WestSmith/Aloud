@@ -1,6 +1,6 @@
 # Aloud for iPad / iPhone
 
-Aloud v6.22.0 runs the full Kokoro voice model natively with Apple MLX. The
+Aloud v6.24.1 runs the full Kokoro voice model natively with Apple MLX. The
 reader, library, PDF/HTML views and visual design remain the same as the PWA,
 but the large model no longer loads or performs inference inside WebKit.
 
@@ -117,8 +117,11 @@ The iOS package vendors two small source packages:
 - MisakiSwift 1.0.6 at
   `6835a1ce4a8854075c89f18ff75c74b13ef58e15`
 
-Their inference code and resource bytes are unchanged. Their app-local package
-manifests use automatic/static linkage and copy resources under the non-reserved
+Their resource bytes and inference math are unchanged. The vendored
+KokoroSwift snapshot has one lifecycle-efficiency repair: convolution bias
+reshapes remain local to an inference instead of accumulating as retained lazy
+MLX graph nodes across sentences. Their app-local package manifests use
+automatic/static linkage and copy resources under the non-reserved
 `ModelResources` name; five bundle lookups use that renamed directory. This
 preserves every model byte while avoiding Xcode's invalid flat-bundle signature.
 The remote dependency graph includes a Swift 6.2 manifest, which is another

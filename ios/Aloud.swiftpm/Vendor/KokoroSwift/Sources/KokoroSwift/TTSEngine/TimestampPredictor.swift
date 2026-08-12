@@ -9,7 +9,11 @@ import MLXUtilsLibrary
 class TimestampPredictor {
   private init() {}
   
-  static func preditTimestamps(tokens: [MToken], predictionDuration: MLXArray) {
+  static func preditTimestamps(
+    tokens: [MToken],
+    predictionDuration: MLXArray,
+    checkpoint: () throws -> Void = {}
+  ) throws {
     /*
      Multiply by 600 to go from pred_dur frames to sample_rate 24000.
      Equivalent to dividing pred_dur frames by 40 to get timestamp in seconds.
@@ -26,6 +30,7 @@ class TimestampPredictor {
     // This way we can cut space characters in half
     // TO_DO: Is -3 an appropriate offset?
     var left: Float = 0
+    try checkpoint()
     var right: Float = 2 * max(0, predictionDuration[0].item() - 3)
     left = right
 
@@ -41,7 +46,9 @@ class TimestampPredictor {
       if t.phonemes == nil {
         if !t.whitespace.isEmpty {
           i += 1
+          try checkpoint()
           left = right + predictionDuration[i].item()
+          try checkpoint()
           right = left + predictionDuration[i].item()
           i += 1
         }
@@ -54,8 +61,15 @@ class TimestampPredictor {
       }
 
       t.start_ts = Double(left / magicDivisor)
+      try checkpoint()
       let tokenDuration: Float = predictionDuration[i..<j].sum().item()
-      let spaceDuration: Float = t.whitespace.isEmpty ? 0.0 : predictionDuration[j].item()
+      let spaceDuration: Float
+      if t.whitespace.isEmpty {
+        spaceDuration = 0.0
+      } else {
+        try checkpoint()
+        spaceDuration = predictionDuration[j].item()
+      }
       left = right + (2.0 * tokenDuration) + spaceDuration
       t.end_ts = Double(left / magicDivisor)
       right = left + spaceDuration

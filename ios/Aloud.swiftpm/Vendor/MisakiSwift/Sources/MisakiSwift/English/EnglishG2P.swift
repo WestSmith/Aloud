@@ -395,6 +395,18 @@ final public class EnglishG2P {
    
   // Turns the text into phonemes that can then be fed to text-to-speech (TTS) engine for converting to audio
   public func phonemize(text: String, performPreprocess: Bool = true) -> (String, [MToken]) {
+    // Preserve MisakiSwift's original nonthrowing API. The no-op callback
+    // cannot throw, while the overload below lets Kokoro stop between MLX
+    // fallback evaluations.
+    try! phonemize(text: text, performPreprocess: performPreprocess, checkpoint: {})
+  }
+
+  public func phonemize(
+    text: String,
+    performPreprocess: Bool = true,
+    checkpoint: () throws -> Void
+  ) throws -> (String, [MToken]) {
+    try checkpoint()
     let pre: PreprocessTuple
     if performPreprocess {
         pre = self.preprocess(text: text)
@@ -409,6 +421,7 @@ final public class EnglishG2P {
     
     var ctx = TokenContext()
     for i in stride(from: words.count - 1, through: 0, by: -1) {
+      try checkpoint()
       if let w = words[i] as? MToken {
         if w.phonemes == nil {
           let out = lexicon.transcribe(w, ctx: ctx)
@@ -417,7 +430,7 @@ final public class EnglishG2P {
         }
         
         if w.phonemes == nil {
-          let out = fallback(w)
+          let out = try fallback(w, checkpoint: checkpoint)
           w.phonemes = out.0
           w.`_`.rating = out.1
         }
@@ -464,7 +477,7 @@ final public class EnglishG2P {
         if shouldFallback {
           let token = mergeTokens(arr)
           let first = arr[0]
-          let out = fallback(token)
+          let out = try fallback(token, checkpoint: checkpoint)
           first.phonemes = out.0
           first.`_`.rating = out.1
           arr[0] = first

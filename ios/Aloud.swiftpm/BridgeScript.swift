@@ -31,6 +31,25 @@ enum BridgeScript {
         : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
       var nextKokoroRequest = 1;
       var pendingKokoro = Object.create(null);
+      var nextAudioSessionRequest = 1;
+      var pendingAudioSession = Object.create(null);
+
+      var audioSessionRequest = function (allowBackground) {
+        return new Promise(function (resolve, reject) {
+          var requestId = pageNonce + ':audio:' + (nextAudioSessionRequest++);
+          var timer = setTimeout(function () {
+            if (!pendingAudioSession[requestId]) return;
+            delete pendingAudioSession[requestId];
+            reject(new Error('The iPad audio session did not reactivate in time.'));
+          }, 5000);
+          pendingAudioSession[requestId] = { resolve: resolve, reject: reject, timer: timer };
+          if (!post({ cmd: 'reactivateAudio', requestId: requestId, allowBackground: !!allowBackground })) {
+            clearTimeout(timer);
+            delete pendingAudioSession[requestId];
+            reject(new Error('The native audio bridge is unavailable.'));
+          }
+        });
+      };
 
       var cancelKokoroRequests = function (matches, message, code) {
         Object.keys(pendingKokoro).forEach(function (requestId) {
@@ -104,6 +123,12 @@ enum BridgeScript {
         clearNowPlaying: function () {
           post({ cmd: 'clearNowPlaying' });
         },
+        reactivateAudio: function (allowBackground) {
+          return audioSessionRequest(allowBackground);
+        },
+        refreshAppActivity: function () {
+          post({ cmd: 'refreshAppActivity' });
+        },
 
         /* Full-quality Kokoro generation runs in Swift/MLX. Only a temporary
            local WAV URL and token timestamps cross this boundary. */
@@ -137,6 +162,15 @@ enum BridgeScript {
         remote:  { play: function () {}, pause: function () {}, toggle: function () {}, next: function () {}, prev: function () {} },
 
         _emit: function (ev) {
+          if (ev && ev.type === 'audioSessionReply') {
+            var audioPending = pendingAudioSession[ev.requestId];
+            if (!audioPending) return;
+            delete pendingAudioSession[ev.requestId];
+            clearTimeout(audioPending.timer);
+            if (ev.ok) audioPending.resolve({ active: !!ev.active });
+            else audioPending.reject(new Error('The iPad audio session could not be activated.'));
+            return;
+          }
           if (ev && ev.type === 'kokoroProgress') {
             try { bridge.kokoro.onProgress(ev); } catch (e) { console.warn('[aloud-native] Kokoro progress', e); }
             return;
@@ -191,6 +225,12 @@ enum BridgeScript {
       Object.defineProperty(window, '__aloudNative', { value: bridge, writable: false, configurable: false });
 
       addEventListener('pagehide', function () {
+        Object.keys(pendingAudioSession).forEach(function (requestId) {
+          var pending = pendingAudioSession[requestId];
+          clearTimeout(pending.timer);
+          pending.reject(new Error('The reader page was closed.'));
+          delete pendingAudioSession[requestId];
+        });
         cancelKokoroRequests(
           function () { return true; },
           'The reader page was closed.',

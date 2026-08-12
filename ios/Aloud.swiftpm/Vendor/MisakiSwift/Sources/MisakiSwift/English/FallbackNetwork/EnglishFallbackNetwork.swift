@@ -64,9 +64,20 @@ final class EnglishFallbackNetwork {
   }
   
   func callAsFunction(_ word: MToken) -> (phoneme: String, rating: Int) {
+    // Preserve the original nonthrowing API for callers without a lifecycle
+    // checkpoint. The no-op callback cannot throw.
+    try! callAsFunction(word, checkpoint: {})
+  }
+
+  func callAsFunction(
+    _ word: MToken,
+    checkpoint: () throws -> Void
+  ) throws -> (phoneme: String, rating: Int) {
+    try checkpoint()
     let tokenIds = graphemesToTokens(word.text)
     let inputIds = MLXArray(tokenIds).reshaped([1, tokenIds.count])
-    let generatedIds = model.generate(inputIds: inputIds)
+    let generatedIds = try model.generate(inputIds: inputIds, checkpoint: checkpoint)
+    try checkpoint()
     let outputText = tokensToPhonemes(generatedIds.asArray(Int.self))
     
     return (outputText, 1)

@@ -1,3 +1,41 @@
+# native-lifecycle-selfcheck
+
+Exercises the production native-iOS pause/foreground gates, conservative MLX
+chunking, bounded PCM cache, and persistent-audio resume watchdog without an
+iPad or model download.
+
+```sh
+node tools/native-lifecycle-selfcheck.mjs
+```
+
+# native-kokoro-memory-selfcheck
+
+Guards the vendored weighted-convolution repair that prevents stored bias
+tensors from retaining another lazy reshape node after every sentence.
+
+```sh
+node tools/native-kokoro-memory-selfcheck.mjs
+```
+
+# native-kokoro-checkpoint-selfcheck
+
+Guards the non-consuming cancellation/activity checkpoint from the native
+engine through Kokoro and Misaki, including every forced MLX evaluation in the
+generation path.
+
+```sh
+node tools/native-kokoro-checkpoint-selfcheck.mjs
+```
+
+# library-recovery-selfcheck
+
+Exercises the production IndexedDB Library adapter's suspension timeout,
+late-open rejection, clean reconnect, and stale-transaction isolation.
+
+```sh
+node tools/library-recovery-selfcheck.mjs
+```
+
 # native-token-timing-selfcheck
 
 Checks the production iOS Misaki-token mapper without downloading a model.
