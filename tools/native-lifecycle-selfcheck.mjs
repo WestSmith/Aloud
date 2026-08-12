@@ -533,7 +533,7 @@ async function testActivationOrdering() {
   console.log('native audio activation             ordered; late reply cancelled; failure contained');
 }
 
-function makeBusyHandoffHarness() {
+function makeBusyHandoffHarness({ busySeconds = 7 } = {}) {
   let nextTimer = 1;
   const timers = new Map();
   const setTimeoutFake = (fn, delay = 0) => {
@@ -550,60 +550,121 @@ function makeBusyHandoffHarness() {
     }
   };
   const loading = new Set();
-  const calls = { starts: [], advances: [], cancels: 0, toasts: 0, loading: [], pauses: 0 };
+  const calls = {
+    kokoroStarts: [], nativeSpeaks: [], advances: [], cancels: 0,
+    toasts: 0, loading: [], pauses: 0, stops: 0,
+  };
   const S = {
     playing: true,
     engine: 'neural',
+    neuralVoice: 'am_fenrir',
     audioPlay: null,
-    sentences: [{}, {}],
+    sentences: [{}, {}, {}],
+    curSent: 0,
     curWord: 14,
+    neuralCache: new Map(),
   };
   const holdSource = extractNamedFunction(src, 'holdKokoroForBusyQueue');
   const clearSource = extractNamedFunction(src, 'clearNativeKokoroBusyWait');
+  const clearFallbackSource = extractNamedFunction(src, 'clearNativeKokoroBusyFallback');
+  const startFallbackSource = extractNamedFunction(src, 'startNativeKokoroBusyFallback');
   const timeoutSource = extractNamedFunction(src, 'armNativeKokoroBusyTimeout');
+  const routeSource = extractNamedFunction(src, 'routeNativeKokoroBusyFallback');
   const failureSource = extractNamedFunction(src, 'handleNeuralFailure');
   const resumeSource = extractNamedFunction(src, 'resumeKokoroAfterForeground');
+  const suspendSource = extractNamedFunction(src, 'suspendNativeKokoroWork');
   const remoteAdvanceSource = extractNamedFunction(src, 'remoteAdvanceSentence');
   const api = new Function(
-    'S', 'document', 'calls', 'loading', 'setTimeout', 'clearTimeout',
+    'S', 'document', 'calls', 'loading', 'setTimeout', 'clearTimeout', 'initialBusySeconds',
     `const NATIVE = { nativeKokoro: true };
      let nativeKokoroBusy = true, nativeKokoroAppActive = true;
-     let nativeKokoroBusySeconds = 7, nativeKokoroBusyNoticeAt = 0;
+     let nativeKokoroBusySeconds = initialBusySeconds, nativeKokoroBusyNoticeAt = 0;
      let nativeKokoroBusyTimer = null, kokoroResumeOnForeground = false;
      let nativePlayIntent = 0;
+     const NATIVE_KOKORO_BUSY_COVER_AFTER_MS = 3000;
+     const nativeKokoroBusyFallback = { phase: 'idle', handoffReady: false };
      const $ = () => ({ classList: {
        add(value) { loading.add(value); calls.loading.push('add:' + value); },
        remove(value) { loading.delete(value); calls.loading.push('remove:' + value); }
      }});
-     const pauseAll = () => { calls.pauses++; S.playing = false; loading.delete('loading'); calls.loading.push('pause'); };
      const cancelNativeKokoroGenerations = () => { calls.cancels++; };
      const toast = () => { calls.toasts++; };
      const setPlayIcon = () => {};
      const invalidateNeuralSpeech = () => {};
-     const playCurrent = word => { calls.starts.push(word); S.playing = true; loading.add('loading'); calls.loading.push('start'); };
+     const neuralCacheKey = sentIdx => 'sentence:' + sentIdx;
+     const speakNative = (sentIdx, word, owner) => {
+       calls.nativeSpeaks.push({ sentIdx, word, owner });
+       S.playing = true;
+     };
+     const playCurrent = word => { calls.kokoroStarts.push(word); S.playing = true; };
      const advanceSentence = (dir, keepPlaying) => {
        calls.advances.push([dir, keepPlaying]);
+       S.curSent += dir;
        S.curWord += dir * 10;
      };
      ${clearSource}
+     ${clearFallbackSource}
+     const pauseAll = () => {
+       calls.pauses++;
+       if (nativeKokoroBusyFallback.phase === 'covering') calls.stops++;
+       S.playing = false;
+       clearNativeKokoroBusyFallback();
+       nativePlayIntent++;
+       loading.delete('loading');
+       calls.loading.push('pause');
+     };
+     ${startFallbackSource}
      ${timeoutSource}
      ${holdSource}
+     ${routeSource}
      ${resumeSource}
      ${failureSource}
+     ${suspendSource}
      ${remoteAdvanceSource}
      return {
        hold: holdKokoroForBusyQueue,
        fail: handleNeuralFailure,
-       setBusy(value) { nativeKokoroBusy = value; },
+       route: routeNativeKokoroBusyFallback,
+       setBusy(value, seconds = nativeKokoroBusySeconds) {
+         nativeKokoroBusy = value;
+         nativeKokoroBusySeconds = seconds;
+       },
        idle() {
          nativeKokoroBusy = false;
+         nativeKokoroBusySeconds = 0;
+         if (nativeKokoroBusyFallback.phase === 'covering') {
+           nativeKokoroBusyFallback.handoffReady = true;
+           return;
+         }
          clearTimeout(nativeKokoroBusyTimer);
          nativeKokoroBusyTimer = null;
          resumeKokoroAfterForeground(0);
        },
+       busyEvent(seconds = nativeKokoroBusySeconds) {
+         nativeKokoroBusy = true;
+         nativeKokoroBusySeconds = seconds;
+         if (nativeKokoroBusyFallback.phase === 'covering') {
+           nativeKokoroBusyFallback.handoffReady = false;
+           return;
+         }
+         holdKokoroForBusyQueue();
+       },
+       hide() {
+         document.hidden = true;
+         nativeKokoroAppActive = false;
+         suspendNativeKokoroWork();
+       },
+       showBusy(seconds = nativeKokoroBusySeconds) {
+         document.hidden = false;
+         nativeKokoroAppActive = true;
+         this.busyEvent(seconds);
+       },
+       cache(sentIdx) { S.neuralCache.set(neuralCacheKey(sentIdx), {}); },
+       moveTo(sentIdx, word) { S.curSent = sentIdx; S.curWord = word; },
+       pause: pauseAll,
        explicitCancel() {
          nativePlayIntent++;
-         clearNativeKokoroBusyWait();
+         clearNativeKokoroBusyFallback();
        },
        remoteNext() { remoteAdvanceSentence(1); },
        activeRemoteNext() { S.playing = true; remoteAdvanceSentence(1); },
@@ -615,53 +676,104 @@ function makeBusyHandoffHarness() {
            loading: loading.has('loading'),
            timers: nativeKokoroBusyTimer == null ? 0 : 1,
            pauses: calls.pauses,
+           phase: nativeKokoroBusyFallback.phase,
+           handoff: nativeKokoroBusyFallback.handoffReady,
          };
        }
      };`
   )(
-    S, { hidden: false }, calls, loading, setTimeoutFake, clearTimeoutFake,
+    S, { hidden: false }, calls, loading, setTimeoutFake, clearTimeoutFake, busySeconds,
   );
-  return { ...api, S, calls, runDelay };
+  return {
+    ...api, S, calls, runDelay,
+    timerDelays: () => [...timers.values()].map(timer => timer.delay),
+  };
 }
 
 function testBusyHandoff() {
-  const remoteSkip = makeBusyHandoffHarness();
-  remoteSkip.hold();
+  const fresh = makeBusyHandoffHarness({ busySeconds: 0 });
+  assert(fresh.route(0, 14), 'busy route did not take ownership before generation');
+  assert(fresh.calls.nativeSpeaks.length === 0 && fresh.state().phase === 'waiting' &&
+         fresh.state().resume && fresh.state().loading,
+         'fresh busy request did not retain a visible bounded wait');
+  assert(fresh.timerDelays().join(',') === '3000',
+         `fresh busy grace was not 3 seconds (${fresh.timerDelays()})`);
+
+  const old = makeBusyHandoffHarness({ busySeconds: 7 });
+  assert(old.route(0, 14), 'old busy route did not take ownership');
+  assert(old.timerDelays().join(',') === '250',
+         'already-old MLX call did not receive the minimum adaptive grace');
+  old.runDelay(250);
+  assert(old.state().phase === 'covering' && old.state().playing &&
+         !old.state().resume && !old.state().loading,
+         'bounded wait did not enter audible fallback cleanly');
+  assert(JSON.stringify(old.calls.nativeSpeaks) ===
+         JSON.stringify([{ sentIdx: 0, word: 14, owner: 'kokoro-busy' }]),
+         'fallback did not start the iOS voice from the selected word');
+  assert(old.S.engine === 'neural' && old.S.neuralVoice === 'am_fenrir',
+         'temporary fallback rewrote the Neural/Fenrir preference');
+
+  const repeated = old.calls.nativeSpeaks.length;
+  const pausesBeforeHealth = old.calls.pauses;
+  old.busyEvent(9);
+  old.busyEvent(10);
+  assert(old.state().phase === 'covering' && !old.state().handoff &&
+         old.calls.nativeSpeaks.length === repeated && old.calls.pauses === pausesBeforeHealth,
+         'repeated busy lifecycle reports stopped or restarted Apple coverage');
+
+  old.moveTo(1, 24);
+  assert(old.route(1, 24) && old.calls.nativeSpeaks.at(-1)?.word === 24,
+         'continued busy state did not cover the next sentence');
+  const beforeIdle = old.calls.nativeSpeaks.length;
+  old.idle();
+  assert(old.state().phase === 'covering' && old.state().handoff &&
+         old.calls.nativeSpeaks.length === beforeIdle,
+         'idle health event cut into the current Apple sentence');
+  old.moveTo(2, 34);
+  assert(!old.route(2, 34) && old.state().phase === 'idle',
+         'idle handoff did not return the next sentence to Kokoro');
+
+  const flapped = makeBusyHandoffHarness({ busySeconds: 8 });
+  flapped.route(0, 14);
+  flapped.runDelay(250);
+  flapped.idle();
+  flapped.busyEvent(9);
+  flapped.moveTo(1, 24);
+  assert(flapped.route(1, 24) && flapped.calls.nativeSpeaks.length === 2,
+         'busy-again lifecycle failed to withdraw a pending handoff');
+
+  const cached = makeBusyHandoffHarness({ busySeconds: 8 });
+  cached.cache(0);
+  assert(!cached.route(0, 14) && cached.state().phase === 'idle' &&
+         cached.calls.nativeSpeaks.length === 0 && cached.state().timers === 0,
+         'cached Fenrir sentence unnecessarily entered native fallback');
+
+  const hiddenCover = makeBusyHandoffHarness({ busySeconds: 8 });
+  hiddenCover.route(0, 14);
+  hiddenCover.runDelay(250);
+  hiddenCover.hide();
+  assert(hiddenCover.state().phase === 'covering' && hiddenCover.calls.pauses === 1 &&
+         hiddenCover.calls.stops === 0,
+         'background lifecycle stopped the Apple fallback');
+
+  const remoteSkip = makeBusyHandoffHarness({ busySeconds: 0 });
+  remoteSkip.route(0, 14);
   remoteSkip.remoteNext();
   assert(remoteSkip.S.curWord === 24 && remoteSkip.state().resume &&
          remoteSkip.state().loading && remoteSkip.state().timers === 1,
          'lock-screen Next cancelled or hid the queued native start');
   remoteSkip.idle();
   remoteSkip.runDelay(0);
-  assert(remoteSkip.calls.starts.join(',') === '24' &&
+  assert(remoteSkip.calls.kokoroStarts.join(',') === '24' &&
          !remoteSkip.state().resume && remoteSkip.state().timers === 0,
          'lock-screen Next did not resume its new target and settle busy UI');
 
-  const activeSkip = makeBusyHandoffHarness();
-  activeSkip.activeRemoteNext();
-  assert(activeSkip.state().pauses === 1 && activeSkip.state().playing &&
-         activeSkip.calls.advances.length === 1,
-         'lock-screen Next did not stop old audio before starting its new target');
-
-  const normal = makeBusyHandoffHarness();
-  normal.hold();
-  assert(!normal.state().playing && normal.state().resume && normal.state().loading,
-         'busy native generation did not retain a visible queued Play intent');
-  assert(normal.state().timers === 1, 'busy native generation did not arm its bounded wait');
-  normal.idle();
-  normal.idle();
-  assert(!normal.state().resume && !normal.state().loading,
-         'native idle did not settle the old busy indicator before retry');
-  normal.runDelay(0);
-  assert(normal.calls.starts.join(',') === '14',
-         'duplicate native idle events resumed the requested word more than once');
-
   const superseded = makeBusyHandoffHarness();
-  superseded.hold();
+  superseded.route(0, 14);
   superseded.idle();                              // schedules its zero-delay retry
   superseded.explicitCancel();                    // a newer user action owns transport
   superseded.runDelay(0);
-  assert(superseded.calls.starts.length === 0,
+  assert(superseded.calls.kokoroStarts.length === 0,
          'scheduled native idle retry overrode a newer transport action');
 
   /* The idle health event can overtake the native_busy promise rejection.
@@ -673,24 +785,18 @@ function testBusyHandoff() {
   assert(!lateError.state().resume && !lateError.state().loading,
          'late native_busy rejection stranded a hidden resume intent');
   lateError.runDelay(0);
-  assert(lateError.calls.starts.join(',') === '14',
+  assert(lateError.calls.kokoroStarts.join(',') === '14',
          'late native_busy rejection did not retry the selected word exactly once');
 
-  const timedOut = makeBusyHandoffHarness();
-  timedOut.hold();
-  timedOut.runDelay(45000);
-  assert(!timedOut.state().resume && !timedOut.state().loading && !timedOut.state().playing,
-         'busy timeout left a spinner or resumable playback intent behind');
-  timedOut.idle();
-  timedOut.runDelay(0);
-  assert(timedOut.calls.starts.length === 0, 'late idle restarted playback after busy timeout');
-
   const cancelled = makeBusyHandoffHarness();
-  cancelled.hold();
-  cancelled.explicitCancel();
-  assert(!cancelled.state().resume && !cancelled.state().loading && cancelled.state().timers === 0,
-         'explicit transport action did not clear the queued busy state');
-  console.log('native busy handoff                 visible wait; late idle race retried once');
+  cancelled.route(0, 14);
+  cancelled.pause();
+  cancelled.runDelay(250);
+  assert(cancelled.state().phase === 'idle' && !cancelled.state().resume &&
+         !cancelled.state().loading && cancelled.state().timers === 0 &&
+         cancelled.calls.nativeSpeaks.length === 0,
+         'Pause did not clear a queued fallback and its late timer');
+  console.log('native busy fallback                bounded cover; boundary handoff; controls safe');
 }
 
 async function testNeuralErrorOwnership() {
@@ -719,6 +825,7 @@ async function testNeuralErrorOwnership() {
        const clearTimeout = () => {};
        const loadKokoro = () => {};
        const armKokoroCover = () => {};
+       const routeNativeKokoroBusyFallback = () => false;
        const stopAll = () => {};
        const generateNeural = () => generation;
        const handleNeuralFailure = () => { calls.failures++; S.playing = false; };
@@ -770,6 +877,10 @@ try {
   const requestPlaySource = extractNamedFunction(src, 'requestPlaybackStart');
   const requestWordSource = extractNamedFunction(src, 'requestPlaybackFromWord');
   const playWordSource = extractNamedFunction(src, 'playFromWordElement');
+  const speakNeuralSource = extractNamedFunction(src, 'speakNeural');
+  const speakNativeSource = extractNamedFunction(src, 'speakNative');
+  const busyRouteSource = extractNamedFunction(src, 'routeNativeKokoroBusyFallback');
+  const suspendNativeSource = extractNamedFunction(src, 'suspendNativeKokoroWork');
   const generateSource = extractNamedFunction(src, 'generateNeural');
   const pumpSource = extractNamedFunction(src, 'neuralPump');
   const nativeGenerateSource = extractNamedFunction(src, 'nativeKokoroGenerate');
@@ -784,6 +895,8 @@ try {
   const advanceSource = extractNamedFunction(src, 'advanceSentence');
   const interactiveHtmlSource = grab('function renderHtmlInteractive', '\nfunction renderHtmlNative');
   assert(pauseSource.includes('cancelNativeKokoroGenerations()'), 'pauseAll no longer cancels native generation');
+  assert(pauseSource.includes('clearNativeKokoroBusyFallback()'),
+         'Pause no longer clears native busy wait/coverage state');
   assert(pauseSource.includes('nativeNeuralPausedAt = Date.now()') &&
          toggleSource.includes('nativeNeuralPausedAt = Date.now()'),
          'foreground neural pauses no longer age the retained audio pipeline');
@@ -825,6 +938,17 @@ try {
          'cancelled native generation can still publish stale audio or continue another chunk');
   assert(pumpSource.includes('if (NATIVE?.nativeKokoro) return;'),
          'native speculative MLX runway was re-enabled');
+  assert(speakNeuralSource.indexOf('routeNativeKokoroBusyFallback(sentIdx, fromWord)') >= 0 &&
+         speakNeuralSource.indexOf('routeNativeKokoroBusyFallback(sentIdx, fromWord)') <
+         speakNeuralSource.indexOf('generateNeural(sentIdx)'),
+         'native busy fallback gate moved behind a new MLX request');
+  assert(busyRouteSource.includes("speakNative(sentIdx, fromWord, 'kokoro-busy')") &&
+         busyRouteSource.includes('S.neuralCache.has(neuralCacheKey(sentIdx))') &&
+         busyRouteSource.includes('holdKokoroForBusyQueue(true)'),
+         'busy routing no longer covers uncached work while preserving cached Fenrir audio');
+  assert(speakNativeSource.includes("owner = 'native'") &&
+         speakNativeSource.includes('lastWi: 0, owner'),
+         'native utterances no longer identify Kokoro-busy coverage');
   assert(interactiveHtmlSource.includes("m.t === 'aloud:tap'") &&
          interactiveHtmlSource.includes('requestPlaybackFromWord(wIdx)'),
          'interactive HTML word tap bypasses the ordered word-start helper');
@@ -840,13 +964,25 @@ try {
   assert(nativeInitSource.includes('next:  () => remoteAdvanceSentence(1)') &&
          nativeInitSource.includes('prev:  () => remoteAdvanceSentence(-1)'),
          'lock-screen skip no longer retargets a queued native start');
+  const coveringHealthAt = nativeInitSource.indexOf("nativeKokoroBusyFallback.phase === 'covering'");
+  const ordinaryBusyAt = nativeInitSource.indexOf('if (nativeKokoroBusy)');
+  assert(coveringHealthAt >= 0 && coveringHealthAt < ordinaryBusyAt &&
+         nativeInitSource.slice(coveringHealthAt, ordinaryBusyAt).includes('return;'),
+         'busy lifecycle reports can again pause an active Apple fallback');
+  assert(suspendNativeSource.indexOf("nativeKokoroBusyFallback.phase === 'covering'") >= 0 &&
+         suspendNativeSource.indexOf("nativeKokoroBusyFallback.phase === 'covering'") <
+         suspendNativeSource.indexOf('const waitingForCurrent') &&
+         suspendNativeSource.includes('handoffReady = false'),
+         'visibility suspension can again stop Apple fallback speech');
   assert(nativeInitSource.includes("ev.type === 'audioServicesReset'") &&
-         nativeInitSource.includes('clearNativeKokoroBusyWait()') &&
-         resetDocSource.includes('clearNativeKokoroBusyWait()') &&
-         cancelDocSource.includes('clearNativeKokoroBusyWait()') &&
-         setEngineSource.includes('clearNativeKokoroBusyWait()') &&
-         advanceSource.includes('clearNativeKokoroBusyWait()'),
-         'a reset, engine change, or end-of-document path can retain the busy timer/spinner');
+         nativeInitSource.includes('clearNativeKokoroBusyFallback()') &&
+         resetDocSource.includes('clearNativeKokoroBusyFallback()') &&
+         cancelDocSource.includes('clearNativeKokoroBusyFallback()') &&
+         setEngineSource.includes('clearNativeKokoroBusyFallback()') &&
+         advanceSource.includes('clearNativeKokoroBusyFallback()') &&
+         requestWordSource.includes('clearNativeKokoroBusyFallback()') &&
+         toggleSource.includes('clearNativeKokoroBusyFallback()'),
+         'transport, reset, retarget, engine change, or document end can retain busy fallback state');
   const retryGateAt = nativeGenerateSource.indexOf('nativeKokoroGenerationGateError()');
   assert(retryGateAt >= 0 && retryGateAt <
          nativeGenerateSource.indexOf('nativeKokoroGenerateOnce(text, voice)'),

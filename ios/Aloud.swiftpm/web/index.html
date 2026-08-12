@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.24.2">
+<meta name="aloud-version" content="v6.24.3">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1108,6 +1108,15 @@ let nativeKokoroBusy = false;
 let nativeKokoroBusySeconds = 0;
 let nativeKokoroBusyNoticeAt = 0;
 let nativeKokoroBusyTimer = null;
+/* A genuinely stuck native MLX evaluation cannot be interrupted safely. After
+   a short, bounded wait, keep reading with AVSpeechSynthesizer while retaining
+   the user's Neural/Kokoro voice selection. `handoffReady` is consumed only between
+   sentences, so an idle health event never cuts the covering voice off mid-word. */
+const NATIVE_KOKORO_BUSY_COVER_AFTER_MS = 3000;
+const nativeKokoroBusyFallback = {
+  phase: 'idle',              // idle | waiting | covering
+  handoffReady: false,
+};
 /* A bridge cancellation settles its JavaScript promise immediately, but the
    serial native MLX call may still be unwinding. Give every native generation
    intent an epoch so a Play/word retarget cannot deduplicate onto the
@@ -3383,7 +3392,7 @@ function splitSentences(text) {
 }
 
 function resetDocState() {
-  clearNativeKokoroBusyWait();
+  clearNativeKokoroBusyFallback();
   S.docGeneration++;
   S.neuralGenToken++;
   S.words = []; S.sentences = []; S.curSent = -1; S.curWord = -1;
@@ -3427,7 +3436,7 @@ function saveReadingProgress() {
    interrupted safely; docGeneration discards its result while the existing
    serial queue prevents a second model call from overlapping it. */
 function cancelDocumentWork() {
-  clearNativeKokoroBusyWait();
+  clearNativeKokoroBusyFallback();
   kokoroStopgapActive = false;
   clearTimeout(kokoroCoverTimer);
   try { NATIVE?.kokoro?.cancelGenerations?.(); } catch {}
@@ -3741,7 +3750,7 @@ function buildCostIndex() {
    point in the file, which for a `const`/`let` is a temporal-dead-zone
    ReferenceError rather than a harmless undefined. */
 
-function speakNative(sentIdx, fromWord) {
+function speakNative(sentIdx, fromWord, owner = 'native') {
   const sent = S.sentences[sentIdx];
   if (!sent) return stopAll();
   const startWord = Math.max(sent.start, Math.min(fromWord ?? sent.start, sent.end - 1));
@@ -3756,7 +3765,7 @@ function speakNative(sentIdx, fromWord) {
   if (!text.trim()) return advanceSentence(1, true);
 
   const token = ++S.utterToken;
-  nativeUtter = { token, idxs, offsets, lastWi: 0 };
+  nativeUtter = { token, idxs, offsets, lastWi: 0, owner };
   NATIVE.speak(token, text, S.rate, S.nativeVoice || null);
   updateNativeNowPlaying();
 }
@@ -3802,7 +3811,7 @@ function initNativeEngine() {
       /* The media server invalidated WebKit's underlying player. Preserve the
          reading position, but require an explicit Play gesture to rebuild and
          reactivate audio as Apple recommends. */
-      clearNativeKokoroBusyWait();
+      clearNativeKokoroBusyFallback();
       pauseAll();
       disposeNeuralAudio();
       toast('Audio was reset by iPadOS. Tap Play to continue from this word.', 7000);
@@ -3820,6 +3829,16 @@ function initNativeEngine() {
       nativeKokoroAppActive = active;
       nativeKokoroBusy = !!ev.kokoroBusy;
       nativeKokoroBusySeconds = Math.max(0, Number(ev.kokoroBusySeconds) || 0);
+      /* Health reports describe MLX, not the Apple voice covering for it. A
+         repeated busy/app-activity sample must never pause or restart that
+         utterance. Idle merely arms a sentence-boundary handoff; if MLX turns
+         busy again before the boundary, coverage continues uninterrupted. */
+      if (nativeKokoroBusyFallback.phase === 'covering') {
+        nativeKokoroBusyFallback.handoffReady =
+          active && !nativeKokoroBusy && !document.hidden;
+        if (!active) cancelNativeKokoroGenerations();
+        return;
+      }
       // Swift owns the authoritative iPad lifecycle state. Its activation
       // event cannot race ahead of the native MLX gate the way a guessed
       // visibility timeout can.
@@ -5383,6 +5402,13 @@ function disposeNeuralAudio() {
    background audio and cancel only its speculative runway. */
 function suspendNativeKokoroWork() {
   if (!NATIVE?.nativeKokoro) return;
+  /* Apple speech is valid background audio and submits no Metal work. Keep a
+     covering utterance alive across visibility/scene notifications. */
+  if (nativeKokoroBusyFallback.phase === 'covering') {
+    nativeKokoroBusyFallback.handoffReady = false;
+    cancelNativeKokoroGenerations();
+    return;
+  }
   const waitingForCurrent = S.engine === 'neural' && S.playing && !S.audioPlay;
   if (waitingForCurrent) {
     pauseAll();
@@ -5394,15 +5420,48 @@ function clearNativeKokoroBusyWait() {
   kokoroResumeOnForeground = false;
   clearTimeout(nativeKokoroBusyTimer);
   nativeKokoroBusyTimer = null;
+  if (nativeKokoroBusyFallback.phase === 'waiting')
+    nativeKokoroBusyFallback.phase = 'idle';
   $('btn-play').classList.remove('loading');
 }
 
+function clearNativeKokoroBusyFallback() {
+  clearNativeKokoroBusyWait();
+  nativeKokoroBusyFallback.phase = 'idle';
+  nativeKokoroBusyFallback.handoffReady = false;
+}
+
+function startNativeKokoroBusyFallback() {
+  if (!NATIVE?.nativeKokoro || !nativeKokoroBusy ||
+      !nativeKokoroAppActive || document.hidden ||
+      S.engine !== 'neural' || !S.sentences.length) return false;
+  clearTimeout(nativeKokoroBusyTimer);
+  nativeKokoroBusyTimer = null;
+  kokoroResumeOnForeground = false;
+  nativeKokoroBusyFallback.phase = 'covering';
+  nativeKokoroBusyFallback.handoffReady = false;
+  $('btn-play').classList.remove('loading');
+  S.playing = true;
+  setPlayIcon(true);
+  speakNative(S.curSent, S.curWord, 'kokoro-busy');
+  return true;
+}
+
 function armNativeKokoroBusyTimeout() {
-  if (nativeKokoroBusyTimer) return;
+  if (nativeKokoroBusyTimer || nativeKokoroBusyFallback.phase === 'covering') return;
+  nativeKokoroBusyFallback.phase = 'waiting';
+  const intent = nativePlayIntent;
+  /* Count time the abandoned MLX call has already spent busy. A job reported
+     as old starts coverage almost immediately; a just-started one gets up to
+     three seconds to finish and avoid an unnecessary voice change. */
+  const delay = Math.max(250,
+    NATIVE_KOKORO_BUSY_COVER_AFTER_MS - nativeKokoroBusySeconds * 1000);
   nativeKokoroBusyTimer = setTimeout(() => {
     nativeKokoroBusyTimer = null;
-    if (!kokoroResumeOnForeground || S.engine !== 'neural') {
-      $('btn-play').classList.remove('loading');
+    if (intent !== nativePlayIntent || !kokoroResumeOnForeground ||
+        nativeKokoroBusyFallback.phase !== 'waiting' ||
+        S.engine !== 'neural' || !S.sentences.length) {
+      clearNativeKokoroBusyWait();
       return;
     }
     /* An idle event normally consumes this intent immediately. If that event
@@ -5412,21 +5471,28 @@ function armNativeKokoroBusyTimeout() {
       resumeKokoroAfterForeground(0);
       return;
     }
-    if (!nativeKokoroAppActive || document.hidden) return; // foreground event owns it
-    clearNativeKokoroBusyWait();
-    pauseAll();
-    toast('⚠️ Native Kokoro did not recover after the iPad resumed. Your place is saved—choose the 📱 iOS voice to continue now, or reopen Aloud to restart Kokoro.', 14000);
-  }, 45000);
+    /* Do not begin a fresh AVSpeech utterance while UIKit says the scene is
+       inactive. Keep the intent; the next active health event rearms it. */
+    if (!nativeKokoroAppActive || document.hidden) return;
+    startNativeKokoroBusyFallback();
+  }, delay);
 }
 
-function holdKokoroForBusyQueue() {
+function holdKokoroForBusyQueue(forceResume = false) {
   if (!NATIVE?.nativeKokoro || !nativeKokoroBusy) return;
+  if (nativeKokoroBusyFallback.phase === 'covering') {
+    nativeKokoroBusyFallback.handoffReady = false;
+    return;
+  }
   const waitingForCurrent = S.engine === 'neural' && S.playing && !S.audioPlay;
-  const shouldResume = waitingForCurrent || kokoroResumeOnForeground;
-  if (waitingForCurrent) pauseAll();
+  const shouldResume = forceResume || waitingForCurrent || kokoroResumeOnForeground ||
+    nativeKokoroBusyFallback.phase === 'waiting';
+  if (waitingForCurrent || (forceResume && S.playing)) pauseAll();
   cancelNativeKokoroGenerations();
   if (!shouldResume) return;
   kokoroResumeOnForeground = true;
+  nativeKokoroBusyFallback.phase = 'waiting';
+  nativeKokoroBusyFallback.handoffReady = false;
   /* pauseAll() above restores the ordinary Play appearance, but this is not
      an idle pause: the requested word is queued behind one non-interruptible
      MLX call. Keep that pending intent visible until idle, timeout, or an
@@ -5437,8 +5503,32 @@ function holdKokoroForBusyQueue() {
   if (now - nativeKokoroBusyNoticeAt > 8000) {
     nativeKokoroBusyNoticeAt = now;
     const age = nativeKokoroBusySeconds > 1 ? ` (${nativeKokoroBusySeconds}s)` : '';
-    toast(`Kokoro is finishing earlier speech${age}. Aloud will resume when it is ready.`, 6500);
+    toast(`Kokoro is finishing earlier speech${age}. Aloud will continue with the iOS voice if it needs more time, then return to your Kokoro voice.`, 7500);
   }
+}
+
+/* Returns true when the busy-recovery path has taken ownership of this start.
+   Keeping this routing decision ahead of generateNeural() is the hard guarantee
+   that a stuck native MLX call never receives another request behind it. */
+function routeNativeKokoroBusyFallback(sentIdx, fromWord) {
+  if (!NATIVE?.nativeKokoro) return false;
+  if (nativeKokoroBusyFallback.phase === 'covering') {
+    const canHandoff = nativeKokoroBusyFallback.handoffReady ||
+      (!nativeKokoroBusy && nativeKokoroAppActive && !document.hidden);
+    if (!canHandoff) {
+      speakNative(sentIdx, fromWord, 'kokoro-busy');
+      return true;
+    }
+    clearNativeKokoroBusyFallback();
+  }
+  /* Cached Kokoro audio submits no MLX work and remains preferable to a voice
+     substitution even while an unrelated native evaluation is unwinding. */
+  const cached = S.neuralCache.has(neuralCacheKey(sentIdx));
+  if (nativeKokoroBusy && !cached) {
+    holdKokoroForBusyQueue(true);
+    return true;
+  }
+  return false;
 }
 
 function handleNeuralFailure(error, invalidateAudio = false) {
@@ -5869,6 +5959,7 @@ async function speakNeural(sentIdx, fromWord) {
     armKokoroCover(cover);
     return;
   }
+  if (routeNativeKokoroBusyFallback(sentIdx, fromWord)) return;
   kokoroStopgapActive = false;
   clearTimeout(kokoroCoverTimer);
   const sent = S.sentences[sentIdx];
@@ -6226,6 +6317,7 @@ function playCurrent(fromWord) {
 
 function pauseAll() {
   S.playing = false;
+  clearNativeKokoroBusyFallback();
   nativePlayIntent++;
   nativePlayActivationPending = false;
   neuralResumeEpoch++;
@@ -6305,7 +6397,7 @@ function advanceSentence(dir, keepPlaying) {
     next = (p === -1) ? (dir > 0 ? S.sentences.length : 0) : p;
   }
   if (next >= S.sentences.length) {
-    clearNativeKokoroBusyWait();
+    clearNativeKokoroBusyFallback();
     pauseAll();
     setSentence(S.sentences.length - 1);
     toast('🏁 Finished! That’s the end of the document.');
@@ -6394,7 +6486,7 @@ function requestPlaybackStart(options) {
    the requested sentence. */
 function requestPlaybackFromWord(wIdx) {
   if (!S.words[wIdx]) return;
-  clearNativeKokoroBusyWait();
+  clearNativeKokoroBusyFallback();
   pauseAll();
   setSentence(S.words[wIdx].sent);
   highlightWord(wIdx);
@@ -6404,7 +6496,7 @@ function requestPlaybackFromWord(wIdx) {
 function togglePlay(options) {
   const allowBackground = !!options?.allowBackground;
   const cancelQueuedStart = kokoroResumeOnForeground;
-  clearNativeKokoroBusyWait(); // an explicit transport action wins over auto-resume
+  clearNativeKokoroBusyFallback(); // an explicit transport action wins over auto-resume/cover
   if (!S.sentences.length) return;
   /* Tapping the visibly waiting Play control a second time cancels that queued
      start. Word taps take the retarget path above and create a fresh intent. */
@@ -6452,7 +6544,7 @@ function setPlayIcon(playing) {
 
 function setEngine(engine, { prepare = true } = {}) {
   const wasPlaying = S.playing;
-  clearNativeKokoroBusyWait();
+  clearNativeKokoroBusyFallback();
   pauseAll();
   S.engine = engine;
   store.set('engine', engine);
