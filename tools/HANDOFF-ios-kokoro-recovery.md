@@ -34,7 +34,8 @@ resume was not itself watched. The recovery-only replacement now gets the
 four-second progress watchdog; a second dead pipeline pauses with an explicit
 retry notice. Fresh generated Fenrir clips remain outside that watchdog, so
 normal inference/start latency is still unbounded. These post-control patches
-have not yet been installed or physically verified.
+are packaged as the Aloud `6.24.5` (`18`) candidate but have not yet been
+installed or physically verified.
 
 ## Reported failure
 
