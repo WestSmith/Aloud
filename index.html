@@ -1108,6 +1108,7 @@ let nativeKokoroBusy = false;
 let nativeKokoroBusySeconds = 0;
 let nativeKokoroBusyNoticeAt = 0;
 let nativeKokoroBusyTimer = null;
+let nativeKokoroResumeTimer = null;
 /* A genuinely stuck native MLX evaluation cannot be interrupted safely. After
    a short, bounded wait, keep reading with AVSpeechSynthesizer while retaining
    the user's Neural/Kokoro voice selection. `handoffReady` is consumed only between
@@ -1117,6 +1118,11 @@ const nativeKokoroBusyFallback = {
   phase: 'idle',              // idle | waiting | covering
   handoffReady: false,
 };
+/* The ordinary busy fallback above handles an older request already occupying
+   MLX. This watch owns the request started by the current Play action itself,
+   so a very first native generation that never settles cannot leave Aloud
+   spinning forever without ever having produced a `native_busy` rejection. */
+let nativeKokoroGenerationWatchdog = null;
 /* A bridge cancellation settles its JavaScript promise immediately, but the
    serial native MLX call may still be unwinding. Give every native generation
    intent an epoch so a Play/word retarget cannot deduplicate onto the
@@ -3839,6 +3845,12 @@ function initNativeEngine() {
         if (!active) cancelNativeKokoroGenerations();
         return;
       }
+      /* BridgeScript only marks a stall when its request belongs to this exact
+         page and is still pending. The local timer and this native watchdog
+         race through the same idempotent commit, so they can never start two
+         voices. Once committed, the current sentence belongs to Apple speech
+         even if cancelling the bridge immediately produces an idle event. */
+      if (ev.kokoroOwnedStall && commitNativeKokoroGenerationFallback()) return;
       // Swift owns the authoritative iPad lifecycle state. Its activation
       // event cannot race ahead of the native MLX gate the way a guessed
       // visibility timeout can.
@@ -5420,15 +5432,93 @@ function clearNativeKokoroBusyWait() {
   kokoroResumeOnForeground = false;
   clearTimeout(nativeKokoroBusyTimer);
   nativeKokoroBusyTimer = null;
+  clearTimeout(nativeKokoroResumeTimer);
+  nativeKokoroResumeTimer = null;
   if (nativeKokoroBusyFallback.phase === 'waiting')
     nativeKokoroBusyFallback.phase = 'idle';
   $('btn-play').classList.remove('loading');
 }
 
 function clearNativeKokoroBusyFallback() {
+  clearNativeKokoroGenerationWatchdog();
   clearNativeKokoroBusyWait();
   nativeKokoroBusyFallback.phase = 'idle';
   nativeKokoroBusyFallback.handoffReady = false;
+}
+
+function clearNativeKokoroGenerationWatchdog(watch = nativeKokoroGenerationWatchdog) {
+  if (!watch || nativeKokoroGenerationWatchdog !== watch) return;
+  clearTimeout(watch.timer);
+  nativeKokoroGenerationWatchdog = null;
+}
+
+function armNativeKokoroGenerationWatchdog(sentIdx, fromWord, genToken) {
+  if (!NATIVE?.nativeKokoro) return null;
+  clearNativeKokoroGenerationWatchdog();
+  const sent = S.sentences[sentIdx];
+  if (!sent) return null;
+  const watch = {
+    intent: nativePlayIntent,
+    genToken,
+    sentIdx,
+    fromWord: Math.max(sent.start, Math.min(fromWord ?? sent.start, sent.end - 1)),
+    committed: false,
+    timer: null,
+  };
+  nativeKokoroGenerationWatchdog = watch;
+  watch.timer = setTimeout(() => commitNativeKokoroGenerationFallback(watch),
+    NATIVE_KOKORO_BUSY_COVER_AFTER_MS);
+  return watch;
+}
+
+function settleNativeKokoroGenerationWatchdog(watch) {
+  if (!watch) return true;
+  if (watch.committed) return false;
+  clearNativeKokoroGenerationWatchdog(watch);
+  return !watch.committed;
+}
+
+/* One-way ownership transfer for the current sentence. Cancelling the bridge
+   promise prevents a late native result from reaching playback, while the
+   generation token is a second guard for the result/deadline event-loop race.
+   Neither action starts replacement MLX work. */
+function commitNativeKokoroGenerationFallback(watch = nativeKokoroGenerationWatchdog) {
+  if (!watch || nativeKokoroGenerationWatchdog !== watch || watch.committed)
+    return false;
+  if (watch.intent !== nativePlayIntent || watch.genToken !== S.neuralGenToken ||
+      !S.playing || S.engine !== 'neural' || S.curSent !== watch.sentIdx ||
+      !nativeKokoroAppActive || document.hidden || !S.sentences[watch.sentIdx]) {
+    clearNativeKokoroGenerationWatchdog(watch);
+    return false;
+  }
+  watch.committed = true;
+  clearNativeKokoroGenerationWatchdog(watch);
+  clearTimeout(nativeKokoroBusyTimer);
+  nativeKokoroBusyTimer = null;
+  clearTimeout(nativeKokoroResumeTimer);
+  nativeKokoroResumeTimer = null;
+  kokoroResumeOnForeground = false;
+  nativeKokoroBusyFallback.phase = 'covering';
+  nativeKokoroBusyFallback.handoffReady = false;
+  /* The deadline itself is authoritative evidence that the admitted request
+     still owns native work. Keep subsequent Apple sentences continuous until
+     an ordered health refresh explicitly reports idle. */
+  nativeKokoroBusy = true;
+  nativeKokoroBusySeconds = Math.max(nativeKokoroBusySeconds,
+    NATIVE_KOKORO_BUSY_COVER_AFTER_MS / 1000);
+  $('btn-play').classList.remove('loading');
+  /* Invalidate before cancelling: even a success already queued in the
+     microtask queue is stale by the time speakNeural() resumes. */
+  S.neuralGenToken++;
+  cancelNativeKokoroGenerations();
+  /* Cancellation may release the reservation just before its native 3s probe
+     runs. Ask for one ordered health sample so coverage always learns when it
+     is safe to hand the following sentence back to Kokoro. */
+  try { NATIVE.refreshAppActivity?.(); } catch {}
+  S.playing = true;
+  setPlayIcon(true);
+  speakNative(watch.sentIdx, watch.fromWord, 'kokoro-busy');
+  return true;
 }
 
 function startNativeKokoroBusyFallback() {
@@ -5565,13 +5655,25 @@ function handleNeuralFailure(error, invalidateAudio = false) {
 function resumeKokoroAfterForeground(delayMs = 250) {
   if (document.hidden || !kokoroResumeOnForeground ||
       (NATIVE?.nativeKokoro && (!nativeKokoroAppActive || nativeKokoroBusy))) return;
-  clearNativeKokoroBusyWait();
+  /* Retain the waiting marker until the scheduled retry actually claims it.
+     An idle -> busy flap between this event and the zero-delay callback used
+     to clear the marker, reject the callback, and strand Play permanently. */
+  clearTimeout(nativeKokoroBusyTimer);
+  nativeKokoroBusyTimer = null;
+  if (nativeKokoroResumeTimer) return;
   const intent = nativePlayIntent;
   /* Browser builds only have visibility state and retain a short grace period.
      The native app calls this with zero delay after Swift opens the MLX gate. */
-  setTimeout(() => {
-    if (intent !== nativePlayIntent || document.hidden || S.engine !== 'neural' || !S.sentences.length || S.playing ||
-        (NATIVE?.nativeKokoro && (!nativeKokoroAppActive || nativeKokoroBusy))) return;
+  nativeKokoroResumeTimer = setTimeout(() => {
+    nativeKokoroResumeTimer = null;
+    if (intent !== nativePlayIntent) return;
+    if (document.hidden || S.engine !== 'neural' || !S.sentences.length || S.playing ||
+        (NATIVE?.nativeKokoro && !nativeKokoroAppActive)) return;
+    if (NATIVE?.nativeKokoro && nativeKokoroBusy) {
+      armNativeKokoroBusyTimeout();
+      return;
+    }
+    clearNativeKokoroBusyWait();
     S.playing = true;
     setPlayIcon(true);
     playCurrent(S.curWord);
@@ -5975,11 +6077,13 @@ async function speakNeural(sentIdx, fromWord) {
   const sent = S.sentences[sentIdx];
   if (!sent) return stopAll();
   const genToken = ++S.neuralGenToken;
+  const generationWatch = armNativeKokoroGenerationWatchdog(sentIdx, fromWord, genToken);
   $('btn-play').classList.add('loading');
   let entry;
   try {
     entry = await generateNeural(sentIdx);
   } catch (err) {
+    settleNativeKokoroGenerationWatchdog(generationWatch);
     console.error(err);
     /* A word tap/pause can replace this request while its native rejection is
        still crossing the bridge. The newer genToken owns both transport and
@@ -5993,6 +6097,7 @@ async function speakNeural(sentIdx, fromWord) {
     handleNeuralFailure(err);
     return;
   }
+  if (!settleNativeKokoroGenerationWatchdog(generationWatch)) return;
   if (genToken !== S.neuralGenToken || !S.playing || S.curSent !== sentIdx) {
     /* A newer generation owns the pulse; otherwise this abandoned job must
        release it or the button can stay animated forever. */
