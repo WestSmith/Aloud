@@ -444,6 +444,98 @@ async function testResumeWatchdog() {
   console.log('persistent audio watchdog           resolved stalls, brief freezes, and ignored seeks');
 }
 
+function makePreplayingTerminalHarness() {
+  const listeners = new Map();
+  const calls = { advances: 0, failures: 0, revocations: 0, sentences: [] };
+  class FakeAudio {
+    constructor() {
+      this.currentTime = 0;
+      this.ended = false;
+      this.error = null;
+      this.paused = true;
+      this.src = 'blob:new-fenrir';
+    }
+    addEventListener(type, listener) {
+      const handlers = listeners.get(type) || [];
+      handlers.push(listener);
+      listeners.set(type, handlers);
+    }
+    emit(type) {
+      for (const listener of listeners.get(type) || []) listener();
+    }
+  }
+  const S = {
+    audio: null,
+    audioPlay: null,
+    playing: true,
+    engine: 'neural',
+    curSent: 0,
+  };
+  const ensureSource = extractNamedFunction(src, 'ensureNeuralAudio');
+  const api = new Function(
+    'S', 'Audio', 'calls',
+    `let NA = null;
+     let nativeNeuralPausedAt = 0;
+     let nativeNeuralAudioNeedsRefresh = false;
+     let neuralAudioRecoveryPending = true;
+     const performance = { now: () => 0 };
+     const document = { hidden: false };
+     const URL = { revokeObjectURL() { calls.revocations++; } };
+     const naTickStart = () => {};
+     const setSentence = sentIdx => { S.curSent = sentIdx; calls.sentences.push(sentIdx); };
+     const rsvpSilentActive = () => false;
+     const batchNext = () => { throw new Error('unexpected hidden batch'); };
+     const advanceAfterBreather = () => { calls.advances++; };
+     const nativeKokoroError = message => new Error(message);
+     const handleNeuralFailure = () => { calls.failures++; };
+     ${ensureSource}
+     return {
+       audio: ensureNeuralAudio(),
+       install(play) { S.audioPlay = play; },
+       recoveryPending() { return neuralAudioRecoveryPending; }
+     };`
+  )(S, FakeAudio, calls);
+  const newPlay = () => ({
+    hasPlayed: false,
+    rolling: false,
+    shownAbs: -1,
+    clock: { media: 0, wall: 0 },
+    segs: [{ sentIdx: 0 }],
+  });
+  return { ...api, S, calls, newPlay };
+}
+
+function testPreplayingTerminalOwnership() {
+  const ended = makePreplayingTerminalHarness();
+  const replacement = ended.newPlay();
+  ended.install(replacement);
+  ended.audio.ended = false;
+  ended.audio.emit('ended');
+  assert(ended.S.audioPlay === replacement && ended.calls.advances === 0 &&
+         ended.recoveryPending(),
+         'stale ended event claimed an unplayed replacement with a live current source');
+
+  ended.audio.ended = true;
+  ended.audio.emit('ended');
+  assert(ended.S.audioPlay === null && ended.calls.advances === 1 &&
+         ended.recoveryPending(),
+         'genuine current-source ended event was swallowed before playing');
+
+  const errored = makePreplayingTerminalHarness();
+  const errorReplacement = errored.newPlay();
+  errored.install(errorReplacement);
+  errored.audio.error = null;
+  errored.audio.emit('error');
+  assert(errored.S.audioPlay === errorReplacement && errored.calls.failures === 0,
+         'stale error event claimed an unplayed replacement with no current media error');
+
+  errored.audio.error = { code: 3 };
+  errored.audio.emit('error');
+  assert(errored.S.audioPlay === null && errored.calls.failures === 1,
+         'genuine current-source error was swallowed before playing');
+  console.log('pre-playing terminal events         stale ignored; current ended/error handled');
+}
+
 function makeActivationHarness({ stale = false, pausedFor = 0, retained = false } = {}) {
   let resolveActivation, rejectActivation;
   const activation = new Promise((resolve, reject) => {
@@ -1271,6 +1363,7 @@ try {
   await testNativePumpGates();
   await testNativePendingGenerationEpoch();
   await testResumeWatchdog();
+  testPreplayingTerminalOwnership();
   await testActivationOrdering();
   testLiveRetargetOwnership();
   testRetargetTickOwnership();
@@ -1365,8 +1458,11 @@ try {
     ensureAudioSource.indexOf("na.addEventListener('error'")
   );
   const errorHandler = ensureAudioSource.slice(ensureAudioSource.indexOf("na.addEventListener('error'"));
-  assert(endedHandler.includes('!P.hasPlayed') && errorHandler.includes('!P.hasPlayed'),
-         'queued terminal media events can again claim an unplayed replacement source');
+  assert(endedHandler.includes('!P.hasPlayed && !na.ended') &&
+         errorHandler.includes('!P.hasPlayed && !na.error') &&
+         !endedHandler.includes('if (!P || !P.hasPlayed) return') &&
+         !errorHandler.includes('if (!P || !P.hasPlayed) return'),
+         'pre-playing terminal guards no longer distinguish stale events from current media failure');
   assert(generateSource.includes('nativeGenerationEpoch') &&
          generateSource.includes('pendingKey') &&
          generateSource.includes('S.neuralPending.get(pendingKey) === job'),

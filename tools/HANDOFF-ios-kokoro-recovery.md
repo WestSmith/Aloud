@@ -35,7 +35,7 @@ proving the new native package was then running, but no second build-18 test was
 requested after that forced relaunch. Treat the user report as a real unresolved
 retarget failure and do not mark build 18 verified.
 
-Next candidate: Aloud `6.24.6` (`19`), web marker
+Failed candidate: Aloud `6.24.6` (`19`), web marker
 `v6.24.6 (19) · web R19`. Its clean Release build succeeded and it was installed
 in place on the paired iPad on 2026-08-13. Device inventory explicitly confirmed
 6.24.6 (19). The source, synced iOS asset, and packaged `web/index.html` share
@@ -56,6 +56,19 @@ regression and runtime provenance open. The asset-sync check derives the exact v
 and service-worker cache key (`aloud-v6.24.6-b19`) from Package.swift, then
 requires byte-identical root/iOS assets. This prevents the build-18 version
 ambiguity from recurring.
+
+Next candidate: Aloud `6.24.7` (`20`), web marker
+`v6.24.7 (20) · web R20`. Build 19 introduced the only credible fresh-Play
+runtime delta from the physically working build 17: both persistent-media
+`ended` and `error` handlers ignored every event until WebKit emitted
+`playing`. A genuine current-source load/decode failure before that event could
+therefore leave the Pause state owning silent media forever; fresh generation
+intentionally has no elapsed-time watchdog. Build 20 instead checks the live
+media element state. It ignores a stale queued event after source replacement,
+when `ended`/`error` have been cleared, but handles a genuine current-source
+terminal event even before `playing`. The lifecycle self-check executes both
+stale and genuine pre-playing terminal cases. All focused checks pass; build,
+package verification, installation, and physical testing are still pending.
 
 ## Post-control audit
 

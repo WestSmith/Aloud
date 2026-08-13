@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.24.6 (19) · web R19">
+<meta name="aloud-version" content="v6.24.7 (20) · web R20">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -5676,10 +5676,11 @@ function ensureNeuralAudio() {
     if (!current()) return;
     const P = S.audioPlay;
     /* A cached replacement can be installed before an old `ended` task is
-       dispatched on this same persistent element. Until the replacement has
-       itself reached `playing`, that terminal event belongs to superseded
-       media and must not clear or advance the new play. */
-    if (!P || !P.hasPlayed) return;                    // prime / superseded
+       dispatched on this same persistent element. Assigning the replacement
+       source clears `na.ended`, so ignore only that stale queued event. A real
+       current-source end must still advance even when WebKit omitted the
+       `playing` event; suppressing every pre-playing end strands fresh Play. */
+    if (!P || (!P.hasPlayed && !na.ended)) return;      // prime / superseded
     nativeNeuralPausedAt = 0;
     nativeNeuralAudioNeedsRefresh = false;
     if (P.hasPlayed) neuralAudioRecoveryPending = false;
@@ -5699,10 +5700,10 @@ function ensureNeuralAudio() {
   na.addEventListener('error', () => {
     if (!current()) return;
     const P = S.audioPlay;
-    /* play() rejects a new source that cannot decode. An error event arriving
-       before this play reaches `playing` may instead be queued from the source
-       just replaced, so leave ownership to the promise rejection path. */
-    if (!P || !P.hasPlayed) return;
+    /* Assigning a replacement source clears `na.error`, which distinguishes a
+       stale queued error from a real failure of the current source. The latter
+       can happen before `playing` and must never leave Play owned forever. */
+    if (!P || (!P.hasPlayed && !na.error)) return;
     nativeNeuralPausedAt = 0;
     if (P.batchUrl) URL.revokeObjectURL(P.batchUrl);
     S.audioPlay = null;
