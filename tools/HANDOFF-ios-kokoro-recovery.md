@@ -4,13 +4,17 @@ Branch: `agent/fix-ios-resume-recovery`
 
 Draft PR: https://github.com/WestSmith/Aloud/pull/12
 
-Installed physical-device build: Aloud `6.24.3` (`16`), signed and installed on
-the paired iPad on 2026-08-13. The user confirmed that fresh Fenrir playback
-still failed in that build. Do not use it as a recovery baseline.
+Failed physical-device build: Aloud `6.24.3` (`16`). The user confirmed that
+fresh Fenrir playback still failed in that build. Do not use it as a recovery
+baseline.
 
-Current control build: Aloud `6.24.4` (`17`). It restores the fresh Play path
-from physically working `5108b79` and still needs a signed build, installation,
-and physical validation.
+Current installed control build: Aloud `6.24.4` (`17`), signed and installed on
+the paired iPad on 2026-08-13. It restores the fresh Play path from physically
+working `5108b79`. The clean Release build succeeded; the packaged
+`web/index.html` SHA-256 exactly matched the source
+(`0aef45ae710e274eb639ff2cd39f4493a2c3d2ddb6b67774a083e429eb51c1f1`).
+Device inventory confirmed 6.24.4 (17). Physical playback validation is next;
+remote launch was denied only because the iPad was locked.
 
 ## Reported failure
 
