@@ -42,6 +42,74 @@ function assertEvaluationsCheckpointed(relative) {
   return count;
 }
 
+// Exercise the reservation protocol independently of Dispatch/MLX. Source
+// assertions below bind these transitions to the Swift implementation; this
+// small clocked model catches the races the old late busy marker permitted.
+function exerciseReservationProtocol() {
+  let now = 0;
+  let owner = null;
+  let reportIdle = false;
+  const events = [];
+
+  const reserve = requestId => {
+    if (owner) {
+      reportIdle = true;
+      events.push(`busy:${requestId}`);
+      return false;
+    }
+    owner = { requestId, admittedAt: now, stallReported: false };
+    return true;
+  };
+  const probe = requestId => {
+    if (!owner || owner.requestId !== requestId || owner.stallReported) return;
+    if (now - owner.admittedAt < 3) return;
+    owner.stallReported = true;
+    reportIdle = true;
+    events.push(`stalled:${requestId}`);
+  };
+  const cancel = () => {}; // Cancellation cannot interrupt an executing owner.
+  const finish = requestId => {
+    if (!owner || owner.requestId !== requestId) return false;
+    owner = null;
+    if (reportIdle) events.push(`idle:${requestId}`);
+    reportIdle = false;
+    events.push(`reply:${requestId}`);
+    return true;
+  };
+
+  assert(reserve('fast'), 'fresh request was not admitted');
+  now = 2.9;
+  probe('fast');
+  assert(finish('fast'), 'fast owner did not release');
+  now = 3.1;
+  probe('fast');
+  assert(
+    events.join(',') === 'reply:fast',
+    'a request resolved before the deadline produced stale fallback/idle'
+  );
+
+  events.length = 0;
+  now = 10;
+  assert(reserve('owner'), 'owner was not admitted');
+  assert(!reserve('contender'), 'a concurrent contender was admitted');
+  cancel('owner');
+  assert(owner?.requestId === 'owner', 'JavaScript cancellation released the executing owner');
+  now = 13;
+  probe('owner');
+  probe('owner');
+  assert(
+    events.filter(event => event === 'stalled:owner').length === 1,
+    'the request-keyed stall probe was not one-shot'
+  );
+  assert(!finish('wrong-owner'), 'a non-owner released the reservation');
+  assert(finish('owner'), 'the admitted owner did not release');
+  assert(
+    events.join(',') === 'busy:contender,stalled:owner,idle:owner,reply:owner',
+    'busy/stall -> idle -> terminal reply ordering regressed'
+  );
+  assert(reserve('next'), 'terminal release did not admit the next chunk');
+}
+
 try {
   const native = read('ios/Aloud.swiftpm/NativeKokoroEngine.swift');
   const kokoro = read(
@@ -70,21 +138,94 @@ try {
     'cancelled generation no longer has one terminal tombstone consumer'
   );
   const generate = functionBody(native, 'generate');
-  const busyAdmission = functionBody(native, 'rejectGenerationIfBusy');
+  const reservation = functionBody(native, 'reserveGeneration');
+  const stallProbe = functionBody(native, 'reportGenerationStallIfNeeded');
+  const release = functionBody(native, 'releaseGenerationReservation');
+  const publishActivity = functionBody(native, 'publishActivity');
+  const cancel = functionBody(native, 'cancel');
+  const generationSuccess = functionBody(native, 'replyGenerationSuccess');
+  const generationFailure = functionBody(native, 'replyGenerationFailure');
   assert(
-    generate.indexOf('rejectGenerationIfBusy(requestID: requestID)') >= 0 &&
-    generate.indexOf('rejectGenerationIfBusy(requestID: requestID)') < generate.indexOf('queue.async'),
-    'a replacement generation can still queue behind an in-flight MLX evaluation'
+    /struct\s+GenerationReservation\s*\{[\s\S]*requestID:\s*String[\s\S]*admittedAt:\s*Date[\s\S]*stallReported:\s*Bool/.test(native),
+    'native generation reservation lost its request-keyed health fields'
   );
-  const busyLock = busyAdmission.indexOf('healthLock.lock()');
-  const busyMarker = busyAdmission.indexOf('guard let startedAt = generationStartedAt');
-  const idleArm = busyAdmission.indexOf('reportIdleWhenGenerationFinishes = true');
-  const orderedReply = busyAdmission.indexOf('lifecycleEventQueue.async');
-  const finalUnlock = busyAdmission.lastIndexOf('healthLock.unlock()');
   assert(
-    busyLock >= 0 && busyLock < busyMarker && busyMarker < idleArm && idleArm < orderedReply &&
-    orderedReply < finalUnlock && busyAdmission.includes('code: "native_busy"'),
-    'native busy admission no longer atomically orders its rejection before the eventual idle event'
+    generate.indexOf('reserveGeneration(requestID: requestID)') >= 0 &&
+    generate.indexOf('reserveGeneration(requestID: requestID)') < generate.indexOf('queue.async'),
+    'generation ownership is not reserved synchronously before queue dispatch'
+  );
+  assert(
+    generate.includes('defer { self.releaseGenerationReservation(requestID: requestID) }'),
+    'admitted generation lost its defensive owner release'
+  );
+  const afterAdmission = generate.slice(generate.indexOf('guard reserveGeneration'));
+  assert(
+    !afterAdmission.includes('self.replySuccess(') && !afterAdmission.includes('self.replyFailure('),
+    'a generation terminal reply can bypass release-and-order helpers'
+  );
+
+  const reservationLock = reservation.indexOf('healthLock.lock()');
+  const reservationCheck = reservation.indexOf('if let reservation = generationReservation');
+  const reservationWrite = reservation.indexOf('generationReservation = GenerationReservation(');
+  const stallSchedule = reservation.indexOf('lifecycleEventQueue.asyncAfter');
+  const reservationUnlock = reservation.lastIndexOf('healthLock.unlock()');
+  assert(
+    reservationLock >= 0 && reservationLock < reservationCheck &&
+    reservationCheck < reservationWrite && reservationWrite < stallSchedule &&
+    stallSchedule < reservationUnlock,
+    'reservation check/write/probe scheduling is no longer one locked admission operation'
+  );
+  assert(
+    reservation.includes('code: "native_busy"') &&
+    reservation.indexOf('lifecycleEventQueue.async') < reservation.indexOf('healthLock.unlock()'),
+    'concurrent rejection is not ordered ahead of the owner idle event'
+  );
+  assert(
+    /generationStallThreshold:\s*TimeInterval\s*=\s*3/.test(native) &&
+    stallSchedule >= 0,
+    'first-request native stall probe is not armed at about three seconds'
+  );
+  for (const field of [
+    '"active"', '"busy"', '"kokoroBusy"', '"kokoroBusySeconds"',
+    '"kokoroStalled"', '"requestId"',
+  ]) {
+    assert(stallProbe.includes(field), `stall health event is missing ${field}`);
+  }
+  assert(
+    stallProbe.includes('reservation.requestID == requestID') &&
+    stallProbe.includes('!reservation.stallReported') &&
+    stallProbe.indexOf('healthLock.unlock()') < stallProbe.indexOf('emitEvent(event)'),
+    'stall probe is not request-keyed, one-shot, and callback-safe'
+  );
+  assert(
+    publishActivity.includes('generationReservation.map') &&
+    publishActivity.includes('generationReservation != nil'),
+    'lifecycle activity stopped reporting admission-time reservation health'
+  );
+  assert(
+    release.includes('generationReservation?.requestID == requestID') &&
+    release.indexOf('generationReservation = nil') < release.indexOf('lifecycleEventQueue.async'),
+    'reservation release is not owner-checked before its ordered idle event'
+  );
+  assert(
+    !cancel.includes('releaseGenerationReservation'),
+    'JavaScript cancel can incorrectly release an executing MLX reservation'
+  );
+  for (const [name, terminal] of [
+    ['success', generationSuccess],
+    ['failure', generationFailure],
+  ]) {
+    const ownerRelease = terminal.indexOf('releaseGenerationReservation(requestID: requestID)');
+    const serialReply = terminal.indexOf('lifecycleEventQueue.sync');
+    const reply = terminal.indexOf(name === 'success' ? 'replySuccess(' : 'replyFailure(');
+    assert(
+      ownerRelease >= 0 && ownerRelease < serialReply && serialReply < reply,
+      `generation ${name} no longer releases, delivers idle, then replies in serial order`
+    );
+  }
+  assert(
+    !native.includes('generationStartedAt') && !native.includes('markGenerationStarted'),
+    'late MLX-only busy marker was reintroduced'
   );
   assert(
     /misaki\.phonemize\(text:\s*input,\s*checkpoint:\s*checkpoint\)/.test(misakiProcessor),
@@ -102,6 +243,7 @@ try {
     'ios/Aloud.swiftpm/Vendor/MisakiSwift/Sources/MisakiSwift/English/FallbackNetwork/EnglishFallbackNetwork.swift',
   ].reduce((total, relative) => total + assertEvaluationsCheckpointed(relative), 0);
 
+  exerciseReservationProtocol();
   assert(evaluations >= 12, `expected at least 12 forced evaluation boundaries, found ${evaluations}`);
   console.log(`native Kokoro checkpoint self-check: PASS (${evaluations} forced evaluations guarded)`);
 } catch (error) {

@@ -68,6 +68,12 @@ final class NativeKokoroEngine {
         case ready
     }
 
+    private struct GenerationReservation {
+        let requestID: String
+        let admittedAt: Date
+        var stallReported: Bool
+    }
+
     private let queue = DispatchQueue(label: "com.westsmith.aloud.kokoro", qos: .userInitiated)
     // Lifecycle/health events must never wait behind the MLX queue. Keeping
     // their own serial order also guarantees that a foreground `busy` report is
@@ -84,12 +90,13 @@ final class NativeKokoroEngine {
     // before it submits new Metal work. Default closed protects cold launch.
     private var appActive = false
     private let healthLock = NSLock()
-    // This deliberately describes only a generation after it enters its
-    // non-interruptible MLX section, not ordinary work waiting on `queue`.
-    // Lifecycle diagnostics must remain readable even when that serial queue is
-    // itself the thing being diagnosed.
-    private var generationStartedAt: Date?
+    // Generation admission is reserved synchronously at the bridge boundary,
+    // before work is dispatched to `queue`. Lifecycle diagnostics therefore
+    // remain readable even when that serial queue (or MLX itself) is stranded,
+    // and two WebViews cannot both enqueue native inference.
+    private var generationReservation: GenerationReservation?
     private var reportIdleWhenGenerationFinishes = false
+    private static let generationStallThreshold: TimeInterval = 3
 
     // Accessed only on `queue`.
     private var state: State = .idle
@@ -206,21 +213,19 @@ final class NativeKokoroEngine {
             return
         }
 
-        // A cancelled MLX evaluation can remain inside a non-interruptible Metal
-        // kernel after its JavaScript promise has settled. Reject a replacement
-        // here instead of putting it behind that work on `queue`; otherwise the
-        // replacement can appear to hang for the full duration of the old call.
-        guard !rejectGenerationIfBusy(requestID: requestID) else { return }
+        // Reserve synchronously instead of checking a marker that is set later
+        // on `queue`. This is the single admission boundary shared by every
+        // scene, including two iPad windows racing in the same run loop turn.
+        guard reserveGeneration(requestID: requestID) else { return }
 
-        queue.async { [weak self] in
-            guard let self else { return }
-            var generationWasStarted = false
-            defer {
-                if generationWasStarted { self.markGenerationFinished() }
-            }
+        // The singleton is intentionally retained until this admitted request
+        // reaches an owner-checked release. A weak capture could theoretically
+        // abandon the reservation before the defensive defer is installed.
+        queue.async { [self] in
+            defer { self.releaseGenerationReservation(requestID: requestID) }
             guard !self.consumeCancellation(requestID) else { return }
             guard self.state == .ready, let tts = self.tts else {
-                self.replyFailure(
+                self.replyGenerationFailure(
                     requestID: requestID,
                     code: "model_not_ready",
                     message: "Kokoro is not ready yet.",
@@ -229,7 +234,7 @@ final class NativeKokoroEngine {
                 return
             }
             guard self.isAppActive else {
-                self.replyFailure(
+                self.replyGenerationFailure(
                     requestID: requestID,
                     code: "app_inactive",
                     message: "Return to Aloud before creating more Kokoro speech.",
@@ -240,7 +245,7 @@ final class NativeKokoroEngine {
 
             let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleanText.isEmpty else {
-                self.replyFailure(
+                self.replyGenerationFailure(
                     requestID: requestID,
                     code: "empty_text",
                     message: "There is no pronounceable text in this segment.",
@@ -251,7 +256,7 @@ final class NativeKokoroEngine {
 
             let voiceKey = voiceName.hasSuffix(".npy") ? voiceName : "\(voiceName).npy"
             guard let voice = self.voices[voiceKey] else {
-                self.replyFailure(
+                self.replyGenerationFailure(
                     requestID: requestID,
                     code: "bad_voice",
                     message: "The selected Kokoro voice is unavailable.",
@@ -285,8 +290,6 @@ final class NativeKokoroEngine {
                 // lazy MLX evaluation.
                 guard !self.consumeCancellation(requestID) else { return }
                 let language: Language = voiceName.lowercased().hasPrefix("b") ? .enGB : .enUS
-                self.markGenerationStarted()
-                generationWasStarted = true
                 let (samples, tokens) = try tts.generateAudio(
                     voice: voice,
                     language: language,
@@ -335,7 +338,7 @@ final class NativeKokoroEngine {
                     Self.tokenPayload($0, shift: timestampShift, duration: duration)
                 }
 
-                let delivered = self.replySuccess(
+                let delivered = self.replyGenerationSuccess(
                     requestID: requestID,
                     result: [
                         "audioId": audioID,
@@ -353,21 +356,21 @@ final class NativeKokoroEngine {
                 _ = self.consumeCancellation(requestID)
                 return
             } catch KokoroTTS.KokoroTTSError.tooManyTokens {
-                self.replyFailure(
+                self.replyGenerationFailure(
                     requestID: requestID,
                     code: "too_many_tokens",
                     message: "This text segment is too long for Kokoro.",
                     retryable: true
                 )
             } catch let failure as NativeKokoroFailure {
-                self.replyFailure(
+                self.replyGenerationFailure(
                     requestID: requestID,
                     code: failure.code,
                     message: failure.message,
                     retryable: failure.retryable
                 )
             } catch {
-                self.replyFailure(
+                self.replyGenerationFailure(
                     requestID: requestID,
                     code: "generation_failed",
                     message: "Kokoro could not create this sentence: \(error.localizedDescription)",
@@ -933,6 +936,37 @@ final class NativeKokoroEngine {
         ])
     }
 
+    /// A generation must relinquish native admission before its terminal reply
+    /// can make JavaScript request the next chunk. Both the optional idle health
+    /// event and the reply use `lifecycleEventQueue`, preventing an old idle
+    /// report from overtaking a newly admitted request.
+    @discardableResult
+    private func replyGenerationSuccess(requestID: String, result: [String: Any]) -> Bool {
+        releaseGenerationReservation(requestID: requestID)
+        var delivered = false
+        lifecycleEventQueue.sync {
+            delivered = replySuccess(requestID: requestID, result: result)
+        }
+        return delivered
+    }
+
+    private func replyGenerationFailure(
+        requestID: String,
+        code: String,
+        message: String,
+        retryable: Bool
+    ) {
+        releaseGenerationReservation(requestID: requestID)
+        lifecycleEventQueue.sync {
+            replyFailure(
+                requestID: requestID,
+                code: code,
+                message: message,
+                retryable: retryable
+            )
+        }
+    }
+
     private func emitProgress(
         stage: String,
         message: String,
@@ -986,31 +1020,71 @@ final class NativeKokoroEngine {
         return appActive
     }
 
-    /// Rejects admission while another request is already in its forced MLX
-    /// evaluation. The rejection and the eventual idle health event are placed
-    /// on the same serial event queue while holding `healthLock`, so a generation
-    /// that finishes concurrently cannot deliver idle before JavaScript learns
-    /// that this request was rejected as busy.
-    private func rejectGenerationIfBusy(requestID: String) -> Bool {
+    /// Atomically reserves native generation before `generate()` can enqueue
+    /// work. A request-keyed probe is armed at admission rather than at the first
+    /// MLX evaluation, so a first request stranded anywhere on `queue` is still
+    /// observable by JavaScript after the bounded grace period.
+    private func reserveGeneration(requestID: String) -> Bool {
         healthLock.lock()
-        guard let startedAt = generationStartedAt else {
+        if let reservation = generationReservation {
+            let busySeconds = max(0, Int(Date().timeIntervalSince(reservation.admittedAt)))
+            reportIdleWhenGenerationFinishes = true
+            let suffix = busySeconds > 0 ? " for \(busySeconds)s" : ""
+            // Enqueue while holding healthLock. The owner must acquire the same
+            // lock before it can enqueue idle, preserving busy rejection -> idle
+            // order without invoking an event handler inside the lock.
+            lifecycleEventQueue.async { [weak self] in
+                self?.replyFailure(
+                    requestID: requestID,
+                    code: "native_busy",
+                    message: "Kokoro is finishing earlier speech on this iPad\(suffix).",
+                    retryable: true
+                )
+            }
             healthLock.unlock()
             return false
         }
 
-        let busySeconds = max(0, Int(Date().timeIntervalSince(startedAt)))
-        reportIdleWhenGenerationFinishes = true
-        let suffix = busySeconds > 0 ? " for \(busySeconds)s" : ""
-        lifecycleEventQueue.async { [weak self] in
-            self?.replyFailure(
-                requestID: requestID,
-                code: "native_busy",
-                message: "Kokoro is finishing earlier speech on this iPad\(suffix).",
-                retryable: true
-            )
+        generationReservation = GenerationReservation(
+            requestID: requestID,
+            admittedAt: Date(),
+            stallReported: false
+        )
+        lifecycleEventQueue.asyncAfter(deadline: .now() + Self.generationStallThreshold) { [weak self] in
+            self?.reportGenerationStallIfNeeded(requestID: requestID)
         }
         healthLock.unlock()
         return true
+    }
+
+    /// Emits one authoritative watchdog signal only while the exact admitted
+    /// request is still the native owner. The explicit stalled/request fields
+    /// distinguish this one-shot fallback trigger from ordinary lifecycle
+    /// health samples.
+    private func reportGenerationStallIfNeeded(requestID: String) {
+        healthLock.lock()
+        guard var reservation = generationReservation,
+              reservation.requestID == requestID,
+              !reservation.stallReported else {
+            healthLock.unlock()
+            return
+        }
+        reservation.stallReported = true
+        generationReservation = reservation
+        reportIdleWhenGenerationFinishes = true
+        let busySeconds = max(0, Int(Date().timeIntervalSince(reservation.admittedAt)))
+        healthLock.unlock()
+
+        let event: [String: Any] = [
+            "type": "kokoroHealth",
+            "active": isAppActive,
+            "busy": true,
+            "kokoroBusy": true,
+            "kokoroBusySeconds": busySeconds,
+            "kokoroStalled": true,
+            "requestId": requestID,
+        ]
+        emitEvent(event)
     }
 
     /// Lock-only health data for lifecycle logging and the `appActivity` bridge
@@ -1021,19 +1095,19 @@ final class NativeKokoroEngine {
     private func publishActivity(_ active: Bool) -> (busy: Bool, busySeconds: Int) {
         healthLock.lock()
         defer { healthLock.unlock() }
-        let busySeconds = generationStartedAt.map {
-            max(0, Int(Date().timeIntervalSince($0)))
+        let busySeconds = generationReservation.map {
+            max(0, Int(Date().timeIntervalSince($0.admittedAt)))
         } ?? 0
-        let busy = generationStartedAt != nil
+        let busy = generationReservation != nil
         if active && busy {
             reportIdleWhenGenerationFinishes = true
         } else if !active {
             reportIdleWhenGenerationFinishes = false
         }
 
-        // Enqueue while holding healthLock. markGenerationFinished uses the
-        // same lock before enqueuing `kokoroHealth`, preserving busy -> idle
-        // delivery order without ever invoking an event handler under a lock.
+        // Enqueue while holding healthLock. Owner release uses the same lock
+        // before enqueuing `kokoroHealth`, preserving busy -> idle delivery
+        // order without ever invoking an event handler under a lock.
         let event: [String: Any] = [
             "type": "appActivity",
             "active": active,
@@ -1044,15 +1118,16 @@ final class NativeKokoroEngine {
         return (busy, busySeconds)
     }
 
-    private func markGenerationStarted() {
+    /// Clears only the matching owner. JavaScript cancellation deliberately does
+    /// not call this method: a Metal evaluation that has begun remains admitted
+    /// until its queue scope exits at a safe checkpoint or natural completion.
+    private func releaseGenerationReservation(requestID: String) {
         healthLock.lock()
-        generationStartedAt = Date()
-        healthLock.unlock()
-    }
-
-    private func markGenerationFinished() {
-        healthLock.lock()
-        generationStartedAt = nil
+        guard generationReservation?.requestID == requestID else {
+            healthLock.unlock()
+            return
+        }
+        generationReservation = nil
         let shouldReportIdle = reportIdleWhenGenerationFinishes && isAppActive
         reportIdleWhenGenerationFinishes = false
         if shouldReportIdle {
@@ -1062,6 +1137,7 @@ final class NativeKokoroEngine {
                 "busy": false,
                 "kokoroBusy": false,
                 "kokoroBusySeconds": 0,
+                "requestId": requestID,
             ]
             lifecycleEventQueue.async { [weak self] in self?.emitEvent(event) }
         }
