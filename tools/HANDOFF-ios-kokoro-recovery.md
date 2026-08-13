@@ -36,8 +36,20 @@ requested after that forced relaunch. Treat the user report as a real unresolved
 retarget failure and do not mark build 18 verified.
 
 Next candidate: Aloud `6.24.6` (`19`), web marker
-`v6.24.6 (19) · web R19`. It has not yet been built, installed, or physically
-tested. The asset-sync check now derives the exact visible marker
+`v6.24.6 (19) · web R19`. Its clean Release build succeeded and it was installed
+in place on the paired iPad on 2026-08-13. Device inventory explicitly confirmed
+6.24.6 (19). The source, synced iOS asset, and packaged `web/index.html` share
+SHA-256 `dfb135eccf1f8646337f95533a144f4f1abb66e00d5639ca4a64d9be13ca41f9`;
+the corresponding service workers share
+`440499e3c4917a680b132dae4c5ff6744ccb881748a6a1584ac921d6cc6a2f1c`.
+The package has the same provisioning profile/team as builds 17 and 18.
+
+The install removed the prior process, but the forced launch was denied because
+the iPad was locked. Process inventory then confirmed no Aloud process remained,
+so no old reader page can survive. The user must unlock and launch Aloud once;
+seeing the exact R19 marker is the remaining runtime provenance gate. No build-19
+playback behavior has been physically tested yet. The asset-sync check derives
+the exact visible marker
 and service-worker cache key (`aloud-v6.24.6-b19`) from Package.swift, then
 requires byte-identical root/iOS assets. This prevents the build-18 version
 ambiguity from recurring.
