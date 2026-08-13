@@ -46,7 +46,6 @@ function assertEvaluationsCheckpointed(relative) {
 // assertions below bind these transitions to the Swift implementation; this
 // small clocked model catches the races the old late busy marker permitted.
 function exerciseReservationProtocol() {
-  let now = 0;
   let owner = null;
   let reportIdle = false;
   const events = [];
@@ -57,15 +56,8 @@ function exerciseReservationProtocol() {
       events.push(`busy:${requestId}`);
       return false;
     }
-    owner = { requestId, admittedAt: now, stallReported: false };
+    owner = { requestId };
     return true;
-  };
-  const probe = requestId => {
-    if (!owner || owner.requestId !== requestId || owner.stallReported) return;
-    if (now - owner.admittedAt < 3) return;
-    owner.stallReported = true;
-    reportIdle = true;
-    events.push(`stalled:${requestId}`);
   };
   const cancel = () => {}; // Cancellation cannot interrupt an executing owner.
   const finish = requestId => {
@@ -78,34 +70,22 @@ function exerciseReservationProtocol() {
   };
 
   assert(reserve('fast'), 'fresh request was not admitted');
-  now = 2.9;
-  probe('fast');
   assert(finish('fast'), 'fast owner did not release');
-  now = 3.1;
-  probe('fast');
   assert(
     events.join(',') === 'reply:fast',
-    'a request resolved before the deadline produced stale fallback/idle'
+    'an uncontended request produced a spurious busy/idle event'
   );
 
   events.length = 0;
-  now = 10;
   assert(reserve('owner'), 'owner was not admitted');
   assert(!reserve('contender'), 'a concurrent contender was admitted');
   cancel('owner');
   assert(owner?.requestId === 'owner', 'JavaScript cancellation released the executing owner');
-  now = 13;
-  probe('owner');
-  probe('owner');
-  assert(
-    events.filter(event => event === 'stalled:owner').length === 1,
-    'the request-keyed stall probe was not one-shot'
-  );
   assert(!finish('wrong-owner'), 'a non-owner released the reservation');
   assert(finish('owner'), 'the admitted owner did not release');
   assert(
-    events.join(',') === 'busy:contender,stalled:owner,idle:owner,reply:owner',
-    'busy/stall -> idle -> terminal reply ordering regressed'
+    events.join(',') === 'busy:contender,idle:owner,reply:owner',
+    'busy -> idle -> terminal reply ordering regressed'
   );
   assert(reserve('next'), 'terminal release did not admit the next chunk');
 }
@@ -139,14 +119,13 @@ try {
   );
   const generate = functionBody(native, 'generate');
   const reservation = functionBody(native, 'reserveGeneration');
-  const stallProbe = functionBody(native, 'reportGenerationStallIfNeeded');
   const release = functionBody(native, 'releaseGenerationReservation');
   const publishActivity = functionBody(native, 'publishActivity');
   const cancel = functionBody(native, 'cancel');
   const generationSuccess = functionBody(native, 'replyGenerationSuccess');
   const generationFailure = functionBody(native, 'replyGenerationFailure');
   assert(
-    /struct\s+GenerationReservation\s*\{[\s\S]*requestID:\s*String[\s\S]*admittedAt:\s*Date[\s\S]*stallReported:\s*Bool/.test(native),
+    /struct\s+GenerationReservation\s*\{[\s\S]*requestID:\s*String[\s\S]*admittedAt:\s*Date/.test(native),
     'native generation reservation lost its request-keyed health fields'
   );
   assert(
@@ -167,35 +146,16 @@ try {
   const reservationLock = reservation.indexOf('healthLock.lock()');
   const reservationCheck = reservation.indexOf('if let reservation = generationReservation');
   const reservationWrite = reservation.indexOf('generationReservation = GenerationReservation(');
-  const stallSchedule = reservation.indexOf('lifecycleEventQueue.asyncAfter');
   const reservationUnlock = reservation.lastIndexOf('healthLock.unlock()');
   assert(
     reservationLock >= 0 && reservationLock < reservationCheck &&
-    reservationCheck < reservationWrite && reservationWrite < stallSchedule &&
-    stallSchedule < reservationUnlock,
-    'reservation check/write/probe scheduling is no longer one locked admission operation'
+    reservationCheck < reservationWrite && reservationWrite < reservationUnlock,
+    'reservation check/write is no longer one locked admission operation'
   );
   assert(
     reservation.includes('code: "native_busy"') &&
     reservation.indexOf('lifecycleEventQueue.async') < reservation.indexOf('healthLock.unlock()'),
     'concurrent rejection is not ordered ahead of the owner idle event'
-  );
-  assert(
-    /generationStallThreshold:\s*TimeInterval\s*=\s*3/.test(native) &&
-    stallSchedule >= 0,
-    'first-request native stall probe is not armed at about three seconds'
-  );
-  for (const field of [
-    '"active"', '"busy"', '"kokoroBusy"', '"kokoroBusySeconds"',
-    '"kokoroStalled"', '"requestId"',
-  ]) {
-    assert(stallProbe.includes(field), `stall health event is missing ${field}`);
-  }
-  assert(
-    stallProbe.includes('reservation.requestID == requestID') &&
-    stallProbe.includes('!reservation.stallReported') &&
-    stallProbe.indexOf('healthLock.unlock()') < stallProbe.indexOf('emitEvent(event)'),
-    'stall probe is not request-keyed, one-shot, and callback-safe'
   );
   assert(
     publishActivity.includes('generationReservation.map') &&

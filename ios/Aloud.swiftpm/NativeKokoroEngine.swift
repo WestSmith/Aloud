@@ -71,7 +71,6 @@ final class NativeKokoroEngine {
     private struct GenerationReservation {
         let requestID: String
         let admittedAt: Date
-        var stallReported: Bool
     }
 
     private let queue = DispatchQueue(label: "com.westsmith.aloud.kokoro", qos: .userInitiated)
@@ -96,7 +95,6 @@ final class NativeKokoroEngine {
     // and two WebViews cannot both enqueue native inference.
     private var generationReservation: GenerationReservation?
     private var reportIdleWhenGenerationFinishes = false
-    private static let generationStallThreshold: TimeInterval = 3
 
     // Accessed only on `queue`.
     private var state: State = .idle
@@ -1021,9 +1019,9 @@ final class NativeKokoroEngine {
     }
 
     /// Atomically reserves native generation before `generate()` can enqueue
-    /// work. A request-keyed probe is armed at admission rather than at the first
-    /// MLX evaluation, so a first request stranded anywhere on `queue` is still
-    /// observable by JavaScript after the bounded grace period.
+    /// work. A second request is rejected while the first owns MLX, but the
+    /// current request is allowed to finish naturally; normal full-quality
+    /// inference can legitimately take several seconds on device.
     private func reserveGeneration(requestID: String) -> Bool {
         healthLock.lock()
         if let reservation = generationReservation {
@@ -1047,44 +1045,10 @@ final class NativeKokoroEngine {
 
         generationReservation = GenerationReservation(
             requestID: requestID,
-            admittedAt: Date(),
-            stallReported: false
+            admittedAt: Date()
         )
-        lifecycleEventQueue.asyncAfter(deadline: .now() + Self.generationStallThreshold) { [weak self] in
-            self?.reportGenerationStallIfNeeded(requestID: requestID)
-        }
         healthLock.unlock()
         return true
-    }
-
-    /// Emits one authoritative watchdog signal only while the exact admitted
-    /// request is still the native owner. The explicit stalled/request fields
-    /// distinguish this one-shot fallback trigger from ordinary lifecycle
-    /// health samples.
-    private func reportGenerationStallIfNeeded(requestID: String) {
-        healthLock.lock()
-        guard var reservation = generationReservation,
-              reservation.requestID == requestID,
-              !reservation.stallReported else {
-            healthLock.unlock()
-            return
-        }
-        reservation.stallReported = true
-        generationReservation = reservation
-        reportIdleWhenGenerationFinishes = true
-        let busySeconds = max(0, Int(Date().timeIntervalSince(reservation.admittedAt)))
-        healthLock.unlock()
-
-        let event: [String: Any] = [
-            "type": "kokoroHealth",
-            "active": isAppActive,
-            "busy": true,
-            "kokoroBusy": true,
-            "kokoroBusySeconds": busySeconds,
-            "kokoroStalled": true,
-            "requestId": requestID,
-        ]
-        emitEvent(event)
     }
 
     /// Lock-only health data for lifecycle logging and the `appActivity` bridge

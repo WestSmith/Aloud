@@ -12,6 +12,7 @@ const ROOT = process.env.ALOUD_ROOT
 const INDEX = path.join(ROOT, 'index.html');
 const src = fs.readFileSync(INDEX, 'utf8');
 const bridgeSrc = fs.readFileSync(path.join(ROOT, 'ios/Aloud.swiftpm/BridgeScript.swift'), 'utf8');
+const nativeEngineSrc = fs.readFileSync(path.join(ROOT, 'ios/Aloud.swiftpm/NativeKokoroEngine.swift'), 'utf8');
 
 function fail(message) {
   console.error(`native lifecycle self-check: FAIL — ${message}`);
@@ -449,7 +450,7 @@ function makeActivationHarness({ stale = false, pausedFor = 0 } = {}) {
     resolveActivation = resolve;
     rejectActivation = reject;
   });
-  const calls = { begin: [], toasts: 0, icon: [], primed: [], disposed: 0 };
+  const calls = { begin: [], toasts: 0, icon: [], primed: [], disposed: 0, warnings: 0 };
   let gestureActive = true;
   const source = extractNamedFunction(src, 'requestPlaybackStart');
   const api = new Function(
@@ -460,6 +461,7 @@ function makeActivationHarness({ stale = false, pausedFor = 0 } = {}) {
      const NATIVE_AUDIO_STALE_AFTER_MS = 15000;
      const S = { engine: 'neural', audioPlay: ${stale ? '{}' : 'null'} };
      const NATIVE = { nativeKokoro: true, reactivateAudio: () => activation };
+     const console = { warn() { calls.warnings++; } };
      const $ = () => ({ classList: { add() {}, remove() {} } });
      const disposeNeuralAudio = () => { calls.disposed++; S.audioPlay = null; nativeNeuralAudioNeedsRefresh = false; };
      const primeAudioGesture = () => calls.primed.push(gestureIsActive());
@@ -482,13 +484,15 @@ function makeActivationHarness({ stale = false, pausedFor = 0 } = {}) {
 async function testActivationOrdering() {
   const success = makeActivationHarness();
   success.requestPlaybackStart();
-  success.endGesture();
   assert(success.calls.primed.length === 1 && success.calls.primed[0] === true,
          'persistent audio was not primed inside the iOS Play gesture');
-  assert(success.calls.begin.length === 0, 'play began before native audio activation replied');
+  assert(success.calls.begin.length === 1,
+         'fresh Play was gated on a native bridge reply instead of starting in the gesture turn');
+  success.endGesture();
   success.resolveActivation({ active: true });
   await Promise.resolve(); await Promise.resolve();
-  assert(success.calls.begin.length === 1, 'play did not begin after native audio activation');
+  assert(success.calls.begin.length === 1 && success.state().nativeKokoroAppActive,
+         'late native activation reply restarted Play or failed to refresh health');
 
   const cancelled = makeActivationHarness();
   cancelled.requestPlaybackStart();
@@ -496,7 +500,8 @@ async function testActivationOrdering() {
   cancelled.cancel();
   cancelled.resolveActivation({ active: true });
   await Promise.resolve(); await Promise.resolve();
-  assert(cancelled.calls.begin.length === 0, 'late activation reply overrode Pause');
+  assert(cancelled.calls.begin.length === 1 && !cancelled.state().nativeKokoroAppActive,
+         'late activation reply overrode the newer Pause intent');
 
   const forced = makeActivationHarness();
   forced.requestPlaybackStart({ forceRestart: true });
@@ -504,15 +509,15 @@ async function testActivationOrdering() {
   forced.resolveActivation({ active: true });
   await Promise.resolve(); await Promise.resolve();
   assert(forced.calls.begin[0]?.forceRestart === true,
-         'word-start force-restart intent was lost across native activation');
+         'word-start force-restart intent was lost on immediate Play');
 
   const failed = makeActivationHarness();
   failed.requestPlaybackStart();
   failed.endGesture();
   failed.rejectActivation(new Error('activation failed'));
   await Promise.resolve(); await Promise.resolve();
-  assert(failed.calls.begin.length === 0 && failed.calls.toasts === 1,
-         'activation failure did not remain paused with one notice');
+  assert(failed.calls.begin.length === 1 && failed.calls.toasts === 0 && failed.calls.warnings === 1,
+         'fire-and-forget audio reactivation blocked or rewound fresh Play');
 
   const stale = makeActivationHarness({ stale: true });
   stale.requestPlaybackStart();
@@ -531,7 +536,7 @@ async function testActivationOrdering() {
   foregroundPause.endGesture();
   assert(foregroundPause.calls.disposed === 1 && foregroundPause.calls.primed[0] === true,
          'long foreground pause was not replaced and primed inside Play');
-  console.log('native audio activation             ordered; late reply cancelled; failure contained');
+  console.log('native audio activation             fresh Play immediate; late health reply intent-safe');
 }
 
 function makeBusyHandoffHarness({ busySeconds = 7 } = {}) {
@@ -834,186 +839,6 @@ function testBusyHandoff() {
   console.log('native busy fallback                bounded cover; boundary handoff; controls safe');
 }
 
-function makeFirstGenerationWatchdogHarness() {
-  let now = 0, nextTimer = 1;
-  const timers = new Map();
-  const setTimeoutFake = (fn, delay = 0) => {
-    const id = nextTimer++;
-    timers.set(id, { fn, due: now + delay });
-    return id;
-  };
-  const clearTimeoutFake = id => timers.delete(id);
-  const advance = ms => {
-    now += ms;
-    for (;;) {
-      const due = [...timers.entries()]
-        .filter(([, timer]) => timer.due <= now)
-        .sort((a, b) => a[1].due - b[1].due || a[0] - b[0]);
-      if (!due.length) break;
-      const [id, timer] = due[0];
-      timers.delete(id);
-      timer.fn();
-    }
-  };
-  const calls = { cancels: 0, refreshes: 0, nativeSpeaks: [], icons: [] };
-  const loading = new Set(['loading']);
-  const S = {
-    playing: true,
-    engine: 'neural',
-    neuralVoice: 'am_fenrir',
-    neuralGenToken: 1,
-    curSent: 0,
-    curWord: 14,
-    sentences: [{ start: 10, end: 20 }, { start: 20, end: 30 }],
-  };
-  const clearSource = extractNamedFunction(src, 'clearNativeKokoroGenerationWatchdog');
-  const armSource = extractNamedFunction(src, 'armNativeKokoroGenerationWatchdog');
-  const settleSource = extractNamedFunction(src, 'settleNativeKokoroGenerationWatchdog');
-  const commitSource = extractNamedFunction(src, 'commitNativeKokoroGenerationFallback');
-  const api = new Function(
-    'S', 'document', 'calls', 'loading', 'setTimeout', 'clearTimeout',
-    `const NATIVE = {
-       nativeKokoro: true,
-       refreshAppActivity() { calls.refreshes++; }
-     };
-     const NATIVE_KOKORO_BUSY_COVER_AFTER_MS = 3000;
-     let nativeKokoroAppActive = true, nativeKokoroBusy = false;
-     let nativeKokoroBusySeconds = 0, nativePlayIntent = 0;
-     let nativeKokoroBusyTimer = null, nativeKokoroResumeTimer = null;
-     let kokoroResumeOnForeground = false, nativeKokoroGenerationWatchdog = null;
-     const nativeKokoroBusyFallback = { phase: 'idle', handoffReady: false };
-     const $ = () => ({ classList: {
-       add(value) { loading.add(value); },
-       remove(value) { loading.delete(value); }
-     }});
-     const cancelNativeKokoroGenerations = () => { calls.cancels++; };
-     const setPlayIcon = value => { calls.icons.push(value); };
-     const speakNative = (sentIdx, word, owner) => {
-       calls.nativeSpeaks.push({ sentIdx, word, owner });
-     };
-     ${clearSource}
-     ${armSource}
-     ${settleSource}
-     ${commitSource}
-     return {
-       arm: armNativeKokoroGenerationWatchdog,
-       settle: settleNativeKokoroGenerationWatchdog,
-       commit: commitNativeKokoroGenerationFallback,
-       pause() {
-         S.playing = false;
-         nativePlayIntent++;
-         clearNativeKokoroGenerationWatchdog();
-       },
-       retarget() {
-         nativePlayIntent++;
-         S.curSent = 1;
-         S.curWord = 24;
-         clearNativeKokoroGenerationWatchdog();
-       },
-       state() {
-         return {
-           phase: nativeKokoroBusyFallback.phase,
-           busy: nativeKokoroBusy,
-           busySeconds: nativeKokoroBusySeconds,
-           watch: nativeKokoroGenerationWatchdog,
-           loading: loading.has('loading'),
-         };
-       }
-     };`
-  )(S, { hidden: false }, calls, loading, setTimeoutFake, clearTimeoutFake);
-  return { ...api, S, calls, advance };
-}
-
-function testFirstGenerationWatchdog() {
-  const quick = makeFirstGenerationWatchdogHarness();
-  const quickWatch = quick.arm(0, 14, quick.S.neuralGenToken);
-  quick.advance(2900);
-  assert(quick.calls.nativeSpeaks.length === 0 && quick.settle(quickWatch),
-         'a generation resolving at 2.9 seconds entered fallback');
-  quick.advance(100);
-  assert(quick.calls.nativeSpeaks.length === 0 && quick.calls.cancels === 0,
-         'settled generation retained a late fallback timer');
-
-  const hung = makeFirstGenerationWatchdogHarness();
-  const hungWatch = hung.arm(0, 14, hung.S.neuralGenToken);
-  hung.advance(3000);
-  assert(JSON.stringify(hung.calls.nativeSpeaks) ===
-         JSON.stringify([{ sentIdx: 0, word: 14, owner: 'kokoro-busy' }]) &&
-         hung.calls.cancels === 1 && hung.state().phase === 'covering' &&
-         hung.state().busy && hung.state().busySeconds === 3 &&
-         hung.calls.refreshes === 1 && !hung.state().loading,
-         'first admitted generation did not commit exactly one selected-word fallback');
-  assert(hung.S.engine === 'neural' && hung.S.neuralVoice === 'am_fenrir',
-         'first-generation fallback rewrote the Kokoro/Fenrir preference');
-  assert(!hung.commit(hungWatch) && !hung.settle(hungWatch) &&
-         hung.calls.nativeSpeaks.length === 1 && hung.calls.cancels === 1,
-         'deadline/result/native-health race started duplicate speech or cancellation');
-
-  const nativeWins = makeFirstGenerationWatchdogHarness();
-  const nativeWatch = nativeWins.arm(0, 14, nativeWins.S.neuralGenToken);
-  assert(nativeWins.commit(nativeWatch), 'owned native stall did not commit coverage');
-  nativeWins.advance(3000);
-  assert(nativeWins.calls.nativeSpeaks.length === 1 && nativeWins.calls.cancels === 1 &&
-         nativeWins.calls.refreshes === 1,
-         'native stall plus JavaScript deadline double-fired coverage');
-
-  const paused = makeFirstGenerationWatchdogHarness();
-  paused.arm(0, 14, paused.S.neuralGenToken);
-  paused.pause();
-  paused.advance(3000);
-  assert(paused.calls.nativeSpeaks.length === 0 && paused.calls.cancels === 0,
-         'Pause allowed a stale first-generation deadline to speak');
-
-  const retargeted = makeFirstGenerationWatchdogHarness();
-  retargeted.arm(0, 14, retargeted.S.neuralGenToken);
-  retargeted.retarget();
-  retargeted.advance(3000);
-  assert(retargeted.calls.nativeSpeaks.length === 0,
-         'word retarget allowed the old selected-word deadline to speak');
-  console.log('first native generation watchdog     3s one-shot cover; settle/control races safe');
-}
-
-function testBridgeStallOwnership() {
-  const match = /static let source = #"""([\s\S]*?)"""#/.exec(bridgeSrc);
-  assert(match, 'could not extract production native bridge script');
-  const posted = [], received = [];
-  const window = {
-    webkit: { messageHandlers: { aloudNative: { postMessage(message) { posted.push(message); } } } },
-    addEventListener() {},
-  };
-  const fakeSetTimeout = () => 1;
-  const fakeClearTimeout = () => {};
-  new Function('window', 'self', 'crypto', 'setTimeout', 'clearTimeout', 'addEventListener',
-    match[1]
-  )(
-    window, { crypto: { randomUUID: () => 'owned-page' } },
-    { randomUUID: () => 'owned-page' }, fakeSetTimeout, fakeClearTimeout,
-    window.addEventListener,
-  );
-  window.__aloudNative.onEvent = event => received.push(event);
-  window.__aloudNative.kokoro.generate('test', 'am_fenrir');
-  const requestId = posted.at(-1)?.requestId;
-  assert(requestId?.startsWith('owned-page:'), 'bridge harness did not create an owned request');
-
-  window.__aloudNative._emit({
-    type: 'kokoroHealth', active: true, kokoroBusy: true,
-    kokoroBusySeconds: 3, kokoroStalled: true, requestId: 'another-page:1',
-  });
-  const foreign = received.pop();
-  assert(foreign?.kokoroBusy && !foreign.kokoroStalled && !foreign.kokoroOwnedStall &&
-         !('requestId' in foreign),
-         'foreign stall was not forwarded as anonymous generic busy health');
-
-  window.__aloudNative._emit({
-    type: 'kokoroHealth', active: true, kokoroBusy: true,
-    kokoroBusySeconds: 3, kokoroStalled: true, requestId,
-  });
-  const owned = received.pop();
-  assert(owned?.kokoroOwnedStall && owned.kokoroStalled && !('requestId' in owned),
-         'owned pending stall was not marked without exposing its request id');
-  console.log('native stall bridge ownership        owner marked; foreign health anonymized');
-}
-
 async function testNeuralErrorOwnership() {
   const source = extractNamedFunction(src, 'speakNeural');
   const makeHarness = () => {
@@ -1041,8 +866,6 @@ async function testNeuralErrorOwnership() {
        const loadKokoro = () => {};
        const armKokoroCover = () => {};
        const routeNativeKokoroBusyFallback = () => false;
-       const armNativeKokoroGenerationWatchdog = () => null;
-       const settleNativeKokoroGenerationWatchdog = () => true;
        const stopAll = () => {};
        const generateNeural = () => generation;
        const handleNeuralFailure = () => { calls.failures++; S.playing = false; };
@@ -1087,8 +910,6 @@ try {
   await testResumeWatchdog();
   await testActivationOrdering();
   testBusyHandoff();
-  testFirstGenerationWatchdog();
-  testBridgeStallOwnership();
   await testNeuralErrorOwnership();
   const pauseSource = extractNamedFunction(src, 'pauseAll');
   const toggleSource = extractNamedFunction(src, 'togglePlay');
@@ -1099,7 +920,7 @@ try {
   const speakNeuralSource = extractNamedFunction(src, 'speakNeural');
   const speakNativeSource = extractNamedFunction(src, 'speakNative');
   const busyRouteSource = extractNamedFunction(src, 'routeNativeKokoroBusyFallback');
-  const firstGenerationCommitSource = extractNamedFunction(src, 'commitNativeKokoroGenerationFallback');
+  const stitchedSource = extractNamedFunction(src, 'speakNeuralStitched');
   const failureSource = extractNamedFunction(src, 'handleNeuralFailure');
   const suspendNativeSource = extractNamedFunction(src, 'suspendNativeKokoroWork');
   const generateSource = extractNamedFunction(src, 'generateNeural');
@@ -1122,8 +943,12 @@ try {
          toggleSource.includes('nativeNeuralPausedAt = Date.now()'),
          'foreground neural pauses no longer age the retained audio pipeline');
   assert(beginPlaySource.includes('resumePersistentNeuralAudio()'), 'transport no longer uses the resume watchdog');
-  assert(requestPlaySource.includes('reactivateAudio') && requestPlaySource.includes('.then(status =>'),
-         'Play no longer waits for native audio-session activation');
+  assert(requestPlaySource.includes('Promise.resolve(NATIVE.reactivateAudio(allowBackground))') &&
+         requestPlaySource.includes('.then(status =>') &&
+         requestPlaySource.includes('beginRequestedPlayback({ allowBackground, forceRestart })') &&
+         !requestPlaySource.includes('nativePlayActivationPending = true') &&
+         !requestPlaySource.includes("$('btn-play').classList.add('loading')"),
+         'fresh Play is again gated on native audio-session acknowledgement');
   assert(requestPlaySource.indexOf('primeAudioGesture()') >= 0 &&
          requestPlaySource.indexOf('primeAudioGesture()') < requestPlaySource.indexOf('NATIVE.reactivateAudio'),
          'Play no longer primes persistent audio before losing the iOS gesture');
@@ -1131,17 +956,11 @@ try {
          requestPlaySource.includes('nativeNeuralPausedAt') &&
          requestPlaySource.indexOf('disposeNeuralAudio()') < requestPlaySource.indexOf('primeAudioGesture()'),
          'long-suspended audio is not replaced before the fresh gesture prime');
-  assert(toggleSource.includes('nativePlayActivationPending'),
-         'transport cannot cancel a pending native activation');
   assert(toggleSource.includes("S.engine === 'neural' && !nativeUtter"),
          'Pause can leave native fallback speech running behind the paused UI');
-  const pendingCancel = toggleSource.slice(
-    toggleSource.indexOf('if (nativePlayActivationPending)'),
-    toggleSource.indexOf('if (S.playing)')
-  );
-  assert(pendingCancel.includes('nativePlayIntent++') &&
-         pendingCancel.includes('nativePlayActivationPending = false'),
-         'Pause no longer invalidates a pending native activation reply');
+  assert(beginPlaySource.includes('NATIVE?.nativeKokoro && document.hidden') &&
+         !beginPlaySource.includes('document.hidden || !nativeKokoroAppActive'),
+         'a stale native activity sample can again block a visible explicit Play');
   assert(requestWordSource.includes('requestPlaybackStart({ forceRestart: true })') &&
          !requestWordSource.includes('primeAudioGesture()'),
          'word-start helper bypasses native audio-session activation');
@@ -1163,20 +982,17 @@ try {
          speakNeuralSource.indexOf('routeNativeKokoroBusyFallback(sentIdx, fromWord)') <
          speakNeuralSource.indexOf('generateNeural(sentIdx)'),
          'native busy fallback gate moved behind a new MLX request');
-  const firstWatchAt = speakNeuralSource.indexOf('armNativeKokoroGenerationWatchdog(sentIdx, fromWord, genToken)');
-  const firstGenerateAt = speakNeuralSource.indexOf('generateNeural(sentIdx)');
-  assert(firstWatchAt >= 0 && firstWatchAt < firstGenerateAt &&
-         speakNeuralSource.includes('settleNativeKokoroGenerationWatchdog(generationWatch)'),
-         'first native generation is no longer deadline-owned through success/failure settlement');
+  assert(!speakNeuralSource.includes('armNativeKokoroGenerationWatchdog') &&
+         !speakNeuralSource.includes('settleNativeKokoroGenerationWatchdog') &&
+         !src.includes('function commitNativeKokoroGenerationFallback'),
+         'normal first Fenrir generation is again cancelled by an elapsed-time watchdog');
   assert(busyRouteSource.includes("speakNative(sentIdx, fromWord, 'kokoro-busy')") &&
          busyRouteSource.includes('S.neuralCache.has(neuralCacheKey(sentIdx))') &&
          busyRouteSource.includes('holdKokoroForBusyQueue(true)'),
          'busy routing no longer covers uncached work while preserving cached Fenrir audio');
-  assert(firstGenerationCommitSource.includes('cancelNativeKokoroGenerations()') &&
-         firstGenerationCommitSource.includes("speakNative(watch.sentIdx, watch.fromWord, 'kokoro-busy')") &&
-         !firstGenerationCommitSource.includes('generateNeural(') &&
-         !firstGenerationCommitSource.includes('playCurrent('),
-         'first-generation deadline can enqueue a second MLX request instead of committing to Apple coverage');
+  assert(!speakNeuralSource.includes('armNativeNeuralAudioWatchdog') &&
+         !stitchedSource.includes('armNativeNeuralAudioWatchdog'),
+         'fresh generated clips again invoke the resume-only media watchdog');
   assert(failureSource.includes("error?.code === 'native_busy'") &&
          failureSource.includes('nativeKokoroBusy = true') &&
          failureSource.includes('nativeKokoroBusySeconds = 0') &&
@@ -1196,8 +1012,12 @@ try {
   assert(nativeInitSource.includes('inactiveFor >= NATIVE_AUDIO_STALE_AFTER_MS') &&
          nativeInitSource.includes('nativeNeuralAudioNeedsRefresh = true'),
          'a long native suspension no longer marks paused media for replacement');
-  assert(nativeInitSource.includes('ev.kokoroOwnedStall && commitNativeKokoroGenerationFallback()'),
-         'owned native stall health no longer converges on the first-generation watchdog');
+  assert(!nativeInitSource.includes('kokoroOwnedStall') &&
+         !bridgeSrc.includes('kokoroOwnedStall') && !bridgeSrc.includes('kokoroStalled') &&
+         !nativeEngineSrc.includes('generationStallThreshold') &&
+         !nativeEngineSrc.includes('reportGenerationStallIfNeeded') &&
+         !nativeEngineSrc.includes('kokoroStalled'),
+         'three-second native generation stall cancellation was reintroduced');
   assert(nativeInitSource.includes('!kokoroResumeOnForeground) togglePlay({ allowBackground: true })') &&
          nativeInitSource.includes('nativePlayActivationPending || kokoroResumeOnForeground'),
          'lock-screen Play/Pause no longer preserves or cancels a queued native start');
@@ -1237,13 +1057,6 @@ try {
          generateNowSource.includes('continuation: index > 0') &&
          generateNowSource.includes('if (!p.continuation)'),
          'oversize display-token fragments are not integrated into generation/timing');
-  assert(bridgeSrc.includes("ev.type === 'kokoroHealth' && ev.kokoroStalled") &&
-         bridgeSrc.includes("String(ev.requestId || '').indexOf(pageNonce + ':') === 0") &&
-         bridgeSrc.includes("stalledPending.cmd === 'kokoroGenerate'") &&
-         bridgeSrc.includes('if (ownsLiveGeneration) ev.kokoroOwnedStall = true') &&
-         bridgeSrc.includes('else delete ev.kokoroStalled') &&
-         bridgeSrc.includes('delete ev.requestId'),
-         'native stall ownership is not filtered at the page-nonce bridge boundary');
   if (!process.exitCode) console.log('\nnative lifecycle self-check: PASS');
 } catch (error) {
   fail(error?.stack || String(error));

@@ -162,20 +162,6 @@ enum BridgeScript {
         remote:  { play: function () {}, pause: function () {}, toggle: function () {}, next: function () {}, prev: function () {} },
 
         _emit: function (ev) {
-          if (ev && ev.type === 'kokoroHealth' && ev.kokoroStalled) {
-            /* Native health is broadcast across every open Aloud scene. A
-               stalled request may only move the page that actually owns that
-               still-pending generation onto Apple speech; generic busy/idle
-               samples remain broadcast so other scenes still avoid MLX
-               overlap. Do not expose the page nonce/request id to app code. */
-            var ownedStall = String(ev.requestId || '').indexOf(pageNonce + ':') === 0;
-            var stalledPending = ownedStall && pendingKokoro[ev.requestId];
-            var ownsLiveGeneration = stalledPending && stalledPending.cmd === 'kokoroGenerate';
-            ev = Object.assign({}, ev);
-            delete ev.requestId;
-            if (ownsLiveGeneration) ev.kokoroOwnedStall = true;
-            else delete ev.kokoroStalled;
-          }
           if (ev && ev.type === 'audioSessionReply') {
             var audioPending = pendingAudioSession[ev.requestId];
             if (!audioPending) return;

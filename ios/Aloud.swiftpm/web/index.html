@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.24.3">
+<meta name="aloud-version" content="v6.24.4">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1118,11 +1118,6 @@ const nativeKokoroBusyFallback = {
   phase: 'idle',              // idle | waiting | covering
   handoffReady: false,
 };
-/* The ordinary busy fallback above handles an older request already occupying
-   MLX. This watch owns the request started by the current Play action itself,
-   so a very first native generation that never settles cannot leave Aloud
-   spinning forever without ever having produced a `native_busy` rejection. */
-let nativeKokoroGenerationWatchdog = null;
 /* A bridge cancellation settles its JavaScript promise immediately, but the
    serial native MLX call may still be unwinding. Give every native generation
    intent an epoch so a Play/word retarget cannot deduplicate onto the
@@ -3845,12 +3840,6 @@ function initNativeEngine() {
         if (!active) cancelNativeKokoroGenerations();
         return;
       }
-      /* BridgeScript only marks a stall when its request belongs to this exact
-         page and is still pending. The local timer and this native watchdog
-         race through the same idempotent commit, so they can never start two
-         voices. Once committed, the current sentence belongs to Apple speech
-         even if cancelling the bridge immediately produces an idle event. */
-      if (ev.kokoroOwnedStall && commitNativeKokoroGenerationFallback()) return;
       // Swift owns the authoritative iPad lifecycle state. Its activation
       // event cannot race ahead of the native MLX gate the way a guessed
       // visibility timeout can.
@@ -5385,7 +5374,10 @@ function nativeKokoroGenerationGateError() {
   }
   if (nativeKokoroBusy)
     return nativeKokoroError('Kokoro is finishing earlier speech on this iPad.', 'native_busy');
-  if (!nativeKokoroAppActive || document.hidden)
+  /* UIApplication is re-sampled synchronously by Swift for every generation.
+     A visible page must not reject its own explicit Play merely because the
+     previous native activity event is still crossing the bridge. */
+  if (document.hidden)
     return nativeKokoroError('Return to Aloud before creating more Kokoro speech.', 'app_inactive');
   return null;
 }
@@ -5440,85 +5432,9 @@ function clearNativeKokoroBusyWait() {
 }
 
 function clearNativeKokoroBusyFallback() {
-  clearNativeKokoroGenerationWatchdog();
   clearNativeKokoroBusyWait();
   nativeKokoroBusyFallback.phase = 'idle';
   nativeKokoroBusyFallback.handoffReady = false;
-}
-
-function clearNativeKokoroGenerationWatchdog(watch = nativeKokoroGenerationWatchdog) {
-  if (!watch || nativeKokoroGenerationWatchdog !== watch) return;
-  clearTimeout(watch.timer);
-  nativeKokoroGenerationWatchdog = null;
-}
-
-function armNativeKokoroGenerationWatchdog(sentIdx, fromWord, genToken) {
-  if (!NATIVE?.nativeKokoro) return null;
-  clearNativeKokoroGenerationWatchdog();
-  const sent = S.sentences[sentIdx];
-  if (!sent) return null;
-  const watch = {
-    intent: nativePlayIntent,
-    genToken,
-    sentIdx,
-    fromWord: Math.max(sent.start, Math.min(fromWord ?? sent.start, sent.end - 1)),
-    committed: false,
-    timer: null,
-  };
-  nativeKokoroGenerationWatchdog = watch;
-  watch.timer = setTimeout(() => commitNativeKokoroGenerationFallback(watch),
-    NATIVE_KOKORO_BUSY_COVER_AFTER_MS);
-  return watch;
-}
-
-function settleNativeKokoroGenerationWatchdog(watch) {
-  if (!watch) return true;
-  if (watch.committed) return false;
-  clearNativeKokoroGenerationWatchdog(watch);
-  return !watch.committed;
-}
-
-/* One-way ownership transfer for the current sentence. Cancelling the bridge
-   promise prevents a late native result from reaching playback, while the
-   generation token is a second guard for the result/deadline event-loop race.
-   Neither action starts replacement MLX work. */
-function commitNativeKokoroGenerationFallback(watch = nativeKokoroGenerationWatchdog) {
-  if (!watch || nativeKokoroGenerationWatchdog !== watch || watch.committed)
-    return false;
-  if (watch.intent !== nativePlayIntent || watch.genToken !== S.neuralGenToken ||
-      !S.playing || S.engine !== 'neural' || S.curSent !== watch.sentIdx ||
-      !nativeKokoroAppActive || document.hidden || !S.sentences[watch.sentIdx]) {
-    clearNativeKokoroGenerationWatchdog(watch);
-    return false;
-  }
-  watch.committed = true;
-  clearNativeKokoroGenerationWatchdog(watch);
-  clearTimeout(nativeKokoroBusyTimer);
-  nativeKokoroBusyTimer = null;
-  clearTimeout(nativeKokoroResumeTimer);
-  nativeKokoroResumeTimer = null;
-  kokoroResumeOnForeground = false;
-  nativeKokoroBusyFallback.phase = 'covering';
-  nativeKokoroBusyFallback.handoffReady = false;
-  /* The deadline itself is authoritative evidence that the admitted request
-     still owns native work. Keep subsequent Apple sentences continuous until
-     an ordered health refresh explicitly reports idle. */
-  nativeKokoroBusy = true;
-  nativeKokoroBusySeconds = Math.max(nativeKokoroBusySeconds,
-    NATIVE_KOKORO_BUSY_COVER_AFTER_MS / 1000);
-  $('btn-play').classList.remove('loading');
-  /* Invalidate before cancelling: even a success already queued in the
-     microtask queue is stale by the time speakNeural() resumes. */
-  S.neuralGenToken++;
-  cancelNativeKokoroGenerations();
-  /* Cancellation may release the reservation just before its native 3s probe
-     runs. Ask for one ordered health sample so coverage always learns when it
-     is safe to hand the following sentence back to Kokoro. */
-  try { NATIVE.refreshAppActivity?.(); } catch {}
-  S.playing = true;
-  setPlayIcon(true);
-  speakNative(watch.sentIdx, watch.fromWord, 'kokoro-busy');
-  return true;
 }
 
 function startNativeKokoroBusyFallback() {
@@ -6077,13 +5993,11 @@ async function speakNeural(sentIdx, fromWord) {
   const sent = S.sentences[sentIdx];
   if (!sent) return stopAll();
   const genToken = ++S.neuralGenToken;
-  const generationWatch = armNativeKokoroGenerationWatchdog(sentIdx, fromWord, genToken);
   $('btn-play').classList.add('loading');
   let entry;
   try {
     entry = await generateNeural(sentIdx);
   } catch (err) {
-    settleNativeKokoroGenerationWatchdog(generationWatch);
     console.error(err);
     /* A word tap/pause can replace this request while its native rejection is
        still crossing the bridge. The newer genToken owns both transport and
@@ -6097,7 +6011,6 @@ async function speakNeural(sentIdx, fromWord) {
     handleNeuralFailure(err);
     return;
   }
-  if (!settleNativeKokoroGenerationWatchdog(generationWatch)) return;
   if (genToken !== S.neuralGenToken || !S.playing || S.curSent !== sentIdx) {
     /* A newer generation owns the pulse; otherwise this abandoned job must
        release it or the button can stay animated forever. */
@@ -6142,22 +6055,16 @@ async function speakNeural(sentIdx, fromWord) {
   if (seekTo > 0.04 && seekTo < entry.durationSec * 0.9) {
     na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) na.currentTime = seekTo; }, { once: true });
   }
-  const audioWatch = armNativeNeuralAudioWatchdog(na, P, startFrom);
   try {
     await na.play();
   } catch (e) {
     console.warn(e);
-    if (audioWatch && S.audioPlay === P && NA === na) {
-      audioWatch.recover(e?.message || 'play() rejected');
-      return;
-    }
-    audioWatch?.cleanup();
     if (S.audioPlay !== P || NA !== na) return;
     S.audioPlay = null;
     handleNeuralFailure(e);
     return;
   }
-  if (S.audioPlay !== P || NA !== na) { audioWatch?.cleanup(); return; }
+  if (S.audioPlay !== P || NA !== na) return;
   highlightWord(startFrom);
   showTimingBadge(entry.timing);
 
@@ -6259,20 +6166,10 @@ async function speakNeuralStitched(run) {
     : tms.every(t => t === 'exact') ? 'exact'
     : tms.every(t => t === 'estimated') ? 'estimated'
     : 'mixed');
-  const audioWatch = armNativeNeuralAudioWatchdog(
-    na,
-    playState,
-    segs[0]?.sentStart ?? S.curWord
-  );
   try {
     await na.play();
   } catch (e) {
     console.warn(e);
-    if (audioWatch && S.audioPlay === playState && NA === na) {
-      audioWatch.recover(e?.message || 'play() rejected');
-      return;
-    }
-    audioWatch?.cleanup();
     if (S.audioPlay !== playState || NA !== na) return;
     if (S.audioPlay === playState) {
       S.audioPlay = null;
@@ -6280,7 +6177,7 @@ async function speakNeuralStitched(run) {
     }
     throw e;
   }
-  if (S.audioPlay !== playState || NA !== na) { audioWatch?.cleanup(); return; }
+  if (S.audioPlay !== playState || NA !== na) return;
   neuralPump();   // keep generating ahead while the batch plays
 }
 
@@ -6538,7 +6435,10 @@ function neuralCanResumeWithoutGeneration() {
 function beginRequestedPlayback(options) {
   const allowBackground = !!options?.allowBackground;
   const forceRestart = !!options?.forceRestart;
-  const nativeKokoroBlocked = NATIVE?.nativeKokoro && (document.hidden || !nativeKokoroAppActive);
+  /* A visible explicit Play must not be blocked by a lifecycle event that is
+     merely late crossing the bridge. Swift refreshes UIApplication state at
+     the generation boundary and remains the authoritative MLX gate. */
+  const nativeKokoroBlocked = NATIVE?.nativeKokoro && document.hidden;
   if (S.engine === 'neural' && nativeKokoroBlocked &&
       !(allowBackground && neuralCanResumeWithoutGeneration())) {
     kokoroResumeOnForeground = true;
@@ -6571,28 +6471,22 @@ function requestPlaybackStart(options) {
   if (!allowBackground && NATIVE?.nativeKokoro &&
       (nativeNeuralAudioNeedsRefresh || pausedTooLong)) disposeNeuralAudio();
   /* Preserve the iOS user-activation token before crossing the asynchronous
-     native audio-session bridge. The real sentence still waits for Swift's
-     activation acknowledgement below; this silent prime only blesses the
-     persistent WebKit player while the Play/word-tap gesture is live. */
+     native audio-session bridge. This silent prime blesses the persistent
+     WebKit player while the Play/word-tap gesture is live. */
   primeAudioGesture();
-  if (!NATIVE?.reactivateAudio) { beginRequestedPlayback({ allowBackground, forceRestart }); return; }
   const intent = ++nativePlayIntent;
-  nativePlayActivationPending = true;
-  $('btn-play').classList.add('loading');
-  Promise.resolve(NATIVE.reactivateAudio(allowBackground)).then(status => {
-    if (intent !== nativePlayIntent || !nativePlayActivationPending) return;
-    nativePlayActivationPending = false;
-    $('btn-play').classList.remove('loading');
-    nativeKokoroAppActive = status?.active !== false;
-    beginRequestedPlayback({ allowBackground, forceRestart });
-  }).catch(error => {
-    if (intent !== nativePlayIntent) return;
-    nativePlayActivationPending = false;
-    $('btn-play').classList.remove('loading');
-    setPlayIcon(false);
-    const detail = String(error?.message || error || 'Audio could not start.').replace(/\s+/g, ' ').slice(0, 140);
-    toast(`⚠️ ${detail} Tap Play to retry.`, 8000);
-  });
+  nativePlayActivationPending = false;
+  /* Match the last physically verified fresh-Play path: start the reader in
+     this gesture turn instead of making transport depend on a bridge reply.
+     Swift still reactivates the session immediately, well before a newly
+     generated sentence is ready to play. Long-pause media recovery remains in
+     resumePersistentNeuralAudio(), where it cannot cancel healthy inference. */
+  if (NATIVE?.reactivateAudio) {
+    Promise.resolve(NATIVE.reactivateAudio(allowBackground)).then(status => {
+      if (intent === nativePlayIntent) nativeKokoroAppActive = status?.active !== false;
+    }).catch(error => console.warn('audio session reactivation', error));
+  }
+  beginRequestedPlayback({ allowBackground, forceRestart });
 }
 
 /* Word taps are playback gestures too. Position immediately, then use the

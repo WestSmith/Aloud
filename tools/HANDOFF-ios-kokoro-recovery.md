@@ -4,11 +4,13 @@ Branch: `agent/fix-ios-resume-recovery`
 
 Draft PR: https://github.com/WestSmith/Aloud/pull/12
 
-Last fully validated and packaged checkpoint: `858c0e5`
-
 Installed physical-device build: Aloud `6.24.3` (`16`), signed and installed on
-the paired iPad on 2026-08-13. Automatic launch was denied only because the
-iPad was locked; physical playback validation remains the next step.
+the paired iPad on 2026-08-13. The user confirmed that fresh Fenrir playback
+still failed in that build. Do not use it as a recovery baseline.
+
+Current control build: Aloud `6.24.4` (`17`). It restores the fresh Play path
+from physically working `5108b79` and still needs a signed build, installation,
+and physical validation.
 
 ## Reported failure
 
@@ -30,27 +32,40 @@ is not a stale service-worker or packaging issue.
 - A bounded Apple-voice fallback that preserves the neural/Fenrir selection,
   starts at the selected word, and hands back only between sentences.
 
-## Final recovery design
+## Regression found after 6.24.3 physical test
+
+The first-request stall protection itself broke normal playback:
+
+- `667ac94` wrapped the entire current-sentence generation (including G2P and
+  every chunk) in a three-second JavaScript deadline.
+- `e173012` independently classified any still-owned native request as stalled
+  after three seconds.
+- Full-quality Fenrir inference can legitimately exceed three seconds. Both
+  paths therefore cancelled healthy generation before its WAV could play and
+  transferred the sentence to an unreliable fallback path.
+
+The 6.24.4 control patch removes both elapsed-time cancellation mechanisms,
+starts fresh Play immediately in its gesture turn while audio-session
+reactivation proceeds fire-and-forget, and confines the WebKit media watchdog
+to resuming an existing paused clip. A visible explicit Play also no longer
+trusts a possibly stale JavaScript activity flag; Swift re-samples
+`UIApplication` at the actual generation boundary.
+
+## Recovery design retained in 6.24.4
 
 - `e173012` atomically reserves one native generation across all Aloud windows.
   A concurrent request receives `native_busy`; cancellation cannot release an
   MLX evaluation still executing; and any ordered idle event is delivered
   before the terminal reply so the next chunk cannot falsely block itself.
-- A request-keyed native probe reports a still-owned generation after about
-  three seconds. BridgeScript exposes that stall only to the page owning the
-  request while forwarding anonymized shared busy health to other windows.
-- `667ac94` adds a matching first-request watchdog. A generation resolving by
-  2.9 seconds remains Fenrir. If it has not settled at three seconds, the exact
-  current sentence and selected word transfer once to Apple speech. Fenrir
-  remains selected and receives the next sentence only after ordered idle.
-- Pause, word retarget, document/engine changes, native result/deadline races,
-  repeated lifecycle events, and idle-to-busy retry flaps all have explicit
-  owner/intent regression coverage.
-- `858c0e5` synchronizes the reviewed root page into the packaged iOS bundle.
-
-Expected tradeoff: a healthy native sentence taking longer than three seconds
-also uses Apple speech for that one sentence. This deliberately prioritizes
-bounded time-to-audio over waiting silently, without changing the saved voice.
+- An actually older admitted request still produces `native_busy`; that path
+  retains its bounded Apple-voice coverage and sentence-boundary handoff.
+- Native speculative generation remains disabled, preventing expensive MLX
+  work from starting while playback is paused. Browser runway is unchanged.
+- MLX lifecycle checkpoints remain at all forced evaluation boundaries.
+- Long-paused/suspended WebKit audio is rebuilt inside the next Play gesture,
+  and the progress watchdog is used only when resuming retained audio.
+- Cancelled native promises remain generation-epoch scoped, so retargeting
+  cannot reuse an abandoned same-sentence promise.
 
 ## Focused validation commands
 
@@ -64,9 +79,7 @@ node tools/library-recovery-selfcheck.mjs
 git diff --check
 ```
 
-All commands above passed at `858c0e5`. The signed Release build succeeded, the
-packaged `web/index.html` SHA-256 matched the source
-(`2231a91e2ef658e401332a5e3974da12d39b04ec66b0405dc42e892a2c7e0ac1`),
-and device inventory confirmed Aloud 6.24.3 (16). Do not merge PR 12 until the
-user confirms physical Fenrir/1.5x Play, word retarget, Pause/resume, and a long
-pause/background cycle.
+All focused commands passed for the 6.24.4 control patch, and the root/iOS web
+assets are byte-identical. Keep the branch checkpoint pushed before handoff.
+Do not merge PR 12 until the user confirms physical Fenrir/1.5x fresh Play,
+word retarget, Pause/resume, and then a long pause/background cycle.
