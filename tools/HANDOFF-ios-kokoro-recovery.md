@@ -57,8 +57,20 @@ and service-worker cache key (`aloud-v6.24.6-b19`) from Package.swift, then
 requires byte-identical root/iOS assets. This prevents the build-18 version
 ambiguity from recurring.
 
-Next candidate: Aloud `6.24.7` (`20`), web marker
-`v6.24.7 (20) · web R20`. Build 19 introduced the only credible fresh-Play
+Current installed candidate: Aloud `6.24.7` (`20`), web marker
+`v6.24.7 (20) · web R20`. Its clean signed Release build succeeded, package
+inventory was verified as 6.24.7 (20), and the source, synced iOS asset, and
+packaged `web/index.html` share SHA-256
+`88ce6b3452c08efb365d4608bd9b3713dee3579e25151741b7e144219672a5b8`.
+The corresponding service workers share
+`1108ee4684873992dffa3e6231b011e091feda3b3f24ff8ff42065d3471ea8f9`.
+The package uses team `9UXFSGZM4Y` and the same provisioning profile as the
+previous candidates. It was installed in place on the paired iPad on
+2026-08-13, and device inventory explicitly confirmed 6.24.7 (20). A forced
+`--terminate-existing` launch was denied because the iPad was locked; the user
+must unlock and open Aloud once before the physical fresh-Play test.
+
+Build 19 introduced the only credible fresh-Play
 runtime delta from the physically working build 17: both persistent-media
 `ended` and `error` handlers ignored every event until WebKit emitted
 `playing`. A genuine current-source load/decode failure before that event could
@@ -67,8 +79,8 @@ intentionally has no elapsed-time watchdog. Build 20 instead checks the live
 media element state. It ignores a stale queued event after source replacement,
 when `ended`/`error` have been cleared, but handles a genuine current-source
 terminal event even before `playing`. The lifecycle self-check executes both
-stale and genuine pre-playing terminal cases. All focused checks pass; build,
-package verification, installation, and physical testing are still pending.
+stale and genuine pre-playing terminal cases. All focused checks pass; physical
+testing is still pending.
 
 ## Post-control audit
 
