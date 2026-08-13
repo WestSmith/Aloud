@@ -28,6 +28,30 @@ ASSETS=(
 CHECK_ONLY=0
 [[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
 
+# Keep the three user-visible/build cache identities tied together. A native
+# package once shipped as 6.24.5 (18) while its reader page still displayed
+# 6.24.4, making a physical-device result impossible to attribute confidently.
+PACKAGE="$REPO_ROOT/ios/Aloud.swiftpm/Package.swift"
+DISPLAY_VERSION="$(sed -nE 's/^[[:space:]]*displayVersion: "([^"]+)",[[:space:]]*$/\1/p' "$PACKAGE")"
+BUNDLE_VERSION="$(sed -nE 's/^[[:space:]]*bundleVersion: "([^"]+)",[[:space:]]*$/\1/p' "$PACKAGE")"
+if [[ -z "$DISPLAY_VERSION" || -z "$BUNDLE_VERSION" ]]; then
+  echo "Package.swift must contain exactly one displayVersion and bundleVersion" >&2
+  exit 1
+fi
+
+EXPECTED_MARKER="v$DISPLAY_VERSION ($BUNDLE_VERSION) · web R$BUNDLE_VERSION"
+EXPECTED_CACHE="aloud-v$DISPLAY_VERSION-b$BUNDLE_VERSION"
+ACTUAL_MARKER="$(sed -nE 's/^<meta name="aloud-version" content="([^"]+)">$/\1/p' "$REPO_ROOT/index.html")"
+ACTUAL_CACHE="$(sed -nE "s/^const VERSION = '([^']+)';$/\\1/p" "$REPO_ROOT/sw.js")"
+if [[ "$ACTUAL_MARKER" != "$EXPECTED_MARKER" ]]; then
+  echo "index.html version marker does not match iOS $DISPLAY_VERSION ($BUNDLE_VERSION)" >&2
+  exit 1
+fi
+if [[ "$ACTUAL_CACHE" != "$EXPECTED_CACHE" ]]; then
+  echo "sw.js cache version does not match iOS $DISPLAY_VERSION ($BUNDLE_VERSION)" >&2
+  exit 1
+fi
+
 mkdir -p "$DEST"
 
 drift=0

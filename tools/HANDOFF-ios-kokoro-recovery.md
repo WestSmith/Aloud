@@ -27,17 +27,39 @@ synced iOS asset, and packaged `web/index.html` share SHA-256
 The development-signature trust warning reported by macOS is identical to the
 warning for the successfully installed 6.24.4 (17) control, and both packages
 embed the same provisioning profile; the device accepted the new package.
-Physical verification of this candidate has not started.
+The first word-retarget test was reported as still not working. That result is
+not a clean build-18 attribution: the initial launch did not terminate an
+already-running process, and the web version label was accidentally left at
+6.24.4. A later `--terminate-existing` launch replaced PID 16249 with PID 16264,
+proving the new native package was then running, but no second build-18 test was
+requested after that forced relaunch. Treat the user report as a real unresolved
+retarget failure and do not mark build 18 verified.
+
+Next candidate: Aloud `6.24.6` (`19`), web marker
+`v6.24.6 (19) · web R19`. It has not yet been built, installed, or physically
+tested. The asset-sync check now derives the exact visible marker
+and service-worker cache key (`aloud-v6.24.6-b19`) from Package.swift, then
+requires byte-identical root/iOS assets. This prevents the build-18 version
+ambiguity from recurring.
 
 ## Post-control audit
 
 After fresh Play passed, an adversarial transport review found that a word tap
 paused but retained the previous `S.audioPlay` while its replacement sentence
 was generating. A quick Pause/Play or foreground activity event could therefore
-resume the superseded clip and jump back to the old location. The next
-checkpoint disposes only that retained transport before priming the replacement
-inside the word-tap gesture; cached Fenrir audio remains intact. The lifecycle
-self-check covers dispose -> prime -> replacement ordering.
+resume the superseded clip and jump back to the old location. Build 18 fixed
+ownership by disposing the entire player, but that also discarded the iPad
+media element that had already proved it could produce Fenrir audio. A new
+element can silently fail even when `play()` resolves, so build 19 instead
+clears the superseded clip owner while preserving an audibly advancing player.
+Unplayed, stalled, errored, long-paused, or recovery-probation players still get
+the full rebuild. Captured karaoke ticks and pre-playing terminal-event guards
+prevent old callbacks from adopting a cached replacement.
+
+The lifecycle self-check now executes the production word-start, transport,
+and native activity helpers. It covers a rolling player retarget, foreground
+activity, quick Pause/Play, a second pending retarget, stale/long-paused and
+unproven players, busy-to-idle latest-word ownership, and old karaoke callbacks.
 
 The same review found that the one WebKit player rebuilt after a proven stalled
 resume was not itself watched. The recovery-only replacement now gets the

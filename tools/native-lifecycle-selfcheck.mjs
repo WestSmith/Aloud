@@ -458,6 +458,7 @@ function makeActivationHarness({ stale = false, pausedFor = 0, retained = false 
     `let nativePlayIntent = 0, nativePlayActivationPending = false, nativeKokoroAppActive = false;
      let nativeNeuralAudioNeedsRefresh = ${stale ? 'true' : 'false'};
      let nativeNeuralPausedAt = ${pausedFor ? `Date.now() - ${pausedFor}` : '0'};
+     let neuralAudioRecoveryPending = false;
      const NATIVE_AUDIO_STALE_AFTER_MS = 15000;
      const S = {
        engine: 'neural',
@@ -527,7 +528,7 @@ async function testActivationOrdering() {
   assert(forced.calls.begin[0]?.forceRestart === true &&
          forced.calls.begin[0]?.retainedAudio === false &&
          forced.calls.disposed === 1 && forced.calls.order.join(',') === 'dispose,prime,begin',
-         'word retarget did not abandon the old clip before priming and starting its replacement');
+         'force-restart without a captured health proof retained the old audio pipeline');
 
   const failed = makeActivationHarness();
   failed.requestPlaybackStart();
@@ -555,6 +556,260 @@ async function testActivationOrdering() {
   assert(foregroundPause.calls.disposed === 1 && foregroundPause.calls.primed[0] === true,
          'long foreground pause was not replaced and primed inside Play');
   console.log('native audio activation             fresh Play immediate; late health reply intent-safe');
+}
+
+function makeLiveRetargetHarness({
+  playing = true,
+  hasPlayed = true,
+  rolling = true,
+  stale = false,
+  pausedFor = 0,
+  recovering = false,
+} = {}) {
+  const calls = {
+    generations: [], resumes: 0, audioPlays: 0, audioPauses: 0,
+    replacementPlays: 0, replacementPauses: 0, rebuilds: 0,
+    cancels: 0, loads: 0, reactivations: 0,
+  };
+  const audio = {
+    src: 'blob:old-fenrir', currentTime: 4, ended: false, paused: false,
+    playbackRate: 1,
+    play() { calls.audioPlays++; this.paused = false; return Promise.resolve(); },
+    pause() { calls.audioPauses++; this.paused = true; },
+    removeAttribute(name) { if (name === 'src') this.src = ''; },
+    load() { calls.loads++; },
+  };
+  const replacementAudio = {
+    src: '', currentTime: 0, ended: false, paused: true, playbackRate: 1,
+    play() { calls.replacementPlays++; this.paused = false; return Promise.resolve(); },
+    pause() { calls.replacementPauses++; this.paused = true; },
+    removeAttribute(name) { if (name === 'src') this.src = ''; },
+    load() {},
+  };
+  const S = {
+    words: [
+      { sent: 0, text: 'old' }, { sent: 0, text: 'clip' },
+      { sent: 1, text: 'first' }, { sent: 1, text: 'target' },
+      { sent: 2, text: 'second' }, { sent: 2, text: 'target' },
+    ],
+    sentences: [
+      { start: 0, end: 2 }, { start: 2, end: 4 }, { start: 4, end: 6 },
+    ],
+    curSent: 0,
+    curWord: 0,
+    playing,
+    engine: 'neural',
+    rate: 1.5,
+    audio,
+    audioPlay: { id: 'old-play', hasPlayed, rolling },
+    neuralCache: new Map(),
+    nativeVoices: [],
+    utterToken: 0,
+    neuralGenToken: 0,
+    breatherToken: 0,
+    rsvp: { token: 0, timer: null },
+  };
+  const abandonSource = extractNamedFunction(src, 'abandonNeuralAudioPlay');
+  const disposeSource = extractNamedFunction(src, 'disposeNeuralAudio');
+  const primeSource = extractNamedFunction(src, 'primeAudioGesture');
+  const pauseSource = extractNamedFunction(src, 'pauseAll');
+  const playSource = extractNamedFunction(src, 'playCurrent');
+  const beginSource = extractNamedFunction(src, 'beginRequestedPlayback');
+  const requestSource = extractNamedFunction(src, 'requestPlaybackStart');
+  const wordSource = extractNamedFunction(src, 'requestPlaybackFromWord');
+  const toggleSource = extractNamedFunction(src, 'togglePlay');
+  const nativeInitSource = extractNamedFunction(src, 'initNativeEngine');
+  const api = new Function(
+    'S', 'audio', 'replacementAudio', 'calls',
+    'initialStale', 'initialPausedFor', 'initialRecovering',
+    `const document = {
+       hidden: false,
+       querySelectorAll() { return []; }
+     };
+     const NATIVE = {
+       nativeKokoro: true,
+       stop() {},
+       reactivateAudio() { calls.reactivations++; return new Promise(() => {}); },
+       refreshAppActivity() {},
+       listVoices() { return Promise.resolve([]); }
+     };
+     const URL = { revokeObjectURL() {} };
+     const $ = () => ({
+       innerHTML: '',
+       classList: { add() {}, remove() {} }
+     });
+     const NATIVE_AUDIO_STALE_AFTER_MS = 15000;
+     let NA = audio, audioPrimed = true;
+     let neuralResumeEpoch = 0, neuralAudioRecoveryPending = initialRecovering;
+     let nativeNeuralAudioNeedsRefresh = initialStale;
+     let nativeNeuralPausedAt = initialPausedFor ? Date.now() - initialPausedFor : 0;
+     let nativePlayIntent = 0, nativePlayActivationPending = false;
+     let nativeKokoroAppActive = false, nativeKokoroInactiveAt = 0;
+     let nativeKokoroBusy = false, nativeKokoroBusySeconds = 0;
+     let nativeKokoroBusyTimer = null, nativeKokoroResumeTimer = null;
+     let nativeUtter = null, kokoroCoverTimer = null;
+     let kokoroResumeOnForeground = false;
+     const nativeKokoroBusyFallback = { phase: 'idle', handoffReady: false };
+     const synth = null;
+     const clearNativeKokoroBusyFallback = () => { kokoroResumeOnForeground = false; };
+     const cancelNativeKokoroGenerations = () => { calls.cancels++; };
+     const stopEstLoop = () => {};
+     const setPlayIcon = () => {};
+     const setSentence = sentIdx => { S.curSent = sentIdx; };
+     const highlightWord = wordIdx => { S.curWord = wordIdx; };
+     const warmPhonemes = () => {};
+     const rsvpSilentActive = () => false;
+     const speakNeural = (sentIdx, wordIdx) => {
+       calls.generations.push({ sentIdx, wordIdx });
+       return new Promise(() => {});
+     };
+     const resumePersistentNeuralAudio = () => {
+       calls.resumes++;
+       S.audio.play();
+       return true;
+     };
+     const neuralPump = () => {};
+     const neuralCanResumeWithoutGeneration = () => false;
+     const ensureNeuralAudio = () => {
+       if (NA) return NA;
+       calls.rebuilds++;
+       NA = replacementAudio;
+       S.audio = NA;
+       return NA;
+     };
+     const detectOutputLatency = () => 0;
+     let audioLagCtx = null;
+     const SILENT_WAV = 'data:audio/wav;base64,';
+     const toast = () => {};
+     const adoptNativeVoices = () => {};
+     const holdKokoroForBusyQueue = () => {};
+     const resumeKokoroAfterForeground = () => {};
+     const suspendNativeKokoroWork = () => {};
+     const maybeScroll = () => {};
+     const advanceAfterBreather = () => {};
+     const remoteAdvanceSentence = () => {};
+     ${disposeSource}
+     ${abandonSource}
+     ${primeSource}
+     ${pauseSource}
+     ${playSource}
+     ${beginSource}
+     ${requestSource}
+     ${wordSource}
+     ${toggleSource}
+     ${nativeInitSource}
+     initNativeEngine();
+     return {
+       word: requestPlaybackFromWord,
+       toggle: togglePlay,
+       activity(event) { NATIVE.onEvent(event); },
+       state() {
+         return {
+           audio: S.audio,
+           audioPlay: S.audioPlay,
+           curSent: S.curSent,
+           curWord: S.curWord,
+           playing: S.playing,
+           audioPrimed,
+           nativeNeuralPausedAt,
+         };
+       }
+     };`
+  )(S, audio, replacementAudio, calls, stale, pausedFor, recovering);
+  return { ...api, S, audio, replacementAudio, calls };
+}
+
+function testLiveRetargetOwnership() {
+  const activity = makeLiveRetargetHarness();
+  activity.word(2);
+  assert(activity.state().audio === activity.audio && activity.state().audioPlay === null,
+         'live word retarget replaced the proven audio element or retained the old play owner');
+  assert(activity.state().audioPrimed && activity.state().nativeNeuralPausedAt === 0,
+         'live word retarget lost the proven player activation or retained its pause age');
+  assert(JSON.stringify(activity.calls.generations) === JSON.stringify([{ sentIdx: 1, wordIdx: 2 }]),
+         'live word retarget did not begin exactly one replacement target');
+  activity.activity({ type: 'appActivity', active: true, kokoroBusy: false });
+  assert(activity.calls.resumes === 0 && activity.calls.audioPlays === 0 &&
+         activity.state().curSent === 1 && activity.state().curWord === 2,
+         'foreground activity revived the superseded clip during target generation');
+
+  const quick = makeLiveRetargetHarness();
+  quick.word(2);
+  quick.toggle();
+  assert(!quick.state().playing, 'quick Pause did not stop replacement generation');
+  quick.toggle();
+  assert(quick.state().playing && quick.state().audio === quick.audio && quick.state().audioPlay === null,
+         'quick Play replaced the proven element or restored old play ownership');
+  assert(quick.calls.resumes === 0 && quick.calls.audioPlays === 0 &&
+         JSON.stringify(quick.calls.generations) === JSON.stringify([
+           { sentIdx: 1, wordIdx: 2 }, { sentIdx: 1, wordIdx: 2 },
+         ]),
+         'quick Pause/Play resumed old audio instead of regenerating the selected target');
+
+  const repeated = makeLiveRetargetHarness();
+  repeated.word(2);                 // first target remains in native MLX
+  repeated.word(4);                 // retarget again before it settles
+  assert(repeated.state().audio === repeated.audio && repeated.state().audioPlay === null &&
+         repeated.state().curSent === 2 && repeated.state().curWord === 4,
+         'second live retarget replaced the player or retained superseded ownership');
+  assert(repeated.calls.audioPlays === 0 &&
+         JSON.stringify(repeated.calls.generations) === JSON.stringify([
+           { sentIdx: 1, wordIdx: 2 }, { sentIdx: 2, wordIdx: 4 },
+         ]),
+         'second live retarget revived the old clip or lost its newer target');
+
+  const paused = makeLiveRetargetHarness({ playing: false, rolling: false });
+  paused.word(2);
+  assert(paused.state().audio === paused.audio && paused.state().audioPlay === null &&
+         paused.calls.rebuilds === 0,
+         'recently paused proven player was unnecessarily rebuilt on word retarget');
+
+  for (const [label, options] of [
+    ['unplayed', { hasPlayed: false }],
+    ['stalled', { rolling: false }],
+    ['stale', { stale: true }],
+    ['long-paused', { playing: false, rolling: false, pausedFor: 16000 }],
+    ['recovery-probation', { recovering: true }],
+  ]) {
+    const unsafe = makeLiveRetargetHarness(options);
+    unsafe.word(2);
+    assert(unsafe.state().audio === unsafe.replacementAudio && unsafe.state().audioPlay === null &&
+           unsafe.calls.rebuilds === 1 && unsafe.calls.loads === 1 && unsafe.audio.src === '',
+           `${label} word retarget preserved an unsafe audio pipeline`);
+  }
+  console.log('live word retarget                 proven player kept; old clip cannot revive');
+}
+
+function testRetargetTickOwnership() {
+  const callbacks = [];
+  const oldPlay = { ticking: false };
+  const newPlay = { ticking: false };
+  const S = { audioPlay: oldPlay, playing: true };
+  const startSource = extractNamedFunction(src, 'naTickStart');
+  const tickSource = extractNamedFunction(src, 'naTick');
+  const calls = { highlights: 0, sentences: 0 };
+  const api = new Function(
+    'S', 'callbacks', 'calls',
+    `const requestAnimationFrame = fn => callbacks.push(fn);
+     const NA = { paused: false, ended: false };
+     const naMediaPos = () => { throw new Error('superseded tick read media position'); };
+     const karaokeLagSec = () => 0;
+     const setSentence = () => { calls.sentences++; };
+     const highlightWord = () => { calls.highlights++; };
+     const maybeScroll = () => {};
+     ${startSource}
+     ${tickSource}
+     return { start: naTickStart };`
+  )(S, callbacks, calls);
+  api.start();
+  assert(oldPlay.ticking && callbacks.length === 1,
+         'old audio play did not schedule its identity-bound karaoke tick');
+  S.audioPlay = newPlay;
+  callbacks.shift()();
+  assert(!oldPlay.ticking && !newPlay.ticking && callbacks.length === 0 &&
+         calls.highlights === 0 && calls.sentences === 0,
+         'superseded karaoke tick attached itself to the replacement play');
+  console.log('retarget karaoke tick              stale callback stays with old play identity');
 }
 
 function makeBusyHandoffHarness({ busySeconds = 7 } = {}) {
@@ -797,6 +1052,18 @@ function testBusyHandoff() {
          !remoteSkip.state().resume && remoteSkip.state().timers === 0,
          'lock-screen Next did not resume its new target and settle busy UI');
 
+  const latestWord = makeBusyHandoffHarness({ busySeconds: 0 });
+  latestWord.moveTo(1, 24);
+  latestWord.route(1, 24);                    // first tapped target waits on MLX
+  latestWord.explicitCancel();                // a second word tap supersedes it
+  latestWord.moveTo(2, 34);
+  latestWord.route(2, 34);                    // only the latest target owns wait
+  latestWord.idle();
+  latestWord.runDelay(0);
+  assert(latestWord.calls.kokoroStarts.join(',') === '34' &&
+         latestWord.state().phase === 'idle' && !latestWord.state().resume,
+         'native busy-to-idle handoff resumed an earlier word-retarget target');
+
   const superseded = makeBusyHandoffHarness();
   superseded.route(0, 14);
   superseded.idle();                              // schedules its zero-delay retry
@@ -1005,6 +1272,8 @@ try {
   await testNativePendingGenerationEpoch();
   await testResumeWatchdog();
   await testActivationOrdering();
+  testLiveRetargetOwnership();
+  testRetargetTickOwnership();
   testBusyHandoff();
   await testNeuralErrorOwnership();
   await testRecoveryReplacementWatchdogIntegration();
@@ -1013,7 +1282,9 @@ try {
   const beginPlaySource = extractNamedFunction(src, 'beginRequestedPlayback');
   const requestPlaySource = extractNamedFunction(src, 'requestPlaybackStart');
   const requestWordSource = extractNamedFunction(src, 'requestPlaybackFromWord');
+  const abandonPlaySource = extractNamedFunction(src, 'abandonNeuralAudioPlay');
   const playWordSource = extractNamedFunction(src, 'playFromWordElement');
+  const ensureAudioSource = extractNamedFunction(src, 'ensureNeuralAudio');
   const speakNeuralSource = extractNamedFunction(src, 'speakNeural');
   const speakNativeSource = extractNamedFunction(src, 'speakNative');
   const busyRouteSource = extractNamedFunction(src, 'routeNativeKokoroBusyFallback');
@@ -1055,21 +1326,47 @@ try {
          'long-suspended audio is not replaced before the fresh gesture prime');
   assert(requestPlaySource.includes('retargetingRetainedAudio') &&
          requestPlaySource.includes("forceRestart && S.engine === 'neural'") &&
-         requestPlaySource.indexOf('disposeNeuralAudio()') < requestPlaySource.indexOf('primeAudioGesture()'),
-         'word retarget can retain and later resume its superseded neural clip');
+         requestPlaySource.includes('neuralAudioRecoveryPending') &&
+         requestPlaySource.includes('!preserveRetargetAudio') &&
+         requestPlaySource.includes('abandonNeuralAudioPlay()') &&
+         requestPlaySource.indexOf('disposeNeuralAudio()') <
+           requestPlaySource.indexOf('abandonNeuralAudioPlay()') &&
+         requestPlaySource.indexOf('abandonNeuralAudioPlay()') <
+           requestPlaySource.indexOf('primeAudioGesture()'),
+         'word retarget no longer chooses safely between full disposal and ownership-only abandon');
+  assert(abandonPlaySource.includes('neuralResumeEpoch++') &&
+         abandonPlaySource.includes('nativeNeuralPausedAt = 0') &&
+         abandonPlaySource.includes('S.audioPlay = null') &&
+         abandonPlaySource.includes('NA?.pause()') &&
+         !abandonPlaySource.includes('NA = null') &&
+         !abandonPlaySource.includes('S.audio = null') &&
+         !abandonPlaySource.includes("removeAttribute('src')"),
+         'ownership-only retarget abandon no longer preserves the proven media element');
   assert(toggleSource.includes("S.engine === 'neural' && !nativeUtter"),
          'Pause can leave native fallback speech running behind the paused UI');
   assert(beginPlaySource.includes('NATIVE?.nativeKokoro && document.hidden') &&
          !beginPlaySource.includes('document.hidden || !nativeKokoroAppActive'),
          'a stale native activity sample can again block a visible explicit Play');
-  assert(requestWordSource.includes('requestPlaybackStart({ forceRestart: true })') &&
+  assert(requestWordSource.includes('play?.hasPlayed') &&
+         requestWordSource.includes('play.rolling') &&
+         requestWordSource.includes('S.audio === NA') &&
+         requestWordSource.includes('!NA?.ended') &&
+         requestWordSource.includes('!NA?.error') &&
+         requestWordSource.includes('requestPlaybackStart({ forceRestart: true, preserveRetargetAudio })') &&
          !requestWordSource.includes('primeAudioGesture()'),
-         'word-start helper bypasses native audio-session activation');
+         'word-start helper no longer snapshots live player health before Pause or uses ordered activation');
   assert(beginPlaySource.includes('!forceRestart && S.engine') &&
          requestPlaySource.includes('forceRestart'),
          'word-start intent can still resume an unrelated paused neural clip');
   assert(playWordSource.includes('requestPlaybackFromWord(wIdx)'),
          'read-only word tap bypasses the ordered word-start helper');
+  const endedHandler = ensureAudioSource.slice(
+    ensureAudioSource.indexOf("na.addEventListener('ended'"),
+    ensureAudioSource.indexOf("na.addEventListener('error'")
+  );
+  const errorHandler = ensureAudioSource.slice(ensureAudioSource.indexOf("na.addEventListener('error'"));
+  assert(endedHandler.includes('!P.hasPlayed') && errorHandler.includes('!P.hasPlayed'),
+         'queued terminal media events can again claim an unplayed replacement source');
   assert(generateSource.includes('nativeGenerationEpoch') &&
          generateSource.includes('pendingKey') &&
          generateSource.includes('S.neuralPending.get(pendingKey) === job'),

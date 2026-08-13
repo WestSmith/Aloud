@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.24.4">
+<meta name="aloud-version" content="v6.24.6 (19) · web R19">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -5401,6 +5401,22 @@ function disposeNeuralAudio() {
   try { old.removeAttribute('src'); old.load(); } catch {}
 }
 
+/* A normal word retarget does not need a brand-new media element. Keep the
+   element that has already produced Fenrir audio (and therefore has a proven
+   iPadOS playback pipeline), but detach the old clip's transport ownership so
+   no later Play or foreground event can revive the superseded location. The
+   selected sentence will replace `src` after generation; cache entries remain
+   reusable and stale/long-suspended players still take the full-dispose path. */
+function abandonNeuralAudioPlay() {
+  const play = S.audioPlay;
+  if (!play) return;
+  neuralResumeEpoch++;
+  nativeNeuralPausedAt = 0;
+  S.audioPlay = null;
+  try { NA?.pause(); } catch {}
+  if (play.batchUrl) { try { URL.revokeObjectURL(play.batchUrl); } catch {} }
+}
+
 /* Pausing a not-yet-generated current sentence needs a foreground retry;
    pausing while a real clip is playing can leave that clip alone for native
    background audio and cancel only its speculative runway. */
@@ -5659,7 +5675,11 @@ function ensureNeuralAudio() {
   na.addEventListener('ended', () => {
     if (!current()) return;
     const P = S.audioPlay;
-    if (!P) return;                                   // prime clip / stale
+    /* A cached replacement can be installed before an old `ended` task is
+       dispatched on this same persistent element. Until the replacement has
+       itself reached `playing`, that terminal event belongs to superseded
+       media and must not clear or advance the new play. */
+    if (!P || !P.hasPlayed) return;                    // prime / superseded
     nativeNeuralPausedAt = 0;
     nativeNeuralAudioNeedsRefresh = false;
     if (P.hasPlayed) neuralAudioRecoveryPending = false;
@@ -5679,7 +5699,10 @@ function ensureNeuralAudio() {
   na.addEventListener('error', () => {
     if (!current()) return;
     const P = S.audioPlay;
-    if (!P) return;
+    /* play() rejects a new source that cannot decode. An error event arriving
+       before this play reaches `playing` may instead be queued from the source
+       just replaced, so leave ownership to the promise rejection path. */
+    if (!P || !P.hasPlayed) return;
     nativeNeuralPausedAt = 0;
     if (P.batchUrl) URL.revokeObjectURL(P.batchUrl);
     S.audioPlay = null;
@@ -5888,12 +5911,11 @@ function naTickStart() {
   const P = S.audioPlay;
   if (!P || P.ticking) return;
   P.ticking = true;
-  requestAnimationFrame(naTick);
+  requestAnimationFrame(() => naTick(P));
 }
 
-function naTick() {
-  const P = S.audioPlay;
-  if (!P || !S.playing) { if (P) P.ticking = false; return; }
+function naTick(P) {
+  if (!P || S.audioPlay !== P || !S.playing) { if (P) P.ticking = false; return; }
   /* what you are HEARING right now, which trails the audio clock by the
      output latency (see karaokeLagSec) */
   const ct = Math.max(0, naMediaPos(P) - karaokeLagSec());
@@ -5912,7 +5934,7 @@ function naTick() {
   if (wIdx < P.shownAbs) wIdx = P.shownAbs;
   P.shownAbs = wIdx;
   if (wIdx !== S.curWord) { highlightWord(wIdx); maybeScroll(S.words[wIdx]?.el); }
-  if (!NA.paused && !NA.ended) requestAnimationFrame(naTick);
+  if (!NA.paused && !NA.ended) requestAnimationFrame(() => naTick(P));
   else P.ticking = false;
 }
 
@@ -6476,11 +6498,11 @@ function beginRequestedPlayback(options) {
 function requestPlaybackStart(options) {
   const allowBackground = !!options?.allowBackground;
   const forceRestart = !!options?.forceRestart;
+  const preserveRetargetAudio = !!options?.preserveRetargetAudio;
   /* A word retarget must abandon the paused clip it replaced. Leaving that
      S.audioPlay attached while the new sentence generates lets a quick
-     Pause/Play—or an app-activity event—resume the old location. Recreate and
-     bless the persistent player inside this same word-tap gesture; the cached
-     Fenrir WAV remains available independently of the discarded transport. */
+     Pause/Play—or an app-activity event—resume the old location. Keep a
+     healthy, already-proven media element; only a stale pipeline is rebuilt. */
   const retargetingRetainedAudio = forceRestart && S.engine === 'neural' &&
     !!S.audioPlay;
   /* A paused Audio element that crossed a long iOS suspension may retain a
@@ -6489,9 +6511,12 @@ function requestPlaybackStart(options) {
      position remain) so the fresh element can be blessed by this same tap. */
   const pausedTooLong = nativeNeuralPausedAt &&
     Date.now() - nativeNeuralPausedAt >= NATIVE_AUDIO_STALE_AFTER_MS;
-  if (!allowBackground && NATIVE?.nativeKokoro &&
-      (retargetingRetainedAudio || nativeNeuralAudioNeedsRefresh || pausedTooLong))
-    disposeNeuralAudio();
+  if (!allowBackground && NATIVE?.nativeKokoro) {
+    if (nativeNeuralAudioNeedsRefresh || pausedTooLong || neuralAudioRecoveryPending ||
+        (retargetingRetainedAudio && !preserveRetargetAudio))
+      disposeNeuralAudio();
+    else if (retargetingRetainedAudio) abandonNeuralAudioPlay();
+  }
   /* Preserve the iOS user-activation token before crossing the asynchronous
      native audio-session bridge. This silent prime blesses the persistent
      WebKit player while the Play/word-tap gesture is live. */
@@ -6516,11 +6541,18 @@ function requestPlaybackStart(options) {
    prime WebKit while the gesture is live. */
 function requestPlaybackFromWord(wIdx) {
   if (!S.words[wIdx]) return;
+  /* Capture health before pauseAll() deliberately marks the current clip as
+     non-rolling. Preserve only an element that is either audibly advancing
+     now or was deliberately paused recently; errored, foreign, unplayed, and
+     stalled pipelines take the full rebuild path. */
+  const play = S.audioPlay;
+  const preserveRetargetAudio = S.engine === 'neural' && !!play?.hasPlayed &&
+    (!S.playing || !!play.rolling) && S.audio === NA && !NA?.ended && !NA?.error;
   clearNativeKokoroBusyFallback();
   pauseAll();
   setSentence(S.words[wIdx].sent);
   highlightWord(wIdx);
-  requestPlaybackStart({ forceRestart: true });
+  requestPlaybackStart({ forceRestart: true, preserveRetargetAudio });
 }
 
 function togglePlay(options) {
