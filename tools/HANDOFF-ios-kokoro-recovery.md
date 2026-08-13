@@ -8,9 +8,9 @@ Failed physical-device build: Aloud `6.24.3` (`16`). The user confirmed that
 fresh Fenrir playback still failed in that build. Do not use it as a recovery
 baseline.
 
-Current installed control build: Aloud `6.24.4` (`17`), signed and installed on
-the paired iPad on 2026-08-13. It restores the fresh Play path from physically
-working `5108b79`. The clean Release build succeeded; the packaged
+Previous control build: Aloud `6.24.4` (`17`), signed and installed on the
+paired iPad on 2026-08-13. It restores the fresh Play path from physically
+working `5108b79`. Its clean Release build succeeded; the packaged
 `web/index.html` SHA-256 exactly matched the source
 (`0aef45ae710e274eb639ff2cd39f4493a2c3d2ddb6b67774a083e429eb51c1f1`).
 Device inventory confirmed 6.24.4 (17). The user then physically confirmed that
@@ -18,6 +18,16 @@ fresh Fenrir playback at 1.5x starts and continues past the former three-second
 cancellation point. This validates 6.24.4 as the fresh-Play control. Word
 retarget, ordinary Pause/resume, and the original long-pause/background recovery
 sequence remain to be verified before merge.
+
+Current installed candidate: Aloud `6.24.5` (`18`), signed, installed in place,
+and launched on the paired iPad on 2026-08-13. Device inventory explicitly
+confirmed 6.24.5 (18). Its clean Release build succeeded, and the source,
+synced iOS asset, and packaged `web/index.html` share SHA-256
+`4c47a3fed24ee7aafd205d129daab83316c946d131668fd68a28d7fb94e0281e`.
+The development-signature trust warning reported by macOS is identical to the
+warning for the successfully installed 6.24.4 (17) control, and both packages
+embed the same provisioning profile; the device accepted the new package.
+Physical verification of this candidate has not started.
 
 ## Post-control audit
 
@@ -34,8 +44,8 @@ resume was not itself watched. The recovery-only replacement now gets the
 four-second progress watchdog; a second dead pipeline pauses with an explicit
 retry notice. Fresh generated Fenrir clips remain outside that watchdog, so
 normal inference/start latency is still unbounded. These post-control patches
-are packaged as the Aloud `6.24.5` (`18`) candidate but have not yet been
-installed or physically verified.
+are now installed as the Aloud `6.24.5` (`18`) candidate but have not yet been
+physically verified.
 
 ## Reported failure
 
@@ -104,7 +114,7 @@ node tools/library-recovery-selfcheck.mjs
 git diff --check
 ```
 
-All focused commands passed for the 6.24.4 control patch, and the root/iOS web
+All focused commands passed for the 6.24.5 candidate, and the root/iOS web
 assets are byte-identical. Keep the branch checkpoint pushed before handoff.
 Do not merge PR 12 until the user confirms physical Fenrir/1.5x fresh Play,
 word retarget, Pause/resume, and then a long pause/background cycle.
