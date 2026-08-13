@@ -46,10 +46,13 @@ The package has the same provisioning profile/team as builds 17 and 18.
 
 The install removed the prior process, but the forced launch was denied because
 the iPad was locked. Process inventory then confirmed no Aloud process remained,
-so no old reader page can survive. The user must unlock and launch Aloud once;
-seeing the exact R19 marker is the remaining runtime provenance gate. No build-19
-playback behavior has been physically tested yet. The asset-sync check derives
-the exact visible marker
+so no old reader page could survive that install. The user later launched Aloud
+and reported that it still did not work. A crucial clarification followed: this
+was not the requested word-retarget gate. On the first explicit Play tap,
+playback produced no sound. Whether the control changed to Pause/loading,
+whether a toast appeared, and whether the visible version included the exact
+R19 marker are still awaiting confirmation, so keep both the fresh-Play
+regression and runtime provenance open. The asset-sync check derives the exact visible marker
 and service-worker cache key (`aloud-v6.24.6-b19`) from Package.swift, then
 requires byte-identical root/iOS assets. This prevents the build-18 version
 ambiguity from recurring.
