@@ -920,6 +920,84 @@ async function testNeuralErrorOwnership() {
   console.log('neural request ownership            stale errors ignored; current error handled');
 }
 
+async function testRecoveryReplacementWatchdogIntegration() {
+  const source = extractNamedFunction(src, 'speakNeural');
+  const makeHarness = ({ recovering = false, rejectPlay = false } = {}) => {
+    const calls = { armed: 0, recovered: 0, cleaned: 0, failures: 0 };
+    const audio = {
+      currentTime: 0,
+      ended: false,
+      pause() {},
+      addEventListener() {},
+      play() {
+        return rejectPlay ? Promise.reject(new Error('dead replacement')) : Promise.resolve();
+      },
+    };
+    const S = {
+      kokoro: { state: 'ready' },
+      sentences: [{ start: 0, end: 3 }],
+      curSent: 0,
+      curWord: 1,
+      neuralGenToken: 0,
+      playing: true,
+      engine: 'neural',
+      audioPlay: null,
+    };
+    const api = new Function(
+      'S', 'audio', 'calls',
+      `const $ = () => ({ classList: { add() {}, remove() {} } });
+       const console = { error() {}, warn() {} };
+       const clearTimeout = () => {};
+       const loadKokoro = () => {};
+       const armKokoroCover = () => {};
+       const routeNativeKokoroBusyFallback = () => false;
+       const stopAll = () => {};
+       const generateNeural = async () => ({
+         url: 'blob:cached-fenrir', durationSec: 2, starts: [0, 0.5, 1], timing: 'model'
+       });
+       const ensureNeuralAudio = () => { S.audio = audio; NA = audio; return audio; };
+       const leadTrimSec = () => 0;
+       const neuralPump = () => {};
+       const showTimingBadge = () => {};
+       const highlightWord = () => {};
+       const handleNeuralFailure = () => { calls.failures++; };
+       const armNativeNeuralAudioWatchdog = (_audio, _play, word) => {
+         calls.armed++;
+         calls.word = word;
+         return {
+           recover() { calls.recovered++; },
+           cleanup() { calls.cleaned++; },
+         };
+       };
+       const NATIVE = { nativeKokoro: true };
+       const synth = null;
+       let NA = null, kokoroStopgapActive = false, kokoroCoverTimer = null;
+       let neuralAudioRecoveryPending = ${recovering ? 'true' : 'false'};
+       ${source}
+       return { speakNeural };`
+    )(S, audio, calls);
+    return { ...api, S, audio, calls };
+  };
+
+  const fresh = makeHarness();
+  await fresh.speakNeural(0, 1);
+  assert(fresh.calls.armed === 0,
+         'fresh generated Fenrir audio was put back under the resume-only watchdog');
+
+  const replacement = makeHarness({ recovering: true });
+  await replacement.speakNeural(0, 1);
+  assert(replacement.calls.armed === 1 && replacement.calls.word === 1 &&
+         replacement.calls.recovered === 0 && replacement.calls.failures === 0,
+         'the one recovery replacement was not watched from its captured word');
+
+  const rejected = makeHarness({ recovering: true, rejectPlay: true });
+  await rejected.speakNeural(0, 1);
+  assert(rejected.calls.armed === 1 && rejected.calls.recovered === 1 &&
+         rejected.calls.failures === 0,
+         'a rejected recovery replacement bypassed bounded media recovery');
+  console.log('recovery replacement audio          watched once; fresh Fenrir remains unbounded');
+}
+
 try {
   testNativeChunkCap();
   testCacheBudget();
@@ -929,6 +1007,7 @@ try {
   await testActivationOrdering();
   testBusyHandoff();
   await testNeuralErrorOwnership();
+  await testRecoveryReplacementWatchdogIntegration();
   const pauseSource = extractNamedFunction(src, 'pauseAll');
   const toggleSource = extractNamedFunction(src, 'togglePlay');
   const beginPlaySource = extractNamedFunction(src, 'beginRequestedPlayback');
@@ -1012,9 +1091,12 @@ try {
          busyRouteSource.includes('S.neuralCache.has(neuralCacheKey(sentIdx))') &&
          busyRouteSource.includes('holdKokoroForBusyQueue(true)'),
          'busy routing no longer covers uncached work while preserving cached Fenrir audio');
-  assert(!speakNeuralSource.includes('armNativeNeuralAudioWatchdog') &&
+  assert(speakNeuralSource.includes('neuralAudioRecoveryPending') &&
+         speakNeuralSource.includes('armNativeNeuralAudioWatchdog') &&
+         speakNeuralSource.indexOf('neuralAudioRecoveryPending') <
+         speakNeuralSource.indexOf('armNativeNeuralAudioWatchdog') &&
          !stitchedSource.includes('armNativeNeuralAudioWatchdog'),
-         'fresh generated clips again invoke the resume-only media watchdog');
+         'resume-only media watchdog is not confined to the one recovery replacement');
   assert(failureSource.includes("error?.code === 'native_busy'") &&
          failureSource.includes('nativeKokoroBusy = true') &&
          failureSource.includes('nativeKokoroBusySeconds = 0') &&

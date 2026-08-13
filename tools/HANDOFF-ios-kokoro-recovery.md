@@ -27,8 +27,14 @@ was generating. A quick Pause/Play or foreground activity event could therefore
 resume the superseded clip and jump back to the old location. The next
 checkpoint disposes only that retained transport before priming the replacement
 inside the word-tap gesture; cached Fenrir audio remains intact. The lifecycle
-self-check covers dispose -> prime -> replacement ordering. This patch has not
-yet been installed or physically verified.
+self-check covers dispose -> prime -> replacement ordering.
+
+The same review found that the one WebKit player rebuilt after a proven stalled
+resume was not itself watched. The recovery-only replacement now gets the
+four-second progress watchdog; a second dead pipeline pauses with an explicit
+retry notice. Fresh generated Fenrir clips remain outside that watchdog, so
+normal inference/start latency is still unbounded. These post-control patches
+have not yet been installed or physically verified.
 
 ## Reported failure
 

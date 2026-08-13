@@ -6055,16 +6055,30 @@ async function speakNeural(sentIdx, fromWord) {
   if (seekTo > 0.04 && seekTo < entry.durationSec * 0.9) {
     na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) na.currentTime = seekTo; }, { once: true });
   }
+  /* Fresh Fenrir playback must never be cancelled merely for taking time to
+     generate or start. The sole exception is the one replacement created by
+     the resume watchdog after a proven dead WebKit pipeline: watch that
+     replacement too, so a play() that resolves without audible progress ends
+     in the existing bounded "tap Play to retry" state rather than silent
+     pseudo-playback forever. */
+  const recoveryAudioWatch = neuralAudioRecoveryPending
+    ? armNativeNeuralAudioWatchdog(na, P, startFrom)
+    : null;
   try {
     await na.play();
   } catch (e) {
     console.warn(e);
+    if (recoveryAudioWatch && S.audioPlay === P && NA === na) {
+      recoveryAudioWatch.recover(e?.message || 'play() rejected');
+      return;
+    }
+    recoveryAudioWatch?.cleanup();
     if (S.audioPlay !== P || NA !== na) return;
     S.audioPlay = null;
     handleNeuralFailure(e);
     return;
   }
-  if (S.audioPlay !== P || NA !== na) return;
+  if (S.audioPlay !== P || NA !== na) { recoveryAudioWatch?.cleanup(); return; }
   highlightWord(startFrom);
   showTimingBadge(entry.timing);
 
