@@ -444,13 +444,13 @@ async function testResumeWatchdog() {
   console.log('persistent audio watchdog           resolved stalls, brief freezes, and ignored seeks');
 }
 
-function makeActivationHarness({ stale = false, pausedFor = 0 } = {}) {
+function makeActivationHarness({ stale = false, pausedFor = 0, retained = false } = {}) {
   let resolveActivation, rejectActivation;
   const activation = new Promise((resolve, reject) => {
     resolveActivation = resolve;
     rejectActivation = reject;
   });
-  const calls = { begin: [], toasts: 0, icon: [], primed: [], disposed: 0, warnings: 0 };
+  const calls = { begin: [], order: [], toasts: 0, icon: [], primed: [], disposed: 0, warnings: 0 };
   let gestureActive = true;
   const source = extractNamedFunction(src, 'requestPlaybackStart');
   const api = new Function(
@@ -459,13 +459,29 @@ function makeActivationHarness({ stale = false, pausedFor = 0 } = {}) {
      let nativeNeuralAudioNeedsRefresh = ${stale ? 'true' : 'false'};
      let nativeNeuralPausedAt = ${pausedFor ? `Date.now() - ${pausedFor}` : '0'};
      const NATIVE_AUDIO_STALE_AFTER_MS = 15000;
-     const S = { engine: 'neural', audioPlay: ${stale ? '{}' : 'null'} };
+     const S = {
+       engine: 'neural',
+       audioPlay: ${(stale || retained) ? "{ id: 'superseded' }" : 'null'},
+       audio: ${retained ? "{ id: 'superseded-player' }" : 'null'}
+     };
      const NATIVE = { nativeKokoro: true, reactivateAudio: () => activation };
      const console = { warn() { calls.warnings++; } };
      const $ = () => ({ classList: { add() {}, remove() {} } });
-     const disposeNeuralAudio = () => { calls.disposed++; S.audioPlay = null; nativeNeuralAudioNeedsRefresh = false; };
-     const primeAudioGesture = () => calls.primed.push(gestureIsActive());
-     const beginRequestedPlayback = options => calls.begin.push(options || {});
+     const disposeNeuralAudio = () => {
+       calls.disposed++;
+       calls.order.push('dispose');
+       S.audioPlay = null;
+       S.audio = null;
+       nativeNeuralAudioNeedsRefresh = false;
+     };
+     const primeAudioGesture = () => {
+       calls.order.push('prime');
+       calls.primed.push(gestureIsActive());
+     };
+     const beginRequestedPlayback = options => {
+       calls.order.push('begin');
+       calls.begin.push({ ...(options || {}), retainedAudio: !!S.audioPlay });
+     };
      const setPlayIcon = value => calls.icon.push(value);
      const toast = () => { calls.toasts++; };
      ${source}
@@ -503,13 +519,15 @@ async function testActivationOrdering() {
   assert(cancelled.calls.begin.length === 1 && !cancelled.state().nativeKokoroAppActive,
          'late activation reply overrode the newer Pause intent');
 
-  const forced = makeActivationHarness();
+  const forced = makeActivationHarness({ retained: true });
   forced.requestPlaybackStart({ forceRestart: true });
   forced.endGesture();
   forced.resolveActivation({ active: true });
   await Promise.resolve(); await Promise.resolve();
-  assert(forced.calls.begin[0]?.forceRestart === true,
-         'word-start force-restart intent was lost on immediate Play');
+  assert(forced.calls.begin[0]?.forceRestart === true &&
+         forced.calls.begin[0]?.retainedAudio === false &&
+         forced.calls.disposed === 1 && forced.calls.order.join(',') === 'dispose,prime,begin',
+         'word retarget did not abandon the old clip before priming and starting its replacement');
 
   const failed = makeActivationHarness();
   failed.requestPlaybackStart();
@@ -956,6 +974,10 @@ try {
          requestPlaySource.includes('nativeNeuralPausedAt') &&
          requestPlaySource.indexOf('disposeNeuralAudio()') < requestPlaySource.indexOf('primeAudioGesture()'),
          'long-suspended audio is not replaced before the fresh gesture prime');
+  assert(requestPlaySource.includes('retargetingRetainedAudio') &&
+         requestPlaySource.includes("forceRestart && S.engine === 'neural'") &&
+         requestPlaySource.indexOf('disposeNeuralAudio()') < requestPlaySource.indexOf('primeAudioGesture()'),
+         'word retarget can retain and later resume its superseded neural clip');
   assert(toggleSource.includes("S.engine === 'neural' && !nativeUtter"),
          'Pause can leave native fallback speech running behind the paused UI');
   assert(beginPlaySource.includes('NATIVE?.nativeKokoro && document.hidden') &&

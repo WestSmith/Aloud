@@ -13,8 +13,22 @@ the paired iPad on 2026-08-13. It restores the fresh Play path from physically
 working `5108b79`. The clean Release build succeeded; the packaged
 `web/index.html` SHA-256 exactly matched the source
 (`0aef45ae710e274eb639ff2cd39f4493a2c3d2ddb6b67774a083e429eb51c1f1`).
-Device inventory confirmed 6.24.4 (17). Physical playback validation is next;
-remote launch was denied only because the iPad was locked.
+Device inventory confirmed 6.24.4 (17). The user then physically confirmed that
+fresh Fenrir playback at 1.5x starts and continues past the former three-second
+cancellation point. This validates 6.24.4 as the fresh-Play control. Word
+retarget, ordinary Pause/resume, and the original long-pause/background recovery
+sequence remain to be verified before merge.
+
+## Post-control audit
+
+After fresh Play passed, an adversarial transport review found that a word tap
+paused but retained the previous `S.audioPlay` while its replacement sentence
+was generating. A quick Pause/Play or foreground activity event could therefore
+resume the superseded clip and jump back to the old location. The next
+checkpoint disposes only that retained transport before priming the replacement
+inside the word-tap gesture; cached Fenrir audio remains intact. The lifecycle
+self-check covers dispose -> prime -> replacement ordering. This patch has not
+yet been installed or physically verified.
 
 ## Reported failure
 

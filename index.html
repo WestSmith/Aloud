@@ -6462,6 +6462,13 @@ function beginRequestedPlayback(options) {
 function requestPlaybackStart(options) {
   const allowBackground = !!options?.allowBackground;
   const forceRestart = !!options?.forceRestart;
+  /* A word retarget must abandon the paused clip it replaced. Leaving that
+     S.audioPlay attached while the new sentence generates lets a quick
+     Pause/Play—or an app-activity event—resume the old location. Recreate and
+     bless the persistent player inside this same word-tap gesture; the cached
+     Fenrir WAV remains available independently of the discarded transport. */
+  const retargetingRetainedAudio = forceRestart && S.engine === 'neural' &&
+    !!S.audioPlay;
   /* A paused Audio element that crossed a long iOS suspension may retain a
      plausible JS state while its media pipeline is dead. On the next explicit
      foreground gesture, discard only that player (the sentence cache and word
@@ -6469,7 +6476,8 @@ function requestPlaybackStart(options) {
   const pausedTooLong = nativeNeuralPausedAt &&
     Date.now() - nativeNeuralPausedAt >= NATIVE_AUDIO_STALE_AFTER_MS;
   if (!allowBackground && NATIVE?.nativeKokoro &&
-      (nativeNeuralAudioNeedsRefresh || pausedTooLong)) disposeNeuralAudio();
+      (retargetingRetainedAudio || nativeNeuralAudioNeedsRefresh || pausedTooLong))
+    disposeNeuralAudio();
   /* Preserve the iOS user-activation token before crossing the asynchronous
      native audio-session bridge. This silent prime blesses the persistent
      WebKit player while the Play/word-tap gesture is live. */
@@ -6490,9 +6498,8 @@ function requestPlaybackStart(options) {
 }
 
 /* Word taps are playback gestures too. Position immediately, then use the
-   same start path as the Play button: silently prime WebKit while the gesture
-   is live, but wait for native audio-session acknowledgement before starting
-   the requested sentence. */
+   same start path as the Play button: discard any superseded clip and silently
+   prime WebKit while the gesture is live. */
 function requestPlaybackFromWord(wIdx) {
   if (!S.words[wIdx]) return;
   clearNativeKokoroBusyFallback();

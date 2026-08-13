@@ -51,7 +51,7 @@ The native app's `✨ Neural · Kokoro` engine now works like this:
 4. The model's own duration timestamps are returned with each token.
 5. Swift writes a short-lived local WAV and gives the reader its loopback URL.
 6. The existing Aloud player handles playback, seeking, rate changes, karaoke,
-   sentence caching, background batches and lock-screen continuity.
+   sentence caching, and pause/resume continuity.
 
 Only a WAV URL and timestamp metadata cross the native bridge. The 327 MB model
 and its MLX tensors never enter WebKit, which removes the memory ceiling and
@@ -59,17 +59,20 @@ silent-worker failure behind the endlessly pulsing play button.
 
 Playback intentionally remains in Aloud's persistent HTML audio element. That
 transport already implements the hard reader behavior—tap-to-read seeking,
-pause/resume, pitch-preserving 1–4× speed, sentence transitions, pre-generation,
-screen-lock batches and the karaoke clock. Moving inference native fixes the
-broken component without replacing those working semantics.
+pause/resume, pitch-preserving 1–4× speed, sentence transitions and the karaoke
+clock. Browser Kokoro retains its pre-generation and screen-lock batches; native
+MLX intentionally does not speculate beyond the sentence playback requested.
+Moving inference native fixes the broken component without replacing those
+working semantics.
 
 iOS does not allow new Metal inference after the app enters the background.
-Aloud therefore pre-generates a runway while it is foregrounded, plays only
-that buffered Kokoro audio while locked, and pauses on the same sentence if the
-runway runs out. It resumes generation after the app becomes active again;
-content is never skipped. The native engine also caps MLX's buffer cache and
-clears recyclable buffers after each sentence to avoid memory growth over long
-reading sessions.
+Native Kokoro therefore generates only the sentence explicitly requested while
+Aloud is active. An already-playing clip can continue through the playback audio
+session, but no speculative MLX job is started for the following sentence while
+locked. Aloud resumes generation after the app becomes active again; content is
+never skipped. The native engine also caps MLX's buffer cache and clears
+recyclable buffers after each sentence to avoid memory growth over long reading
+sessions.
 
 Version 6.21.6 follows SwiftUI's aggregate scene phase rather than the obsolete
 UIApplicationDelegate active callbacks, which UIKit does not call for
