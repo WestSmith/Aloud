@@ -552,7 +552,7 @@ function makeBusyHandoffHarness({ busySeconds = 7 } = {}) {
   const loading = new Set();
   const calls = {
     kokoroStarts: [], nativeSpeaks: [], advances: [], cancels: 0,
-    toasts: 0, loading: [], pauses: 0, stops: 0,
+    toasts: 0, loading: [], pauses: 0, stops: 0, refreshes: 0,
   };
   const S = {
     playing: true,
@@ -576,7 +576,10 @@ function makeBusyHandoffHarness({ busySeconds = 7 } = {}) {
   const remoteAdvanceSource = extractNamedFunction(src, 'remoteAdvanceSentence');
   const api = new Function(
     'S', 'document', 'calls', 'loading', 'setTimeout', 'clearTimeout', 'initialBusySeconds',
-    `const NATIVE = { nativeKokoro: true };
+    `const NATIVE = {
+       nativeKokoro: true,
+       refreshAppActivity() { calls.refreshes++; }
+     };
      let nativeKokoroBusy = true, nativeKokoroAppActive = true;
      let nativeKokoroBusySeconds = initialBusySeconds, nativeKokoroBusyNoticeAt = 0;
      let nativeKokoroBusyTimer = null, kokoroResumeOnForeground = false;
@@ -776,17 +779,32 @@ function testBusyHandoff() {
   assert(superseded.calls.kokoroStarts.length === 0,
          'scheduled native idle retry overrode a newer transport action');
 
-  /* The idle health event can overtake the native_busy promise rejection.
-     That late rejection must notice that the queue is already free and create
-     its own one-shot retry instead of waiting for an event that already passed. */
-  const lateError = makeBusyHandoffHarness();
-  lateError.setBusy(false);
-  lateError.fail(Object.assign(new Error('earlier speech'), { code: 'native_busy' }));
-  assert(!lateError.state().resume && !lateError.state().loading,
-         'late native_busy rejection stranded a hidden resume intent');
-  lateError.runDelay(0);
-  assert(lateError.calls.kokoroStarts.join(',') === '14',
-         'late native_busy rejection did not retry the selected word exactly once');
+  /* Admission is authoritative even when the most recent health sample still
+     says idle. Never immediately resubmit; wait for refreshed health or cover
+     after the same bounded grace used by an observed busy event. */
+  const staleIdle = makeBusyHandoffHarness();
+  staleIdle.setBusy(false);
+  staleIdle.fail(Object.assign(new Error('native admission occupied'), { code: 'native_busy' }));
+  assert(staleIdle.state().busy && staleIdle.state().phase === 'waiting' &&
+         staleIdle.state().resume && staleIdle.state().loading &&
+         staleIdle.timerDelays().join(',') === '3000' && staleIdle.calls.refreshes === 1,
+         'stale-idle native_busy rejection bypassed the bounded wait/health refresh');
+  staleIdle.runDelay(0);
+  assert(staleIdle.calls.kokoroStarts.length === 0,
+         'stale-idle native_busy rejection immediately resubmitted to MLX');
+  staleIdle.runDelay(3000);
+  assert(staleIdle.state().phase === 'covering' &&
+         staleIdle.calls.nativeSpeaks.at(-1)?.word === 14,
+         'stale-idle native_busy rejection did not enter audible fallback');
+
+  const refreshedIdle = makeBusyHandoffHarness();
+  refreshedIdle.setBusy(false);
+  refreshedIdle.fail(Object.assign(new Error('native admission occupied'), { code: 'native_busy' }));
+  refreshedIdle.idle();
+  refreshedIdle.runDelay(0);
+  assert(refreshedIdle.calls.kokoroStarts.join(',') === '14' &&
+         refreshedIdle.calls.nativeSpeaks.length === 0 && refreshedIdle.state().phase === 'idle',
+         'refreshed idle health did not release the inferred busy wait exactly once');
 
   const cancelled = makeBusyHandoffHarness();
   cancelled.route(0, 14);
@@ -880,6 +898,7 @@ try {
   const speakNeuralSource = extractNamedFunction(src, 'speakNeural');
   const speakNativeSource = extractNamedFunction(src, 'speakNative');
   const busyRouteSource = extractNamedFunction(src, 'routeNativeKokoroBusyFallback');
+  const failureSource = extractNamedFunction(src, 'handleNeuralFailure');
   const suspendNativeSource = extractNamedFunction(src, 'suspendNativeKokoroWork');
   const generateSource = extractNamedFunction(src, 'generateNeural');
   const pumpSource = extractNamedFunction(src, 'neuralPump');
@@ -946,6 +965,13 @@ try {
          busyRouteSource.includes('S.neuralCache.has(neuralCacheKey(sentIdx))') &&
          busyRouteSource.includes('holdKokoroForBusyQueue(true)'),
          'busy routing no longer covers uncached work while preserving cached Fenrir audio');
+  assert(failureSource.includes("error?.code === 'native_busy'") &&
+         failureSource.includes('nativeKokoroBusy = true') &&
+         failureSource.includes('nativeKokoroBusySeconds = 0') &&
+         failureSource.includes('NATIVE.refreshAppActivity?.()') &&
+         failureSource.indexOf('nativeKokoroBusy = true') <
+         failureSource.indexOf('if (nativeKokoroBusy) holdKokoroForBusyQueue()'),
+         'native_busy admission rejection can again immediately retry against stale idle state');
   assert(speakNativeSource.includes("owner = 'native'") &&
          speakNativeSource.includes('lastWi: 0, owner'),
          'native utterances no longer identify Kokoro-busy coverage');

@@ -206,6 +206,12 @@ final class NativeKokoroEngine {
             return
         }
 
+        // A cancelled MLX evaluation can remain inside a non-interruptible Metal
+        // kernel after its JavaScript promise has settled. Reject a replacement
+        // here instead of putting it behind that work on `queue`; otherwise the
+        // replacement can appear to hang for the full duration of the old call.
+        guard !rejectGenerationIfBusy(requestID: requestID) else { return }
+
         queue.async { [weak self] in
             guard let self else { return }
             var generationWasStarted = false
@@ -978,6 +984,33 @@ final class NativeKokoroEngine {
         activityLock.lock()
         defer { activityLock.unlock() }
         return appActive
+    }
+
+    /// Rejects admission while another request is already in its forced MLX
+    /// evaluation. The rejection and the eventual idle health event are placed
+    /// on the same serial event queue while holding `healthLock`, so a generation
+    /// that finishes concurrently cannot deliver idle before JavaScript learns
+    /// that this request was rejected as busy.
+    private func rejectGenerationIfBusy(requestID: String) -> Bool {
+        healthLock.lock()
+        guard let startedAt = generationStartedAt else {
+            healthLock.unlock()
+            return false
+        }
+
+        let busySeconds = max(0, Int(Date().timeIntervalSince(startedAt)))
+        reportIdleWhenGenerationFinishes = true
+        let suffix = busySeconds > 0 ? " for \(busySeconds)s" : ""
+        lifecycleEventQueue.async { [weak self] in
+            self?.replyFailure(
+                requestID: requestID,
+                code: "native_busy",
+                message: "Kokoro is finishing earlier speech on this iPad\(suffix).",
+                retryable: true
+            )
+        }
+        healthLock.unlock()
+        return true
     }
 
     /// Lock-only health data for lifecycle logging and the `appActivity` bridge

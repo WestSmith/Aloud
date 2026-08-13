@@ -69,6 +69,23 @@ try {
     /catch\s+is\s+NativeKokoroGenerationCancelled[\s\S]*consumeCancellation\(requestID\)/.test(native),
     'cancelled generation no longer has one terminal tombstone consumer'
   );
+  const generate = functionBody(native, 'generate');
+  const busyAdmission = functionBody(native, 'rejectGenerationIfBusy');
+  assert(
+    generate.indexOf('rejectGenerationIfBusy(requestID: requestID)') >= 0 &&
+    generate.indexOf('rejectGenerationIfBusy(requestID: requestID)') < generate.indexOf('queue.async'),
+    'a replacement generation can still queue behind an in-flight MLX evaluation'
+  );
+  const busyLock = busyAdmission.indexOf('healthLock.lock()');
+  const busyMarker = busyAdmission.indexOf('guard let startedAt = generationStartedAt');
+  const idleArm = busyAdmission.indexOf('reportIdleWhenGenerationFinishes = true');
+  const orderedReply = busyAdmission.indexOf('lifecycleEventQueue.async');
+  const finalUnlock = busyAdmission.lastIndexOf('healthLock.unlock()');
+  assert(
+    busyLock >= 0 && busyLock < busyMarker && busyMarker < idleArm && idleArm < orderedReply &&
+    orderedReply < finalUnlock && busyAdmission.includes('code: "native_busy"'),
+    'native busy admission no longer atomically orders its rejection before the eventual idle event'
+  );
   assert(
     /misaki\.phonemize\(text:\s*input,\s*checkpoint:\s*checkpoint\)/.test(misakiProcessor),
     'Misaki fallback no longer receives the native lifecycle checkpoint'

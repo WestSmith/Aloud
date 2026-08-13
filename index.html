@@ -5533,18 +5533,28 @@ function routeNativeKokoroBusyFallback(sentIdx, fromWord) {
 
 function handleNeuralFailure(error, invalidateAudio = false) {
   if (!S.playing || S.engine !== 'neural') return;
+  const rejectedAsBusy = !!NATIVE?.nativeKokoro && error?.code === 'native_busy';
   const waitForForeground = !!NATIVE?.nativeKokoro &&
     (document.hidden || !nativeKokoroAppActive || nativeKokoroBusy ||
-     error?.code === 'app_inactive' || error?.code === 'native_busy');
+     error?.code === 'app_inactive' || rejectedAsBusy);
   if (invalidateAudio) invalidateNeuralSpeech();
   pauseAll();
   if (waitForForeground) {
     kokoroResumeOnForeground = true;
+    /* Admission is newer evidence than our last lifecycle sample. Treat a
+       native_busy rejection as authoritative instead of immediately sending
+       the same request again. An explicit refresh closes the opposite race: if
+       MLX became idle before this promise rejection crossed the bridge, Swift
+       republishes idle and releases this bounded wait. */
+    if (rejectedAsBusy && !nativeKokoroBusy) {
+      nativeKokoroBusy = true;
+      nativeKokoroBusySeconds = 0;
+      try { NATIVE.refreshAppActivity?.(); } catch {}
+    }
     if (nativeKokoroBusy) holdKokoroForBusyQueue();
-    /* The matching kokoroHealth(idle) event can overtake this rejected
-       promise. If it already did, no later lifecycle event will consume the
-       resume intent, so enqueue the one retry now. The zero-delay hop also
-       lets the rejected generation leave genTail before retrying. */
+    /* app_inactive can also arrive after an active lifecycle event. It is safe
+       to retry that case once the scene is active because it did not prove that
+       another MLX evaluation owns the native admission slot. */
     else if (!document.hidden && nativeKokoroAppActive) resumeKokoroAfterForeground(0);
     return;
   }
