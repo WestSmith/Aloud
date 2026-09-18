@@ -89,7 +89,11 @@ self.onmessage = async (event) => {
 
       stage('session', 'Finishing the on-device speech engine…');
       ts = instrumentKokoroTTS(tts);
-      self.postMessage({ type: 'ready' });
+      /* onnxruntime-web only spins up wasm threads when the page is
+         cross-origin isolated (SharedArrayBuffer). Report what we got so the
+         status line can say whether the multi-core setting took effect. */
+      const threads = self.crossOriginIsolated ? (navigator.hardwareConcurrency || 1) : 1;
+      self.postMessage({ type: 'ready', threads });
       return;
     }
 

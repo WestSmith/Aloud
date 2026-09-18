@@ -1,6 +1,43 @@
 /* Aloud service worker — offline app shell + CDN module caching.
    Bump VERSION on each release to roll the cache. */
-const VERSION = 'aloud-v6.26.0';
+const VERSION = 'aloud-v6.27.0';
+/* Multi-core neural voice. wasm threads need SharedArrayBuffer, which needs
+   the document delivered with COOP/COEP. GitHub Pages cannot send headers,
+   but a service worker can add them to every same-origin response. It is
+   opt-in (Settings → "Use all CPU cores"): COEP require-corp also blocks any
+   cross-origin subresource that lacks CORS/CORP, which an opened HTML file's
+   remote images or scripts may be. The flag is kept in Cache Storage
+   because a service worker cannot read localStorage; the page sends it over
+   postMessage and re-sends it on every boot. It persists across VERSION
+   rolls on purpose — the activate handler only deletes 'aloud-v*' caches. */
+const FLAGS = 'aloud-flags';
+const COI_KEY = '/__aloud_coi';
+async function coiWanted() {
+  try { return !!(await (await caches.open(FLAGS)).match(COI_KEY)); } catch { return false; }
+}
+function withCoiHeaders(res) {
+  if (!res || res.type === 'opaque' || res.type === 'opaqueredirect') return res;
+  const headers = new Headers(res.headers);
+  headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+  headers.set('Cross-Origin-Embedder-Policy', 'require-corp');
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
+self.addEventListener('message', (e) => {
+  const m = e.data;
+  if (!m || m.type !== 'coi') return;
+  const port = e.ports && e.ports[0];
+  e.waitUntil((async () => {
+    let ok = false;
+    try {
+      const c = await caches.open(FLAGS);
+      if (m.on) await c.put(COI_KEY, new Response('1'));
+      else await c.delete(COI_KEY);
+      ok = true;
+    } catch {}
+    if (port) port.postMessage({ ok });
+  })());
+});
 const CORE = ['./', './index.html', './kokoro-worker.js', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -31,12 +68,16 @@ self.addEventListener('fetch', (e) => {
     // app shell: NETWORK-FIRST so a fresh deploy is picked up immediately when
     // online; fall back to cache only when offline. (Was cache-first, which
     // left installed PWAs stuck on old versions.)
-    e.respondWith(
-      fetch(e.request).then(res => {
-        if (res.ok && !noStore) { const copy = res.clone(); caches.open(VERSION).then(c => c.put(e.request, copy)); }
-        return res;
-      }).catch(() => caches.match(e.request).then(hit => hit || caches.match('./index.html') || caches.match('./')))
-    );
+    const shell = fetch(e.request).then(res => {
+      if (res.ok && !noStore) { const copy = res.clone(); caches.open(VERSION).then(c => c.put(e.request, copy)); }
+      return res;
+    }).catch(() => caches.match(e.request).then(hit => hit || caches.match('./index.html') || caches.match('./')));
+    // every same-origin response carries the isolation headers when the flag
+    // is on. Not just the document: a dedicated worker's script response must
+    // itself declare an embedder policy at least as strict as its owner's, or
+    // the browser refuses to start the worker (ERR_BLOCKED_BY_RESPONSE —
+    // measured in Chromium against kokoro-worker.js before this line existed).
+    e.respondWith(Promise.all([shell, coiWanted()]).then(([res, coi]) => coi ? withCoiHeaders(res) : res));
   } else if (url.hostname === 'cdn.jsdelivr.net') {
     // engine modules (kokoro-js, phonemizer): cache-first so neural + G2P work offline
     e.respondWith(
