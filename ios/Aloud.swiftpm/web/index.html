@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.25.0">
+<meta name="aloud-version" content="v6.26.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -76,10 +76,10 @@
   /* ---------- Top bar ---------- */
   #topbar {
     position: fixed; top: 0; left: 0; right: 0; z-index: 30;
-    /* v6.25.0: equal side columns, so the title sits on the bar's centre line
-       instead of the centre of whatever was left after the Library button
-       and the action row took their (unequal) share */
-    display: grid; grid-template-columns: minmax(max-content, 1fr) minmax(0, 1fr) minmax(max-content, 1fr);
+    /* v6.26.0: the title is laid over the whole first row and centred on the
+       bar itself; --title-side (measured by JS) keeps it clear of the Library
+       button and the action cluster, whichever is wider */
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center; gap: 10px;
     transition: transform .3s ease;
     padding: calc(10px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right)) 10px calc(14px + env(safe-area-inset-left));
@@ -88,7 +88,7 @@
     border-bottom: 1px solid var(--border);
   }
   #topbar .logo {
-    display: flex; align-items: center; gap: 8px; justify-self: start;
+    display: flex; align-items: center; gap: 8px; justify-self: start; grid-row: 1; grid-column: 1; position: relative; z-index: 1;
     font-weight: 700; font-size: 17px; letter-spacing: .2px;
     white-space: nowrap;
   }
@@ -98,7 +98,7 @@
     display: grid; place-items: center; color: #fff; font-size: 13px;
   }
   #btn-library {
-    display: none; align-items: center; gap: 7px; flex: none; justify-self: start;
+    display: none; align-items: center; gap: 7px; flex: none; justify-self: start; grid-row: 1; grid-column: 1; position: relative; z-index: 1;
     min-height: 44px; padding: 0 12px 0 9px; border-radius: 13px;
     background: var(--accent-soft); color: var(--accent-strong);
     border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
@@ -109,7 +109,7 @@
   body.document-open #topbar .logo { display: none; }
   body.document-open #btn-open { display: none; }
   body:not(.document-open) #btn-rsvp { display: none; }
-  #topbar-actions { display: flex; align-items: center; gap: 6px; min-width: 0; justify-self: end; }
+  #topbar-actions { display: flex; align-items: center; gap: 6px; min-width: 0; justify-self: end; grid-row: 1; grid-column: 3; position: relative; z-index: 1; }
   #btn-fullscreen.on { background: var(--accent-soft); color: var(--accent-strong); }
   /* full screen (v6.25.0): while playing, the bars step out of the way after a
      moment of stillness and come back on any pointer or key */
@@ -117,8 +117,11 @@
   /* with the speed-reader open the panel IS the page: it and the player it
      is docked on stay put; only the top bar and zoom bar go */
   body.chrome-hidden:not(.rsvp-on) #player { transform: translate(-50%, 140%); }
+  body.chrome-hidden { cursor: none; }
   body.chrome-hidden #zoom-bar { opacity: 0; pointer-events: none; }
   #doc-title {
+    grid-row: 1; grid-column: 1 / -1; justify-self: center;
+    max-width: calc(100% - 2 * var(--title-side, 0px) - 24px);
     min-width: 0; text-align: center;
     font-size: 13.5px; color: var(--text-dim);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -238,7 +241,7 @@
   #search-results .rr-name, #bm-list .rr-name { white-space: normal; line-height: 1.45; font-size: 13.5px; }
 
   /* ---------- Reader ---------- */
-  #reader { display: none; padding: calc(74px + env(safe-area-inset-top)) 0 190px; }
+  #reader { display: none; padding: calc(74px + env(safe-area-inset-top)) 0 calc(var(--player-h, 96px) + 60px + env(safe-area-inset-bottom)); }
   body.document-open #reader { animation: reader-in .18s ease-out; }
   @keyframes reader-in { from { opacity: 0; transform: translateY(4px); } }
   #content {
@@ -441,7 +444,7 @@
   /* toast */
   #toast {
     position: fixed; left: 50%; transform: translateX(-50%) translateY(20px);
-    bottom: calc(120px + env(safe-area-inset-bottom)); z-index: 80;
+    bottom: calc(var(--player-h, 96px) + 28px + env(safe-area-inset-bottom)); z-index: 80;
     background: var(--bg-elev2); color: var(--text);
     border: 1px solid var(--border); border-radius: 13px;
     padding: 11px 16px; font-size: 13.5px; max-width: min(480px, 90vw);
@@ -450,14 +453,12 @@
   }
   #toast.actionable { pointer-events: auto; cursor: pointer; border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
   body:not(.document-open) #toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
-  /* the docked RSVP panel sits where the toast used to land */
-  body.document-open.rsvp-on.rsvp-bottom #toast { bottom: calc(var(--player-h, 122px) + 160px + env(safe-area-inset-bottom)); }
   /* neural-model download progress, visible from ANY screen — the copy of
      this inside the voice sheet is invisible once the sheet is closed, and
      a silent multi-hundred-MB download reads as "the app hung" */
   #kokoro-float {
     position: fixed; left: 50%; transform: translateX(-50%);
-    bottom: calc(172px + env(safe-area-inset-bottom)); z-index: 79;
+    bottom: calc(var(--player-h, 96px) + 80px + env(safe-area-inset-bottom)); z-index: 79;
     background: var(--bg-elev2); color: var(--text);
     border: 1px solid var(--border); border-radius: 13px;
     padding: 10px 14px; font-size: 13px; max-width: min(440px, 88vw);
@@ -468,7 +469,7 @@
   body:not(.document-open) #kokoro-float { bottom: calc(76px + env(safe-area-inset-bottom)); }
   /* opt-in debug: which timing mode the playing sentence used */
   #timing-badge {
-    position: fixed; right: 10px; bottom: calc(128px + env(safe-area-inset-bottom)); z-index: 78;
+    position: fixed; right: 10px; bottom: calc(var(--player-h, 96px) + 34px + env(safe-area-inset-bottom)); z-index: 78;
     background: var(--bg-elev2); border: 1px solid var(--border); border-radius: 99px;
     padding: 4px 10px; font-size: 11.5px; color: var(--text-dim); display: none;
   }
@@ -566,7 +567,7 @@
 
   /* ---------- zoom bar (v6.6.0) — PDF & original-layout HTML on big screens ---------- */
   #zoom-bar {
-    position: fixed; right: 12px; bottom: calc(158px + env(safe-area-inset-bottom));
+    position: fixed; right: 12px; bottom: calc(var(--player-h, 96px) + 62px + env(safe-area-inset-bottom));
     z-index: 40; display: none; flex-direction: column; gap: 3px;
     background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
     backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
@@ -581,7 +582,7 @@
     #zoom-bar { display: none !important; }
     body.zoomable.html-zoomable #zoom-bar {
       display: flex !important; flex-direction: row; right: 8px;
-      bottom: calc(150px + env(safe-area-inset-bottom));
+      bottom: calc(var(--player-h, 96px) + 26px + env(safe-area-inset-bottom));
     }
     body.html-zoomable #zoom-bar .zsep,
     body.html-zoomable #zoom-fitw,
@@ -593,7 +594,7 @@
   @media (min-width: 700px) and (max-height: 500px) {
     body.zoomable #zoom-bar {
       display: flex !important; flex-direction: row; right: 8px;
-      bottom: calc(150px + env(safe-area-inset-bottom));
+      bottom: calc(var(--player-h, 96px) + 26px + env(safe-area-inset-bottom));
     }
     body.zoomable #zoom-bar .zsep { display: none !important; }
     body.html-zoomable #zoom-fitw,
@@ -621,39 +622,17 @@
 
 
   /* ---------- RSVP speed-reader panel ---------- */
+  /* v6.26.0: the speed reader is a section of the player card. The card is
+     anchored to the bottom, so opening this row makes it grow upward as one
+     surface — one border, one radius, one blur. The row animates through a
+     0fr→1fr grid track, which needs no fixed height to unfold. */
   #rsvp {
-    position: fixed; left: 50%; transform: translateX(-50%);
-    top: calc(60px + env(safe-area-inset-top));
-    width: min(560px, calc(100% - 20px)); z-index: 35;
-    background: color-mix(in srgb, var(--bg-elev) 94%, transparent);
-    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-    border: 1px solid var(--border); border-radius: 18px;
-    box-shadow: var(--shadow);
-    padding: 8px 14px 10px;
-    /* v6.25.0: kept in the DOM and animated, rather than display-toggled, so
-       the docked panel visibly slides out of the player */
-    visibility: hidden; opacity: 0; pointer-events: none;
-    transform: translate(-50%, -24px);
-    transition: transform .3s cubic-bezier(.2, .8, .2, 1), opacity .22s ease, visibility 0s linear .3s;
+    display: grid; grid-template-rows: 0fr; opacity: 0;
+    transition: grid-template-rows .34s cubic-bezier(.2, .8, .2, 1), opacity .22s ease;
   }
-  body.rsvp-on #rsvp { visibility: visible; opacity: 1; pointer-events: auto; transform: translate(-50%, 0); transition-delay: 0s; }
-  body.rsvp-on #reader { padding-top: calc(216px + env(safe-area-inset-top)); }
-  /* docked: shares the player's width and edge, sits behind it (z 35 < 40) and
-     rises from underneath. --player-h is written by the player's ResizeObserver,
-     so the phone's taller two-row player needs no separate offsets. */
-  body.rsvp-bottom #rsvp {
-    top: auto;
-    bottom: calc(14px + env(safe-area-inset-bottom) + var(--player-h, 122px) - 12px);
-    width: min(560px, calc(100% - 20px - env(safe-area-inset-left) - env(safe-area-inset-right)));
-    border-radius: 18px 18px 0 0; border-bottom: 0; box-shadow: none;
-    padding-bottom: 20px;
-    transform: translate(-50%, 48px);
-  }
-  body.rsvp-on.rsvp-bottom #rsvp { transform: translate(-50%, 0); }
-  body.rsvp-on.rsvp-bottom #reader {
-    padding-top: calc(74px + env(safe-area-inset-top));
-    padding-bottom: calc(var(--player-h, 122px) + 200px);
-  }
+  body.rsvp-on #rsvp { grid-template-rows: 1fr; opacity: 1; }
+  #rsvp-inner { min-height: 0; overflow: hidden; }
+  #rsvp-body { padding: 2px 2px 10px; margin-bottom: 10px; border-bottom: 1px solid var(--border); }
   #btn-rsvp.rsvp-active { background: var(--accent-soft); color: var(--accent-strong); }
   #rsvp-word {
     display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline;
@@ -671,7 +650,7 @@
   }
   #rsvp-orp::before { top: -16px; }
   #rsvp-orp::after { bottom: -14px; }
-  #rsvp-meta { display: flex; align-items: center; gap: 8px; }
+  #rsvp-meta { display: flex; align-items: center; gap: 8px; min-height: 30px; }
   .rsvp-chip {
     font-size: 11.5px; font-weight: 650; color: var(--text-dim);
     background: var(--bg-elev2); border: 1px solid var(--border);
@@ -692,14 +671,12 @@
     body.document-open #topbar { grid-template-columns: auto minmax(0, 1fr); gap: 6px 8px; }
     body.document-open #doc-title { text-align: left; }
     body.document-open #topbar-actions {
-      grid-column: 1 / -1; justify-self: stretch; overflow-x: auto; overscroll-behavior-x: contain;
+      grid-row: 2; grid-column: 1 / -1; justify-self: stretch; overflow-x: auto; overscroll-behavior-x: contain;
       scrollbar-width: none; padding-bottom: 1px;
     }
     body.document-open #topbar-actions::-webkit-scrollbar { display: none; }
     body.document-open #topbar-actions :focus-visible { outline-offset: -3px; }
     body.document-open #reader { padding-top: calc(132px + env(safe-area-inset-top)); }
-    body.document-open:not(.rsvp-bottom) #rsvp { top: calc(118px + env(safe-area-inset-top)); }
-    body.document-open.rsvp-on:not(.rsvp-bottom) #reader { padding-top: calc(274px + env(safe-area-inset-top)); }
   }
   @media (max-width: 560px) {
     #home { justify-content: flex-start; padding-top: calc(86px + env(safe-area-inset-top)); }
@@ -715,11 +692,7 @@
     #btn-speed { grid-area: speed; }
     #btn-voice { grid-area: voice; justify-self: stretch; max-width: none; }
     #player { padding: 10px 12px 11px; border-radius: 21px; }
-    body.document-open #reader { padding-bottom: 242px; }
-    body.document-open #toast { bottom: calc(190px + env(safe-area-inset-bottom)); }
-    body.document-open #kokoro-float { bottom: calc(242px + env(safe-area-inset-bottom)); }
-    body.document-open #timing-badge { bottom: calc(195px + env(safe-area-inset-bottom)); }
-    body.document-open.html-zoomable #zoom-bar { bottom: calc(220px + env(safe-area-inset-bottom)); }
+    #rsvp-word { font-size: 32px; height: 62px; }
     .sheet { padding-left: 16px; padding-right: 16px; }
     .rr-tag { display: none; }
   }
@@ -762,22 +735,6 @@
   <button class="iconbtn" id="btn-settings" title="Settings" aria-label="Settings">
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
   </button>
-  </div>
-</div>
-
-<div id="rsvp">
-  <div id="rsvp-word" title="Tap to play / pause">
-    <span id="rsvp-pre"></span><span id="rsvp-orp"></span><span id="rsvp-post"></span>
-  </div>
-  <div id="rsvp-meta">
-    <span id="rsvp-wpm" class="rsvp-chip">— wpm</span>
-    <button class="rsvp-chip" id="rsvp-mode">🔊 Voice-synced</button>
-    <div id="rsvp-wpm-row">
-      <input type="range" id="rsvp-wpm-range" min="150" max="1200" step="25" value="450" aria-label="Words per minute">
-      <span id="rsvp-wpm-label">450 wpm</span>
-    </div>
-    <button class="rsvp-chip" id="rsvp-pos" title="Dock on the player">▼</button>
-    <button class="rsvp-chip" id="rsvp-close" title="Close">✕</button>
   </div>
 </div>
 
@@ -827,6 +784,25 @@
 <input type="file" id="file-input" accept=".epub,.pdf,.html,.htm,.xhtml,.txt,.md,.markdown,application/epub+zip,application/pdf,text/html,text/plain" hidden>
 
 <div id="player">
+  <!-- speed reader (v6.26.0): a section of the player card that unfolds from
+       its top edge, so it is one surface with the transport, not a second card -->
+  <div id="rsvp">
+    <div id="rsvp-inner">
+      <div id="rsvp-body">
+        <div id="rsvp-word" title="Tap to play / pause">
+          <span id="rsvp-pre"></span><span id="rsvp-orp"></span><span id="rsvp-post"></span>
+        </div>
+        <div id="rsvp-meta">
+          <button class="rsvp-chip" id="rsvp-mode">🔊 Voice-synced</button>
+          <div id="rsvp-wpm-row">
+            <input type="range" id="rsvp-wpm-range" min="150" max="1200" step="25" value="450" aria-label="Words per minute">
+            <span id="rsvp-wpm-label">450 wpm</span>
+          </div>
+          <button class="rsvp-chip" id="rsvp-close" title="Close speed reader (R)" aria-label="Close speed reader">✕</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <div id="progress-row">
     <div id="progress-wrap" role="slider" tabindex="0" aria-label="Reading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-track"><div id="progress-fill"></div></div></div>
     <div id="progress-label">0%</div>
@@ -1190,7 +1166,6 @@ const S = {
   rsvp: {
     open: false,
     mode: store.get('rsvpMode', 'voice'),   // 'voice' (TTS-synced) | 'silent' (timer)
-    pos: store.get('rsvpPos', 'bottom'),    // 'top' | 'bottom' (docked on the player; the default since v6.25.0)
     wpm: store.get('rsvpWpm', 450),
     timer: null, token: 0, lastFlip: 0, avg: 0,
   },
@@ -1207,15 +1182,10 @@ function invalidateReadingViewportBounds() { readingViewportCache = null; }
 function readingViewportBounds() {
   if (readingViewportCache) return readingViewportCache;
   const topbar = $('topbar')?.getBoundingClientRect();
-  const player = $('player')?.getBoundingClientRect();
-  const rsvp = $('rsvp')?.getBoundingClientRect();
+  const player = $('player')?.getBoundingClientRect();   // the speed reader lives inside it
   let top = Math.max(16, (topbar?.bottom || 0) + 16);
   let bottom = window.innerHeight - 24;
   if (player && player.height > 0) bottom = Math.min(bottom, player.top - 16);
-  if (S.rsvp.open && rsvp && rsvp.height > 0) {
-    if (S.rsvp.pos === 'top') top = Math.max(top, rsvp.bottom + 16);
-    else bottom = Math.min(bottom, rsvp.top - 16);
-  }
   return readingViewportCache = { top, bottom, center: top + Math.max(0, bottom - top) / 2 };
 }
 /* v6.23 made the reading band follow Aloud's dynamic phone/tablet chrome,
@@ -1228,11 +1198,24 @@ function syncPlayerHeight() {
   const p = $('player');
   if (p) document.documentElement.style.setProperty('--player-h', (p.offsetHeight || 0) + 'px');
 }
+/* the document title is centred on the top bar itself (not on the leftover
+   space), so it needs to know how far the Library button and the action
+   cluster reach in from either edge to stay clear of them */
+function syncTitleInset() {
+  const bar = $('topbar')?.getBoundingClientRect();
+  if (!bar) return;
+  const left = (document.body.classList.contains('document-open') ? $('btn-library') : document.querySelector('#topbar .logo'))?.getBoundingClientRect();
+  const acts = $('topbar-actions')?.getBoundingClientRect();
+  let side = left ? Math.max(0, left.right - bar.left) : 0;
+  if (acts && left && acts.top < left.bottom - 4) side = Math.max(side, bar.right - acts.left);   // same row
+  document.documentElement.style.setProperty('--title-side', Math.round(side) + 'px');
+}
+function syncChromeMetrics() { invalidateReadingViewportBounds(); syncPlayerHeight(); syncTitleInset(); }
 try {
-  const readingViewportObserver = new ResizeObserver(() => { invalidateReadingViewportBounds(); syncPlayerHeight(); });
-  ['topbar', 'player', 'rsvp'].forEach(id => { const el = $(id); if (el) readingViewportObserver.observe(el); });
+  const readingViewportObserver = new ResizeObserver(syncChromeMetrics);
+  ['topbar', 'topbar-actions', 'player'].forEach(id => { const el = $(id); if (el) readingViewportObserver.observe(el); });
 } catch {}
-window.addEventListener('resize', () => { invalidateReadingViewportBounds(); syncPlayerHeight(); });
+window.addEventListener('resize', syncChromeMetrics);
 window.visualViewport?.addEventListener('resize', invalidateReadingViewportBounds);
 function scrollOptions(top) { return { top, behavior: REDUCED_MOTION ? 'auto' : 'smooth' }; }
 
@@ -3644,7 +3627,7 @@ function finishOpen(opts = {}) {
   invalidateReadingViewportBounds();
   document.querySelectorAll('.doc-btn').forEach(b => { b.style.display = 'grid'; });
   if (!fullscreenSupported()) $('btn-fullscreen').style.display = 'none';
-  syncPlayerHeight();
+  syncChromeMetrics();
   const native = S.mode !== 'flow';
   $('btn-view').textContent = native ? '¶' : '📄';
   $('btn-view').title = native ? 'Switch to plain text view' : 'Switch to original layout';
@@ -5760,8 +5743,12 @@ function rsvpFlash(token) {
     S.rsvp.avg = S.rsvp.avg ? S.rsvp.avg * 0.85 + gap * 0.15 : gap;
   }
   S.rsvp.lastFlip = now;
-  const wpm = S.rsvp.mode === 'silent' ? S.rsvp.wpm : (S.rsvp.avg ? Math.round(60000 / S.rsvp.avg / 5) * 5 : null);
-  $('rsvp-wpm').textContent = (wpm ? wpm : '—') + ' wpm';
+  /* voice-synced: the measured pace rides on the mode chip (silent mode shows
+     its setting on the slider instead) */
+  if (S.rsvp.mode !== 'silent') {
+    const wpm = S.rsvp.avg ? Math.round(60000 / S.rsvp.avg / 5) * 5 : null;
+    $('rsvp-mode').textContent = '🔊 Voice-synced' + (wpm ? ` · ${wpm} wpm` : '');
+  }
 }
 
 function rsvpPlay(fromWord) {
@@ -5810,17 +5797,12 @@ function rsvpPlay(fromWord) {
   step();
 }
 
-function applyRsvpPos() {
-  document.body.classList.toggle('rsvp-bottom', S.rsvp.pos === 'bottom');
-  invalidateReadingViewportBounds();
-  $('rsvp-pos').textContent = S.rsvp.pos === 'bottom' ? '▲' : '▼';
-  $('rsvp-pos').title = S.rsvp.pos === 'bottom' ? 'Dock at the top' : 'Dock on the player';
-}
-
 function setRsvpOpen(open) {
   S.rsvp.open = open;
   document.body.classList.toggle('rsvp-on', open);
-  applyRsvpPos();
+  invalidateReadingViewportBounds();
+  /* the card is still unfolding; re-centre the current word once it settles */
+  setTimeout(() => { invalidateReadingViewportBounds(); if (S.curWord >= 0) maybeScroll(S.words[S.curWord]?.el); }, 380);
   $('btn-rsvp').classList.toggle('rsvp-active', open);
   if (open) {
     S.rsvp.lastFlip = 0; S.rsvp.avg = 0;
@@ -5843,7 +5825,6 @@ function renderRsvpMode() {
   $('rsvp-wpm-row').style.display = silent ? 'flex' : 'none';
   $('rsvp-wpm-range').value = S.rsvp.wpm;
   $('rsvp-wpm-label').textContent = S.rsvp.wpm + ' wpm';
-  $('rsvp-wpm').textContent = (silent ? S.rsvp.wpm : '—') + ' wpm';
 }
 
 /* ====================================================================
@@ -6294,12 +6275,6 @@ window.addEventListener('resize', () => {
 /* RSVP wiring */
 $('btn-rsvp').addEventListener('click', () => setRsvpOpen(!S.rsvp.open));
 $('rsvp-close').addEventListener('click', () => setRsvpOpen(false));
-$('rsvp-pos').addEventListener('click', () => {
-  S.rsvp.pos = S.rsvp.pos === 'bottom' ? 'top' : 'bottom';
-  store.set('rsvpPos', S.rsvp.pos);
-  applyRsvpPos();
-  if (S.curWord >= 0) maybeScroll(S.words[S.curWord]?.el, true);   // re-center around the new layout
-});
 $('rsvp-word').addEventListener('click', togglePlay);
 $('rsvp-mode').addEventListener('click', () => {
   S.rsvp.mode = S.rsvp.mode === 'silent' ? 'voice' : 'silent';
@@ -6312,7 +6287,6 @@ $('rsvp-wpm-range').addEventListener('input', e => {
   S.rsvp.wpm = +e.target.value;
   store.set('rsvpWpm', S.rsvp.wpm);
   $('rsvp-wpm-label').textContent = S.rsvp.wpm + ' wpm';
-  $('rsvp-wpm').textContent = S.rsvp.wpm + ' wpm';
   updateProgress();
   if (S.playing && rsvpSilentActive()) { S.rsvp.token++; clearTimeout(S.rsvp.timer); rsvpPlay(S.curWord); }
 });
@@ -6729,9 +6703,16 @@ function toggleFullscreen() {
 function showChrome() {
   document.body.classList.remove('chrome-hidden');
   clearTimeout(chromeIdleT);
-  if (isFullscreen() && S.playing && !document.querySelector('.sheet.open')) {
-    chromeIdleT = setTimeout(() => { if (isFullscreen() && S.playing && !document.querySelector('.sheet.open')) document.body.classList.add('chrome-hidden'); }, 2600);
-  }
+  if (!isFullscreen()) return;
+  const arm = () => {
+    chromeIdleT = setTimeout(() => {
+      if (!isFullscreen() || document.querySelector('.sheet.open')) return;
+      /* the pointer resting on a bar means it is in use: wait, don't hide under it */
+      if (document.querySelector('#topbar:hover, #player:hover, #zoom-bar:hover')) { arm(); return; }
+      document.body.classList.add('chrome-hidden');
+    }, 1800);
+  };
+  arm();
 }
 function onFullscreenChange() {
   const on = isFullscreen();
@@ -6739,7 +6720,7 @@ function onFullscreenChange() {
   $('btn-fullscreen').classList.toggle('on', on);
   $('btn-fullscreen').setAttribute('aria-pressed', String(on));
   $('btn-fullscreen').title = on ? 'Exit full screen (F)' : 'Full screen (F)';
-  if (on && !store.get('fsTipSeen', false)) { store.set('fsTipSeen', true); toast('Full screen — the bars hide while reading and come back when you move. F or Esc to leave.', 5000); }
+  if (on && !store.get('fsTipSeen', false)) { store.set('fsTipSeen', true); toast('Full screen — the bars tuck away when you hold still and return when you move. F or Esc to leave.', 5000); }
   showChrome();
   invalidateReadingViewportBounds();
 }
