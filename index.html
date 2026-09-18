@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.24.0">
+<meta name="aloud-version" content="v6.25.0">
 <link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -75,14 +76,19 @@
   /* ---------- Top bar ---------- */
   #topbar {
     position: fixed; top: 0; left: 0; right: 0; z-index: 30;
-    display: flex; align-items: center; gap: 10px;
+    /* v6.25.0: equal side columns, so the title sits on the bar's centre line
+       instead of the centre of whatever was left after the Library button
+       and the action row took their (unequal) share */
+    display: grid; grid-template-columns: minmax(max-content, 1fr) minmax(0, 1fr) minmax(max-content, 1fr);
+    align-items: center; gap: 10px;
+    transition: transform .3s ease;
     padding: calc(10px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right)) 10px calc(14px + env(safe-area-inset-left));
     background: color-mix(in srgb, var(--bg) 82%, transparent);
     backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
     border-bottom: 1px solid var(--border);
   }
   #topbar .logo {
-    display: flex; align-items: center; gap: 8px;
+    display: flex; align-items: center; gap: 8px; justify-self: start;
     font-weight: 700; font-size: 17px; letter-spacing: .2px;
     white-space: nowrap;
   }
@@ -92,7 +98,7 @@
     display: grid; place-items: center; color: #fff; font-size: 13px;
   }
   #btn-library {
-    display: none; align-items: center; gap: 7px; flex: none;
+    display: none; align-items: center; gap: 7px; flex: none; justify-self: start;
     min-height: 44px; padding: 0 12px 0 9px; border-radius: 13px;
     background: var(--accent-soft); color: var(--accent-strong);
     border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
@@ -103,9 +109,17 @@
   body.document-open #topbar .logo { display: none; }
   body.document-open #btn-open { display: none; }
   body:not(.document-open) #btn-rsvp { display: none; }
-  #topbar-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  #topbar-actions { display: flex; align-items: center; gap: 6px; min-width: 0; justify-self: end; }
+  #btn-fullscreen.on { background: var(--accent-soft); color: var(--accent-strong); }
+  /* full screen (v6.25.0): while playing, the bars step out of the way after a
+     moment of stillness and come back on any pointer or key */
+  body.chrome-hidden #topbar { transform: translateY(-110%); }
+  /* with the speed-reader open the panel IS the page: it and the player it
+     is docked on stay put; only the top bar and zoom bar go */
+  body.chrome-hidden:not(.rsvp-on) #player { transform: translate(-50%, 140%); }
+  body.chrome-hidden #zoom-bar { opacity: 0; pointer-events: none; }
   #doc-title {
-    flex: 1; min-width: 0; text-align: center;
+    min-width: 0; text-align: center;
     font-size: 13.5px; color: var(--text-dim);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
@@ -276,6 +290,7 @@
     box-shadow: var(--shadow);
     padding: 12px 16px 12px;
     display: none;
+    transition: transform .3s ease;
   }
   #progress-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
   #progress-wrap { flex: 1; height: 18px; display: flex; align-items: center; cursor: pointer; touch-action: none; }
@@ -435,6 +450,8 @@
   }
   #toast.actionable { pointer-events: auto; cursor: pointer; border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
   body:not(.document-open) #toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
+  /* the docked RSVP panel sits where the toast used to land */
+  body.document-open.rsvp-on.rsvp-bottom #toast { bottom: calc(var(--player-h, 122px) + 160px + env(safe-area-inset-bottom)); }
   /* neural-model download progress, visible from ANY screen — the copy of
      this inside the voice sheet is invisible once the sheet is closed, and
      a silent multi-hundred-MB download reads as "the app hung" */
@@ -613,18 +630,29 @@
     border: 1px solid var(--border); border-radius: 18px;
     box-shadow: var(--shadow);
     padding: 8px 14px 10px;
-    display: none;
+    /* v6.25.0: kept in the DOM and animated, rather than display-toggled, so
+       the docked panel visibly slides out of the player */
+    visibility: hidden; opacity: 0; pointer-events: none;
+    transform: translate(-50%, -24px);
+    transition: transform .3s cubic-bezier(.2, .8, .2, 1), opacity .22s ease, visibility 0s linear .3s;
   }
-  body.rsvp-on #rsvp { display: block; }
+  body.rsvp-on #rsvp { visibility: visible; opacity: 1; pointer-events: auto; transform: translate(-50%, 0); transition-delay: 0s; }
   body.rsvp-on #reader { padding-top: calc(216px + env(safe-area-inset-top)); }
+  /* docked: shares the player's width and edge, sits behind it (z 35 < 40) and
+     rises from underneath. --player-h is written by the player's ResizeObserver,
+     so the phone's taller two-row player needs no separate offsets. */
   body.rsvp-bottom #rsvp {
     top: auto;
-    bottom: calc(148px + env(safe-area-inset-bottom));
-    border-radius: 18px 18px 8px 8px;
+    bottom: calc(14px + env(safe-area-inset-bottom) + var(--player-h, 122px) - 12px);
+    width: min(560px, calc(100% - 20px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+    border-radius: 18px 18px 0 0; border-bottom: 0; box-shadow: none;
+    padding-bottom: 20px;
+    transform: translate(-50%, 48px);
   }
+  body.rsvp-on.rsvp-bottom #rsvp { transform: translate(-50%, 0); }
   body.rsvp-on.rsvp-bottom #reader {
     padding-top: calc(74px + env(safe-area-inset-top));
-    padding-bottom: 340px;
+    padding-bottom: calc(var(--player-h, 122px) + 200px);
   }
   #btn-rsvp.rsvp-active { background: var(--accent-soft); color: var(--accent-strong); }
   #rsvp-word {
@@ -661,10 +689,10 @@
      View. The top bar becomes a compact two-row rail and the player gives
      transport controls their own row instead of squeezing every control. */
   @media (max-width: 900px), (max-height: 500px) and (max-width: 1100px) {
-    body.document-open #topbar { flex-wrap: wrap; gap: 6px 8px; }
+    body.document-open #topbar { grid-template-columns: auto minmax(0, 1fr); gap: 6px 8px; }
     body.document-open #doc-title { text-align: left; }
     body.document-open #topbar-actions {
-      order: 3; flex: 1 0 100%; overflow-x: auto; overscroll-behavior-x: contain;
+      grid-column: 1 / -1; justify-self: stretch; overflow-x: auto; overscroll-behavior-x: contain;
       scrollbar-width: none; padding-bottom: 1px;
     }
     body.document-open #topbar-actions::-webkit-scrollbar { display: none; }
@@ -688,8 +716,6 @@
     #btn-voice { grid-area: voice; justify-self: stretch; max-width: none; }
     #player { padding: 10px 12px 11px; border-radius: 21px; }
     body.document-open #reader { padding-bottom: 242px; }
-    body.document-open.rsvp-on.rsvp-bottom #reader { padding-bottom: 410px; }
-    body.document-open.rsvp-bottom #rsvp { bottom: calc(210px + env(safe-area-inset-bottom)); }
     body.document-open #toast { bottom: calc(190px + env(safe-area-inset-bottom)); }
     body.document-open #kokoro-float { bottom: calc(242px + env(safe-area-inset-bottom)); }
     body.document-open #timing-badge { bottom: calc(195px + env(safe-area-inset-bottom)); }
@@ -727,6 +753,7 @@
   <button class="iconbtn doc-btn" id="btn-search" title="Search in document (/)" aria-label="Search in document" style="display:none;font-size:15px">🔍</button>
   <button class="iconbtn doc-btn" id="btn-bm" title="Bookmarks (B to add)" aria-label="Bookmarks" style="display:none;font-size:15px">🔖</button>
   <button class="iconbtn doc-btn" id="btn-sleep" title="Sleep timer" aria-label="Sleep timer" style="display:none;font-size:15px">🌙</button>
+  <button class="iconbtn doc-btn" id="btn-fullscreen" title="Full screen (F)" aria-label="Full screen" aria-pressed="false" style="display:none;font-size:17px">⛶</button>
   <button class="iconbtn" id="btn-rsvp" title="RSVP speed-reader (R)" aria-label="RSVP speed-reader" style="font-size:15px">⚡</button>
   <button class="iconbtn" id="btn-view" title="Switch view" aria-label="Switch view" style="display:none;font-size:15px;font-weight:700">📄</button>
   <button class="iconbtn" id="btn-open" title="Open a file" aria-label="Open a file">
@@ -1100,6 +1127,10 @@ let kokoroStopgapActive = false;
 let kokoroCoverTimer = null;        // delay before covering — see KOKORO_COVER_DELAY_MS
 let kokoroResumeOnForeground = false; // Metal inference cannot start while iOS is backgrounded
 
+/* full-screen idle timer for the bars. Up here because setPlayIcon() reads it
+   through showChrome() and can run before the UI-wiring section is reached. */
+let chromeIdleT = 0;
+
 /* ---------------- state ---------------- */
 const S = {
   mode: 'flow',        // 'flow' | 'pdf'
@@ -1159,7 +1190,7 @@ const S = {
   rsvp: {
     open: false,
     mode: store.get('rsvpMode', 'voice'),   // 'voice' (TTS-synced) | 'silent' (timer)
-    pos: store.get('rsvpPos', 'top'),       // 'top' | 'bottom' (docked on the player)
+    pos: store.get('rsvpPos', 'bottom'),    // 'top' | 'bottom' (docked on the player; the default since v6.25.0)
     wpm: store.get('rsvpWpm', 450),
     timer: null, token: 0, lastFlip: 0, avg: 0,
   },
@@ -1191,11 +1222,17 @@ function readingViewportBounds() {
    but measuring three fixed elements on every karaoke word forced repeated
    synchronous layout in large interactive guides. Cache the band until the
    viewport or one of those chrome boxes actually changes. */
+/* the docked RSVP panel and the reader's bottom padding follow the player's
+   real height (two rows on a phone, one on a desktop) through this variable */
+function syncPlayerHeight() {
+  const p = $('player');
+  if (p) document.documentElement.style.setProperty('--player-h', (p.offsetHeight || 0) + 'px');
+}
 try {
-  const readingViewportObserver = new ResizeObserver(invalidateReadingViewportBounds);
+  const readingViewportObserver = new ResizeObserver(() => { invalidateReadingViewportBounds(); syncPlayerHeight(); });
   ['topbar', 'player', 'rsvp'].forEach(id => { const el = $(id); if (el) readingViewportObserver.observe(el); });
 } catch {}
-window.addEventListener('resize', invalidateReadingViewportBounds);
+window.addEventListener('resize', () => { invalidateReadingViewportBounds(); syncPlayerHeight(); });
 window.visualViewport?.addEventListener('resize', invalidateReadingViewportBounds);
 function scrollOptions(top) { return { top, behavior: REDUCED_MOTION ? 'auto' : 'smooth' }; }
 
@@ -2597,45 +2634,51 @@ function ALOUD_FRAME_AGENT(cfg) {
     reportSoon();
   }
 
+  var FIT_PROPS = ['width', 'max-width', 'margin-left', 'margin-right', 'flex'];
   function restoreTextFitWidth() {
-    var r = textFitRecord, el = r && r.el;
-    if (!el || !el.style) return;
-    textZoomTouched.add(el);
-    if (r.widthValue) el.style.setProperty('width', r.widthValue, r.widthPriority);
-    else el.style.removeProperty('width');
-    if (r.maxWidthValue) el.style.setProperty('max-width', r.maxWidthValue, r.maxWidthPriority);
-    else el.style.removeProperty('max-width');
+    var recs = textFitRecord || [];
+    for (var i = 0; i < recs.length; i++) {
+      var r = recs[i], el = r.el;
+      if (!el || !el.style) continue;
+      textZoomTouched.add(el);
+      for (var k = 0; k < FIT_PROPS.length; k++) {
+        var p = FIT_PROPS[k], saved = r.saved[p];
+        if (saved.value) el.style.setProperty(p, saved.value, saved.priority);
+        else el.style.removeProperty(p);
+      }
+    }
     clearTextZoomTouchesSoon();
   }
 
-  /* Remove only the dominant centered document-shell cap. A blanket
-     max-width:none would also stretch cards, tables and media; the shell must
-     be a direct body child containing most of the readable words, centered,
-     narrower than the body's content box, and carrying a finite max-width. */
+  /* Fit width (v6.25.0): free every width cap on the path from <body> down to
+     the element that holds most of the readable words. The v6.10 rule freed
+     only a direct body child with a centred max-width, so a capped <body>, a
+     .wrap > .container nesting, a fixed `width: 800px` page or a grid column
+     kept its column: the frame went edge to edge and the text did not. */
   function captureTextFitWidth() {
     restoreTextFitWidth();
-    textFitRecord = null;
-    var body = document.body, br = body.getBoundingClientRect(), bcs = getComputedStyle(body);
-    var pl = parseFloat(bcs.paddingLeft) || 0, pr = parseFloat(bcs.paddingRight) || 0;
-    var innerLeft = br.left + pl, innerRight = br.right - pr, innerWidth = innerRight - innerLeft;
-    var total = els.length, best = null, bestCount = 0;
-    for (var i = 0; i < body.children.length; i++) {
-      var el = body.children[i], count = el.querySelectorAll('.' + CLS).length;
-      if (count < Math.max(6, total * 0.5) || count <= bestCount) continue;
-      var cs = getComputedStyle(el), maxWidth = parseFloat(cs.maxWidth), r = el.getBoundingClientRect();
-      if (cs.maxWidth === 'none' || !(maxWidth > 0) || r.width >= innerWidth - 8) continue;
-      var leftGap = r.left - innerLeft, rightGap = innerRight - r.right;
-      if (Math.abs(leftGap - rightGap) > Math.max(6, innerWidth * 0.02)) continue;
-      best = el; bestCount = count;
+    textFitRecord = [];
+    var total = els.length, path = [document.body], cur = document.body;
+    for (var depth = 0; depth < 40; depth++) {
+      var next = null, bestCount = 0;
+      for (var i = 0; i < cur.children.length; i++) {
+        var c = cur.children[i];
+        if (c.namespaceURI === SVGNS) continue;
+        var n = c.querySelectorAll('.' + CLS).length;
+        if (n > bestCount) { bestCount = n; next = c; }
+      }
+      if (!next || bestCount < Math.max(1, total * 0.5)) break;
+      path.push(next); cur = next;
     }
-    if (!best) return;
-    textFitRecord = {
-      el: best,
-      widthValue: best.style.getPropertyValue('width'),
-      widthPriority: best.style.getPropertyPriority('width'),
-      maxWidthValue: best.style.getPropertyValue('max-width'),
-      maxWidthPriority: best.style.getPropertyPriority('max-width')
-    };
+    for (var j = 0; j < path.length; j++) {
+      var el = path[j], cs = getComputedStyle(el);
+      if (/^inline/.test(cs.display) || cs.position === 'fixed' || cs.position === 'absolute') continue;
+      var saved = {};
+      for (var k = 0; k < FIT_PROPS.length; k++) {
+        saved[FIT_PROPS[k]] = { value: el.style.getPropertyValue(FIT_PROPS[k]), priority: el.style.getPropertyPriority(FIT_PROPS[k]) };
+      }
+      textFitRecord.push({ el: el, saved: saved });
+    }
   }
 
   function setTextFitWidth(on) {
@@ -2649,13 +2692,26 @@ function ALOUD_FRAME_AGENT(cfg) {
       return;
     }
     if (!textFitRecord) captureTextFitWidth();
-    if (textFitRecord && textFitRecord.el) {
-      var el = textFitRecord.el;
+    var recs = textFitRecord || [];
+    for (var i = 0; i < recs.length; i++) {
+      var el = recs[i].el;
       textZoomTouched.add(el);
-      el.style.setProperty('width', 'auto', 'important');
       el.style.setProperty('max-width', 'none', 'important');
-      clearTextZoomTouchesSoon();
+      el.style.setProperty('width', 'auto', 'important');
     }
+    /* second pass, measured: anything still narrower than its parent's content
+       box is held by fixed side margins or a flex basis */
+    for (var j = 0; j < recs.length; j++) {
+      var e2 = recs[j].el, par = e2.parentElement;
+      if (!par) continue;
+      var pcs = getComputedStyle(par), pr = par.getBoundingClientRect();
+      var avail = pr.width - (parseFloat(pcs.paddingLeft) || 0) - (parseFloat(pcs.paddingRight) || 0);
+      if (e2.getBoundingClientRect().width >= avail - 8) continue;
+      e2.style.setProperty('margin-left', '0', 'important');
+      e2.style.setProperty('margin-right', '0', 'important');
+      if (/flex/.test(pcs.display)) e2.style.setProperty('flex', '1 1 auto', 'important');
+    }
+    clearTextZoomTouchesSoon();
     textFitWidth = true;
     document.documentElement.classList.add('aloud-fit-width');
     reportSoon();
@@ -2885,6 +2941,30 @@ function ALOUD_FRAME_AGENT(cfg) {
     }
   }, true);
 
+  /* ---- keyboard (v6.25.0): once a word in here is tapped the frame owns
+     focus, and the parent's shortcuts (space, arrows, R…) went dead. Forward
+     them; the parent decides what they mean. Typing fields and the page's own
+     buttons keep their keys. ---- */
+  document.addEventListener('keydown', function (e) {
+    var t = e.target, tag = t && t.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable)) return;
+    if (tag === 'BUTTON' || tag === 'A' || tag === 'SUMMARY') return;
+    var handled = /^(?:Space|ArrowLeft|ArrowRight|KeyR|KeyB|KeyF|KeyW|KeyP|Escape)$/.test(e.code) || /^[\/+=\-0]$/.test(e.key);
+    if (handled && !e.ctrlKey && !e.metaKey && !e.altKey) e.preventDefault();
+    post({ t: 'aloud:key', key: e.key, code: e.code, ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey, shiftKey: e.shiftKey });
+  }, true);
+  /* pointer activity over the frame never reaches the parent window; it needs
+     it to bring the bars back in full screen. Throttled: one note per 400ms. */
+  var activityAt = 0;
+  ['pointermove', 'pointerdown', 'touchstart', 'wheel'].forEach(function (ev) {
+    document.addEventListener(ev, function () {
+      var now = Date.now();
+      if (now - activityAt < 400) return;
+      activityAt = now;
+      post({ t: 'aloud:activity' });
+    }, { capture: true, passive: true });
+  });
+
   /* ---- paint + geometry. One message per transition, ops before geom, so
      the rect we send back is measured AFTER any auto-reveal. ---- */
   window.addEventListener('message', function (e) {
@@ -3012,40 +3092,44 @@ function createHtmlTextZoom(root) {
     }
   }
 
+  const FIT_PROPS = ['width', 'max-width', 'margin-left', 'margin-right', 'flex'];
   function restoreFitWidth() {
-    const r = fitRecord, el = r?.el;
-    if (!el?.style) return;
-    if (r.widthValue) el.style.setProperty('width', r.widthValue, r.widthPriority);
-    else el.style.removeProperty('width');
-    if (r.maxWidthValue) el.style.setProperty('max-width', r.maxWidthValue, r.maxWidthPriority);
-    else el.style.removeProperty('max-width');
+    for (const r of fitRecord || []) {
+      const el = r.el;
+      if (!el?.style) continue;
+      for (const p of FIT_PROPS) {
+        const saved = r.saved[p];
+        if (saved.value) el.style.setProperty(p, saved.value, saved.priority);
+        else el.style.removeProperty(p);
+      }
+    }
   }
 
+  /* same path rule as the frame agent's captureTextFitWidth (v6.25.0): every
+     width cap between the root and the element holding most of the words */
   function captureFitWidth() {
     restoreFitWidth();
-    fitRecord = null;
-    const rr = root.getBoundingClientRect(), rcs = getComputedStyle(root);
-    const pl = parseFloat(rcs.paddingLeft) || 0, pr = parseFloat(rcs.paddingRight) || 0;
-    const innerLeft = rr.left + pl, innerRight = rr.right - pr, innerWidth = innerRight - innerLeft;
+    fitRecord = [];
     const total = root.querySelectorAll('[data-word]').length;
-    let best = null, bestCount = 0;
-    for (const el of root.children) {
-      const count = el.querySelectorAll('[data-word]').length;
-      if (count < Math.max(6, total * .5) || count <= bestCount) continue;
-      const cs = getComputedStyle(el), maxWidth = parseFloat(cs.maxWidth), r = el.getBoundingClientRect();
-      if (cs.maxWidth === 'none' || !(maxWidth > 0) || r.width >= innerWidth - 8) continue;
-      const leftGap = r.left - innerLeft, rightGap = innerRight - r.right;
-      if (Math.abs(leftGap - rightGap) > Math.max(6, innerWidth * .02)) continue;
-      best = el; bestCount = count;
+    const path = [root];
+    let cur = root;
+    for (let depth = 0; depth < 40; depth++) {
+      let next = null, bestCount = 0;
+      for (const c of cur.children) {
+        if (c.namespaceURI === SVGNS) continue;
+        const n = c.querySelectorAll('[data-word]').length;
+        if (n > bestCount) { bestCount = n; next = c; }
+      }
+      if (!next || bestCount < Math.max(1, total * .5)) break;
+      path.push(next); cur = next;
     }
-    if (!best) return;
-    fitRecord = {
-      el: best,
-      widthValue: best.style.getPropertyValue('width'),
-      widthPriority: best.style.getPropertyPriority('width'),
-      maxWidthValue: best.style.getPropertyValue('max-width'),
-      maxWidthPriority: best.style.getPropertyPriority('max-width'),
-    };
+    for (const el of path) {
+      const cs = getComputedStyle(el);
+      if (/^inline/.test(cs.display) || cs.position === 'fixed' || cs.position === 'absolute') continue;
+      const saved = {};
+      for (const p of FIT_PROPS) saved[p] = { value: el.style.getPropertyValue(p), priority: el.style.getPropertyPriority(p) };
+      fitRecord.push({ el, saved });
+    }
   }
 
   function setFitWidth(on) {
@@ -3058,9 +3142,20 @@ function createHtmlTextZoom(root) {
       return;
     }
     if (!fitRecord) captureFitWidth();
-    if (fitRecord?.el) {
-      fitRecord.el.style.setProperty('width', 'auto', 'important');
-      fitRecord.el.style.setProperty('max-width', 'none', 'important');
+    for (const { el } of fitRecord) {
+      el.style.setProperty('max-width', 'none', 'important');
+      el.style.setProperty('width', 'auto', 'important');
+    }
+    for (const { el } of fitRecord) {
+      /* the root's own parent box is the .html-host div outside the shadow tree */
+      const host = el.parentElement || el.getRootNode()?.host || null;
+      if (!host) continue;
+      const pcs = getComputedStyle(host), pr = host.getBoundingClientRect();
+      const avail = pr.width - (parseFloat(pcs.paddingLeft) || 0) - (parseFloat(pcs.paddingRight) || 0);
+      if (el.getBoundingClientRect().width >= avail - 8) continue;
+      el.style.setProperty('margin-left', '0', 'important');
+      el.style.setProperty('margin-right', '0', 'important');
+      if (/flex/.test(pcs.display)) el.style.setProperty('flex', '1 1 auto', 'important');
     }
     fitWidth = true;
     root.classList.add('aloud-fit-width');
@@ -3202,6 +3297,13 @@ function renderHtmlInteractive(htmlText, opts = {}) {
       window.scrollTo(scrollOptions(Math.max(0, window.scrollY + ir.top + (m.top || 0) - band.top)));
     } else if (m.t === 'aloud:ls') {
       if (m.data && typeof m.data === 'object') store.set(f.lsKey, m.data);
+    } else if (m.t === 'aloud:activity') {
+      if (isFullscreen()) showChrome();
+    } else if (m.t === 'aloud:key') {
+      if (isFullscreen()) showChrome();
+      if (document.querySelector('.sheet.open')) { if (m.key === 'Escape') closeSheets(); return; }
+      if (m.key === 'Escape') { if (S.rsvp.open) setRsvpOpen(false); return; }
+      readerShortcut(m);
     }
   };
   window.addEventListener('message', f.onMsg);
@@ -3244,11 +3346,14 @@ function renderHtmlNative(htmlText, opts = {}) {
   $('reader').style.display = 'block';
 
   const doc = new DOMParser().parseFromString(htmlText, 'text/html');
-  /* sanitize: no scripts, no handlers, no javascript: URLs, no frames */
-  doc.querySelectorAll('script, iframe, frame, object, embed, base, meta[http-equiv]').forEach(n => n.remove());
+  /* sanitize: no scripts, no handlers, no javascript: URLs, no frames, and
+     (v6.25.0) no <link> — a body-level stylesheet link was moved into the
+     shadow tree untouched and fetched, exactly the beacon v6.6.3 meant to stop */
+  doc.querySelectorAll('script, iframe, frame, object, embed, base, link, meta[http-equiv]').forEach(n => n.remove());
   for (const el of doc.querySelectorAll('*')) {
     for (const a of [...el.attributes]) {
       if (/^on/i.test(a.name)) el.removeAttribute(a.name);
+      else if ((a.name === 'href' || a.name === 'xlink:href') && el.namespaceURI === SVGNS && el.localName === 'use' && !/^\s*#/.test(a.value)) el.removeAttribute(a.name);   /* external <use> is a fetch, not an image */
       else if ((a.name === 'href' || a.name === 'src' || a.name === 'xlink:href') && /^\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
       else if (a.name === 'style' && /url\s*\(/i.test(a.value)) el.setAttribute('style', stripCssBeacons(a.value));   /* v6.6.3: inline-style url() beacons */
     }
@@ -3260,7 +3365,9 @@ function renderHtmlNative(htmlText, opts = {}) {
   const shadow = host.attachShadow({ mode: 'open' });
   const st = document.createElement('style');
   let docStyles = '';
-  doc.querySelectorAll('style').forEach(s => { docStyles += s.textContent + '\n'; });
+  /* harvest, then REMOVE: a <style> in <body> would otherwise be moved into
+     the shadow tree verbatim, with its @import and url() beacons intact */
+  doc.querySelectorAll('style').forEach(s => { docStyles += s.textContent + '\n'; s.remove(); });
   /* our rules are the base; the document's own styles override them
      (except .speaking, which is !important) — so the page looks like itself */
   st.textContent = KARAOKE_SHADOW_CSS + '\n' + scopeDocCss(docStyles);
@@ -3536,6 +3643,8 @@ function finishOpen(opts = {}) {
   document.body.classList.add('document-open');
   invalidateReadingViewportBounds();
   document.querySelectorAll('.doc-btn').forEach(b => { b.style.display = 'grid'; });
+  if (!fullscreenSupported()) $('btn-fullscreen').style.display = 'none';
+  syncPlayerHeight();
   const native = S.mode !== 'flow';
   $('btn-view').textContent = native ? '¶' : '📄';
   $('btn-view').title = native ? 'Switch to plain text view' : 'Switch to original layout';
@@ -3917,6 +4026,7 @@ function speakDevice(sentIdx, fromWord) {
     if (token !== S.utterToken) return;
     if (anchorT < 0) anchorT = performance.now();
     started = true; startedAt = anchorT;
+    S.speechErrs = 0; S.speechErrAt = null;   // the voice is alive after all
   };
   const estTick = () => {
     if (token !== S.utterToken || !S.playing) { stopEstLoop(); return; }
@@ -3960,7 +4070,26 @@ function speakDevice(sentIdx, fromWord) {
     stopEstLoop();
     if (e.error === 'interrupted' || e.error === 'canceled') return;
     console.warn('speech error', e.error);
-    if (S.playing) advanceSentence(1, true);
+    if (!S.playing) return;
+    /* v6.25.0: a voice that fails on every sentence used to be "advanced"
+       through the whole document in a couple of seconds, ending on the
+       Finished toast with the reading position saved at the last sentence.
+       Two failures in a row is a dead voice, not one hard sentence — stop,
+       and go back to where the failures began. */
+    const fatal = /^(?:not-allowed|audio-busy|audio-hardware|synthesis-unavailable|voice-unavailable|language-unavailable)$/.test(e.error);
+    S.speechErrs = (S.speechErrs || 0) + 1;
+    if (S.speechErrs >= 2 || fatal) {
+      const back = S.speechErrAt ?? sentIdx;
+      S.speechErrs = 0; S.speechErrAt = null;
+      pauseAll();
+      setSentence(back);
+      toast(e.error === 'network'
+        ? '🔇 This voice needs an internet connection and couldn’t reach it. Pick a local voice, or the ✨ Neural engine (works offline once downloaded).'
+        : `🔇 This voice isn’t producing speech (${e.error || 'unknown error'}). Try another voice, or the ✨ Neural engine.`, 7000);
+      return;
+    }
+    if (S.speechErrAt == null) S.speechErrAt = sentIdx;
+    advanceSentence(1, true);
   };
 
   synth.cancel();
@@ -5851,6 +5980,7 @@ function togglePlay() {
 }
 
 function setPlayIcon(playing) {
+  if (typeof showChrome === 'function') showChrome();   // full screen: (re)arm the idle hide, or reveal the bars on pause
   $('ic-play').style.display = playing ? 'none' : 'block';
   $('ic-pause').style.display = playing ? 'block' : 'none';
   $('btn-play').setAttribute('aria-label', playing ? 'Pause' : 'Play');
@@ -6541,21 +6671,83 @@ document.addEventListener('keydown', e => {
     }
     return;
   }
-  const interactive = e.target.closest?.('button, input, select, textarea, a[href], [contenteditable="true"], [role="button"], [role="slider"], [role="switch"]');
-  if (interactive || !S.sentences.length) return;
-  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
-  else if (e.code === 'ArrowRight') $('btn-next').click();
-  else if (e.code === 'ArrowLeft') $('btn-prev').click();
-  else if (e.code === 'KeyR') setRsvpOpen(!S.rsvp.open);
-  else if (e.code === 'KeyB' && S.sentences.length) addBookmark();
-  else if (e.key === '/' && S.sentences.length) { e.preventDefault(); $('btn-search').click(); }
-  /* zoom (pdf/html views) — plain keys only; Ctrl/Cmd± stays browser zoom */
-  else if ((e.key === '+' || e.key === '=') && !e.ctrlKey && !e.metaKey && zoomable()) zoomTo(S.zoom.applied * ZOOM_STEP);
-  else if (e.key === '-' && !e.ctrlKey && !e.metaKey && zoomable()) zoomTo(S.zoom.applied / ZOOM_STEP);
-  else if (e.key === '0' && !e.ctrlKey && !e.metaKey && zoomable()) zoomTo(1);
-  else if (e.code === 'KeyW' && zoomable()) zoomToggleFit('width');
-  else if (e.code === 'KeyP' && S.mode === 'pdf') zoomToggleFit('page');
+  const typing = e.target.closest?.('input, select, textarea, [contenteditable="true"], [role="slider"]');
+  if (typing) return;
+  /* v6.25.0: with focus still on the button you just clicked (Next, say),
+     the space bar re-pressed THAT button instead of pausing, and R did
+     nothing at all. Shortcuts work everywhere outside a text field now;
+     Enter still activates a focused button. */
+  if (readerShortcut(e)) e.preventDefault();
 });
+
+/* one table for the parent document and for keys forwarded out of the
+   interactive HTML frame (which cannot preventDefault here — it did its own).
+   Returns true when the key was consumed. */
+function readerShortcut(e) {
+  if (!S.sentences.length) return false;
+  /* Ctrl/Cmd/Alt combinations stay the browser's: Cmd+R reloads, Cmd+B is
+     the bookmarks bar, Ctrl+W closes the tab — none of them are ours */
+  if (e.ctrlKey || e.metaKey || e.altKey) return false;
+  if (e.code === 'Space') { togglePlay(); return true; }
+  if (e.code === 'ArrowRight') { $('btn-next').click(); return true; }
+  if (e.code === 'ArrowLeft') { $('btn-prev').click(); return true; }
+  if (e.code === 'KeyR') { setRsvpOpen(!S.rsvp.open); return true; }
+  if (e.code === 'KeyB') { addBookmark(); return true; }
+  if (e.code === 'KeyF') { toggleFullscreen(); return true; }
+  if (e.key === '/') { $('btn-search').click(); return true; }
+  /* zoom (pdf/html views) — plain keys only; Ctrl/Cmd± stays browser zoom */
+  if ((e.key === '+' || e.key === '=') && zoomable()) { zoomTo(S.zoom.applied * ZOOM_STEP); return true; }
+  if (e.key === '-' && zoomable()) { zoomTo(S.zoom.applied / ZOOM_STEP); return true; }
+  if (e.key === '0' && zoomable()) { zoomTo(1); return true; }
+  if (e.code === 'KeyW' && zoomable()) { zoomToggleFit('width'); return true; }
+  if (e.code === 'KeyP' && S.mode === 'pdf') { zoomToggleFit('page'); return true; }
+  return false;
+}
+
+/* ---- full screen (v6.25.0) ----------------------------------------------
+   The Fullscreen API where it exists (desktop browsers, iPadOS; the iOS app
+   and the Home Screen PWA are already edge to edge). Inside it, while
+   playing, the bars step out after a moment of stillness so the page is
+   nothing but text, and come back on any pointer or key. */
+function fullscreenSupported() {
+  const el = document.documentElement;
+  return !!((el.requestFullscreen && document.fullscreenEnabled !== false) ||
+            (el.webkitRequestFullscreen && document.webkitFullscreenEnabled !== false));
+}
+function isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+function toggleFullscreen() {
+  if (!fullscreenSupported()) { toast('Full screen isn’t available in this browser. Add Aloud to your Home Screen for an edge-to-edge app.', 5000); return; }
+  const el = document.documentElement;
+  try {
+    if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    else {
+      const p = (el.requestFullscreen || el.webkitRequestFullscreen).call(el, { navigationUI: 'hide' });
+      if (p && p.catch) p.catch(() => toast('Full screen was blocked by the browser.'));
+    }
+  } catch { toast('Full screen was blocked by the browser.'); }
+}
+function showChrome() {
+  document.body.classList.remove('chrome-hidden');
+  clearTimeout(chromeIdleT);
+  if (isFullscreen() && S.playing && !document.querySelector('.sheet.open')) {
+    chromeIdleT = setTimeout(() => { if (isFullscreen() && S.playing && !document.querySelector('.sheet.open')) document.body.classList.add('chrome-hidden'); }, 2600);
+  }
+}
+function onFullscreenChange() {
+  const on = isFullscreen();
+  document.body.classList.toggle('fullscreen', on);
+  $('btn-fullscreen').classList.toggle('on', on);
+  $('btn-fullscreen').setAttribute('aria-pressed', String(on));
+  $('btn-fullscreen').title = on ? 'Exit full screen (F)' : 'Full screen (F)';
+  if (on && !store.get('fsTipSeen', false)) { store.set('fsTipSeen', true); toast('Full screen — the bars hide while reading and come back when you move. F or Esc to leave.', 5000); }
+  showChrome();
+  invalidateReadingViewportBounds();
+}
+document.addEventListener('fullscreenchange', onFullscreenChange);
+document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(ev =>
+  window.addEventListener(ev, () => { if (isFullscreen()) showChrome(); }, { passive: true }));
+$('btn-fullscreen').addEventListener('click', toggleFullscreen);
 
 if ('mediaSession' in navigator) {
   try {
