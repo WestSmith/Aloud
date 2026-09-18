@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.26.0">
+<meta name="aloud-version" content="v6.27.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -922,8 +922,12 @@
   </div>
   <div class="set-section-title">Voice and diagnostics</div>
   <div class="set-row" id="nq-row" style="display:block">
-    <div class="lbl">✨ Neural voice quality<small>Sizes are the one-time download for each tier. Auto picks a safe model for your device — phones/iPads get Lite, which downloads more than Standard but is the gentlest on memory while playing. Standard/High may crash on phones. Lite+ is an experimental middle ground.</small></div>
+    <div class="lbl">✨ Neural voice quality<small>Sizes are the one-time download for each tier. Auto picks a safe model for your device — phones/iPads get Standard (92MB, the lightest on memory while playing); desktops with a GPU get High. The 4-bit tiers hold more memory than Standard, not less, and may be killed on a phone.</small></div>
     <div class="chips" id="nq-chips" style="margin-top:10px"></div>
+  </div>
+  <div class="set-row" id="coi-row">
+    <div class="lbl">Use all CPU cores for the neural voice<small>Experimental. Lets the neural engine run on every core instead of one (measured 1.7× faster generation on 4 cores). It needs a page reload, and it makes the browser stricter about outside content: pictures and scripts that an opened HTML file loads from other websites will be blocked while this is on. Turn it off if a document looks wrong.</small></div>
+    <button class="switch" id="coi-switch" role="switch" aria-checked="false" aria-label="Use all CPU cores for the neural voice"></button>
   </div>
   <div class="set-row">
     <div class="lbl">Show timing accuracy<small>While the neural voice plays, show whether the karaoke timing is exact (read from the voice model) or estimated</small></div>
@@ -1135,7 +1139,7 @@ const S = {
   utterToken: 0,
   boundarySeen: false,
   estRAF: null,
-  kokoro: { tts: null, state: 'idle', stage: 'idle', progress: 0, progressAt: 0 },
+  kokoro: { tts: null, state: 'idle', stage: 'idle', progress: 0, progressAt: 0, threads: 1, noGpu: false },
   audio: null,
   audioPlay: null,     // current neural play: {segs:[{sentIdx,sentStart,t0,starts}], shownAbs, clock, batchUrl?}
   neuralCache: new Map(),
@@ -4408,7 +4412,7 @@ function initKokoroWorker() {
            tell a slow download from a dead one is watching the bytes climb */
         const mb = (n) => (n / 1048576).toFixed(0);
         if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}% (${mb(m.loaded)} of ${mb(m.total)} MB)`, pct); }
-      } else if (m.type === 'ready') { ready = true; S.kokoro.progressAt = Date.now(); resolve(); }
+      } else if (m.type === 'ready') { ready = true; S.kokoro.progressAt = Date.now(); S.kokoro.threads = m.threads || 1; resolve(); }
       else if (m.type === 'initerror') { if (!ready) fail(new Error(m.message)); }
       else if (m.type === 'result') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ audio: m.audio, sampling_rate: m.sr, pwords: m.pwords || null, nIds: m.nIds || 0 }); } }
       else if (m.type === 'error') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.reject(new Error(m.message)); } }
@@ -4440,20 +4444,34 @@ function initKokoroWorker() {
   });
 }
 
-/* Pick the model precision. The user can force a tier in Settings ('lite' q4 /
-   'standard' q8 / 'high' fp32); 'auto' (default) chooses a safe size per device:
-   - Browser phones/iPads: retain q4 for compatibility with existing caches.
-     Never WebGPU here — Safari's ONNX WebGPU path is not our baseline.
+/* Pick the model precision. The user can force a tier in Settings; 'auto'
+   (default) chooses a safe size per device:
+   - Browser phones/iPads: q8 on wasm. v6.2.5 put phones on q4 believing it
+     was a ~40MB model. It is 291MB on disk, and MEASURED on the same
+     onnxruntime-web build (tools/kokoro-wasm-bench.mjs) it holds ~1.27GB of
+     process memory after one sentence against q8's ~0.68GB, at the same
+     speed. q4 only packs the matmul weights; everything else stays fp32.
+     That is the "sometimes it crashes, sometimes it buffers for minutes"
+     iPhone report: a 291MB download into the heaviest tier on the device
+     with the tightest tab budget. q8 is a third of the download and about
+     half the memory. Never WebGPU here — Safari's ONNX WebGPU path is not
+     our baseline.
    - Desktop with WebGPU: full fp32. Desktop without: q8 on wasm. */
 const NQ_DTYPE = { lite: 'q4', liteplus: 'q4f16', standard: 'q8', high: 'fp32' };
+const NQ_AUTO_MOBILE = 'q8';
 function kokoroConfig() {
+  /* navigator.gpu existing is not the same as a usable adapter (headless
+     and driver-blocklisted desktops expose the API and then fail with "no
+     available backend found"). loadKokoro sets this after such a failure
+     and retries in a fresh worker on the CPU with the lightest tier. */
+  if (S.kokoro.noGpu) return { dtype: NQ_AUTO_MOBILE, device: 'wasm' };
   const q = S.neuralQuality || 'auto';
   if (q !== 'auto') {
     // explicit user choice: honor the dtype; use GPU only where it's sound
     const gpu = !!navigator.gpu && !isSmallScreen();
-    return { dtype: NQ_DTYPE[q] || 'q4', device: gpu ? 'webgpu' : 'wasm' };
+    return { dtype: NQ_DTYPE[q] || NQ_AUTO_MOBILE, device: gpu ? 'webgpu' : 'wasm' };
   }
-  if (isSmallScreen()) return { dtype: NATIVE ? 'q8' : 'q4', device: 'wasm' };
+  if (isSmallScreen()) return { dtype: NQ_AUTO_MOBILE, device: 'wasm' };
   if (navigator.gpu) return { dtype: 'fp32', device: 'webgpu' };
   return { dtype: 'q8', device: 'wasm' };
 }
@@ -4472,26 +4490,27 @@ function resetNeuralEngine() {
   genTail = Promise.resolve();
 }
 
-/* download sizes measured from the hosted repo: q4 305MB, q4f16 155MB,
-   q8 92MB, fp32 326MB. Lite's download is BIGGER than Standard's — q4
-   only packs the matmul weights to 4-bit and keeps the rest fp32 — but
-   it's the tier that survives phone memory limits, which is why phones
-   get it. Label the real numbers; a "40MB" promise before a 305MB
-   download made the progress bar look broken. */
-const NQ_PRESETS = [['auto', 'Auto'], ['lite', 'Lite · 305MB'], ['liteplus', 'Lite+ · 155MB · exp.'], ['standard', 'Standard · 92MB'], ['high', 'High · 326MB']];
+/* download sizes measured from the hosted repo: q8 92MB, q4f16 155MB,
+   q4 305MB, fp32 326MB. Label the real numbers; a "40MB" promise before a
+   305MB download made the progress bar look broken. Standard (q8) is the
+   phone tier now — see kokoroConfig for the measurement. The 4-bit tiers
+   stay selectable for anyone who already has one cached, labelled by what
+   they cost rather than as "Lite". */
+const NQ_PRESETS = [['auto', 'Auto'], ['standard', 'Standard · 92MB'], ['liteplus', '4-bit/fp16 · 155MB · exp.'], ['lite', '4-bit · 305MB'], ['high', 'High · 326MB']];
+/* process memory measured per tier (tools/kokoro-wasm-bench.mjs): q8 and
+   q8f16 ~0.7GB, q4f16 unmeasured on wasm, q4 ~1.3GB, fp32 heavier still */
+const NQ_HEAVY_ON_MOBILE = new Set(['q4', 'fp32']);
 function setNeuralQuality(q) {
   if (NATIVE?.nativeKokoro) return;       // native MLX always uses the full model
   if (q === (S.neuralQuality || 'auto')) return;
   S.neuralQuality = q; store.set('neuralQuality', q);
   const cfg = kokoroConfig();
-  /* q4f16 is phone-sized (4-bit weights, fp16 activations) — experimental,
-     but not a "too heavy" tier; only q8/fp32 get the crash warning */
-  const heavyWarn = isSmallScreen() && cfg.dtype !== 'q4' && cfg.dtype !== 'q4f16';
+  const heavyWarn = isSmallScreen() && NQ_HEAVY_ON_MOBILE.has(cfg.dtype);
   const wasPlaying = S.playing && S.engine === 'neural';
   if (wasPlaying) pauseAll();
   resetNeuralEngine();
   renderNeuralQuality();
-  const tail = heavyWarn ? ' ⚠️ This is a larger model and may be too heavy for a phone/iPad — pick Lite or Auto if it crashes.' : '';
+  const tail = heavyWarn ? ' ⚠️ This tier holds far more memory than Standard and may be killed on a phone/iPad — pick Standard or Auto if it crashes.' : '';
   if (S.engine === 'neural') {
     toast('Switching neural quality — the new model will download now.' + tail, heavyWarn ? 8000 : 3500);
     loadKokoro().then(() => { if (wasPlaying) playCurrent(S.curWord); });
@@ -4595,7 +4614,20 @@ async function loadKokoro() {
       if (NATIVE?.nativeKokoro) {
         await initNativeKokoro();
       } else try {
-        await initKokoroWorker();                 // preferred: off the main thread
+        try {
+          await initKokoroWorker();               // preferred: off the main thread
+        } catch (gpuErr) {
+          /* a WebGPU session that fails to start is retried on the CPU in a
+             NEW worker: a retry inside the failed worker still reports the
+             cached adapter error (measured in Chromium). onnxruntime keeps
+             that failure for the life of the worker. */
+          if (NATIVE || kokoroConfig().device !== 'webgpu' || !/backend|adapter|webgpu/i.test(String(gpuErr?.message || gpuErr))) throw gpuErr;
+          console.warn('WebGPU unusable, retrying Kokoro on wasm', gpuErr);
+          S.kokoro.noGpu = true;
+          S.kokoro.progressAt = Date.now();
+          renderKokoroStatus('The GPU path failed — opening the Standard model on the CPU instead…', 2);
+          await initKokoroWorker();
+        }
       } catch (workerErr) {
         /* A main-thread ONNX fallback can block WKWebView so completely that
            neither this watchdog nor the UI can run (the pulse keeps animating
@@ -4612,7 +4644,7 @@ async function loadKokoro() {
     S.kokoro.state = 'ready';
     renderKokoroStatus(NATIVE?.nativeKokoro
       ? '✅ Native Kokoro is ready — full quality and on-device.'
-      : '✅ Neural voice ready — works offline from now on.', 100);
+      : `✅ Neural voice ready — works offline from now on.${S.kokoro.threads > 1 ? ` (${S.kokoro.threads} cores)` : ''}`, 100);
     setTimeout(() => { if (S.kokoro.state === 'ready') hideKokoroStatus(); }, 3500);
     toast(NATIVE?.nativeKokoro ? '✨ Native Kokoro is ready.' : '✨ Kokoro neural voice is ready.');
     if (kokoroStopgapActive) {
@@ -5093,11 +5125,18 @@ async function generateNeuralNow(
      S.words, so the returned `starts` still lines up with the display. */
   const tokens = [];
   for (let i = sent.start; i < sent.end; i++) tokens.push(S.words[i].mute ? '' : S.words[i].text);
-  /* wait for real G2P before timing the FIRST sentences — the promise settles
-     the moment the module is ready (or errors), so this only ever costs time
-     while the one-time download is genuinely in flight. 250ms used to lose
-     the race on first run and silently degrade timing to syllable guesses. */
-  try { await ensurePhonemes(tokens, 4000); } catch {}
+  /* Real G2P runs alongside generation, not in front of it. It used to be
+     awaited here for up to 4s (plus up to 4s more when espeak jobs never
+     settle, which the iOS phonemizer wasm can do), and that wait sat INSIDE
+     the serial generation queue: every sentence with a new word paid it
+     before the worker even started, and the runway could not outrun
+     playback. The worker's own kokoro-js phonemizes the text independently,
+     so nothing about the audio depends on this cache — only the aligner's
+     silent-token check and the chunk-size estimate read it. Chunking gets a
+     short grace so a hot cache still informs it; the aligner waits for the
+     full result below, by which time generation has usually taken longer. */
+  const phonemesReady = ensurePhonemes(tokens, 4000).catch(() => {});
+  await Promise.race([phonemesReady, new Promise(r => setTimeout(r, 250))]);
   if (docGeneration !== S.docGeneration || speechGeneration !== S.speechGeneration)
     throw Object.assign(new Error('speech changed'), { name: 'EngineReset' });
   /* generate in context-window-sized chunks (usually exactly one). If a
@@ -5147,6 +5186,11 @@ async function generateNeuralNow(
     }
     parts.push({ a, b, audio: raw.audio, sr: raw.sampling_rate, pwords, nativeTokens, timing: raw.timing || null });
   }
+  /* the aligner reads the phoneme cache (silent tokens, spoken-word counts):
+     give G2P the rest of its window now that generation has run in parallel */
+  await phonemesReady;
+  if (docGeneration !== S.docGeneration || speechGeneration !== S.speechGeneration)
+    throw Object.assign(new Error('speech changed'), { name: 'EngineReset' });
   /* stitch chunks and time each one independently: model-exact word starts
      when the patched export provided the spoken words (alignExactStarts
      absorbs kokoro-js's number/currency expansions), the silence-pinned
@@ -6593,6 +6637,51 @@ $('htmlinteractive-switch').addEventListener('click', async e => {
     if (wasPlaying) playCurrent(S.curWord);
   }
 });
+/* ---- multi-core neural voice: cross-origin isolation via the service worker ----
+   wasm threads need SharedArrayBuffer, which needs the document served with
+   COOP/COEP headers. GitHub Pages sends none, so the service worker adds them
+   to every same-origin response when this flag is on (see sw.js). The flag lives in the SW's
+   own storage — localStorage is invisible to it — and takes effect on the
+   next load, which is why the toggle offers a reload. */
+function coiApplied() { return !!self.crossOriginIsolated; }
+function sendCoiFlag(on) {
+  return new Promise(resolve => {
+    const sw = navigator.serviceWorker?.controller;
+    if (!sw) return resolve(false);
+    const ch = new MessageChannel();
+    const tm = setTimeout(() => resolve(false), 3000);
+    ch.port1.onmessage = ev => { clearTimeout(tm); resolve(!!ev.data?.ok); };
+    try { sw.postMessage({ type: 'coi', on: !!on }, [ch.port2]); } catch { clearTimeout(tm); resolve(false); }
+  });
+}
+function renderCoiNote() {
+  const row = $('coi-row'); if (!row) return;
+  let note = row.querySelector('.coi-note');
+  if (!note) { note = document.createElement('div'); note.className = 'voice-note coi-note'; row.querySelector('.lbl').appendChild(note); }
+  const want = !!S.coiThreads, have = coiApplied();
+  const cores = navigator.hardwareConcurrency || 1;
+  note.textContent = NATIVE?.nativeKokoro ? ''
+    : want && have ? `Active — ${cores} core${cores === 1 ? '' : 's'} available to the neural engine.`
+    : want && !have ? 'Saved — reload the page to apply.'
+    : !want && have ? 'Turned off — reload the page to apply.'
+    : '';
+  note.style.display = note.textContent ? '' : 'none';
+}
+$('coi-switch').addEventListener('click', async e => {
+  S.coiThreads = !S.coiThreads;
+  setSwitchState(e.currentTarget, S.coiThreads);
+  store.set('coiThreads', S.coiThreads);
+  const ok = await sendCoiFlag(S.coiThreads);
+  renderCoiNote();
+  if (!ok) { toast('⚠️ The service worker is not ready yet — reload once, then flip this switch again.', 6000); return; }
+  if (S.coiThreads === coiApplied()) return;
+  const t = $('toast');
+  toast(S.coiThreads ? '🔁 Tap here to reload — multi-core kicks in on the next load.' : '🔁 Tap here to reload to finish turning multi-core off.', 12000);
+  t.classList.add('actionable'); t.setAttribute('role', 'button'); t.setAttribute('tabindex', '0');
+  const onTap = () => { t.removeEventListener('click', onTap); location.reload(); };
+  t.addEventListener('click', onTap);
+  setTimeout(() => { t.removeEventListener('click', onTap); t.classList.remove('actionable'); t.setAttribute('role', 'status'); t.removeAttribute('tabindex'); }, 12000);
+});
 $('timingdebug-switch').addEventListener('click', e => {
   S.timingDebug = !S.timingDebug;
   setSwitchState(e.currentTarget, S.timingDebug);
@@ -6902,10 +6991,10 @@ if (!store.get('autoScroll', true)) $('autoscroll-switch').classList.remove('on'
 /* crash-loop guard (see loadKokoro): a leftover sentinel means the last neural
    load never finished. On a phone with an explicit heavy tier that's almost
    certainly an OOM crash — auto-loading the same model again would crash every
-   launch. Fall back to Auto (q4) and tell the user. */
+   launch. Fall back to Auto (q8 on a phone) and tell the user. */
 {
   const guard = store.get('nqLoadGuard', null);
-  if (!NATIVE?.nativeKokoro && guard && guard.dtype && guard.dtype !== 'q4' && isSmallScreen() && (S.neuralQuality || 'auto') !== 'auto') {
+  if (!NATIVE?.nativeKokoro && guard && guard.dtype && guard.dtype !== NQ_AUTO_MOBILE && isSmallScreen() && (S.neuralQuality || 'auto') !== 'auto') {
     S.neuralQuality = 'auto'; store.set('neuralQuality', 'auto');
     store.set('nqLoadGuard', null);
     setTimeout(() => toast('⚠️ The neural voice model didn’t finish loading last time, so quality is back on Auto to keep the app stable. You can re-pick a tier in Settings.', 8000), 700);
@@ -6919,6 +7008,13 @@ if (!store.get('skipCode', true)) $('skipcode-switch').classList.remove('on');
 if (!store.get('skipCitations', true)) $('skipcit-switch').classList.remove('on');
 if (!store.get('htmlInteractive', true)) $('htmlinteractive-switch').classList.remove('on');
 if (store.get('timingDebug', false)) $('timingdebug-switch').classList.add('on');
+S.coiThreads = !!store.get('coiThreads', false);
+if (S.coiThreads) { $('coi-switch').classList.add('on'); $('coi-switch').setAttribute('aria-checked', 'true'); }
+if (NATIVE?.nativeKokoro) $('coi-row').style.display = 'none';
+renderCoiNote();
+/* keep the SW's copy of the flag in step with the saved preference (a reset
+   clears both; an SW update keeps its cache, so this is mostly a no-op) */
+if ('serviceWorker' in navigator) navigator.serviceWorker.ready.then(() => sendCoiFlag(S.coiThreads)).catch(() => {});
 S.autoScroll = store.get('autoScroll', true);
 if (!store.get('sentHl', true)) $('senthl-switch').classList.remove('on');
 S.sentHl = store.get('sentHl', true);

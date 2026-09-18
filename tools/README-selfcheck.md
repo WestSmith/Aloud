@@ -56,3 +56,16 @@ cache. That path used to drift up to 500ms while the timing badge still read
 Append to `CASES` as `['label', 'sentence text']`. Anything a reader reports
 as out of sync belongs here — it turns "it sounds off around X" into a
 number.
+
+# kokoro-wasm-bench
+
+Measures a Kokoro ONNX tier on the same onnxruntime-web build kokoro-js
+1.2.1 loads in the browser, on the wasm backend: process memory after a
+sentence and how much slower than real time it generates. `THREADS=1` is what
+a GitHub Pages deploy gets on iPhone/iPad Safari (no threads without
+cross-origin isolation, see the "Use all CPU cores" setting). Setup, usage
+and the numbers behind the q8-on-mobile default are in the file's header.
+
+    node tools/kokoro-wasm-bench.mjs model_quantized      # q8
+    node tools/kokoro-wasm-bench.mjs model_q4
+    THREADS=4 node tools/kokoro-wasm-bench.mjs model_quantized
