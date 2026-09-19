@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.29.0">
+<meta name="aloud-version" content="v6.29.1">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -2532,7 +2532,7 @@ function ALOUD_FRAME_AGENT(cfg) {
      SVG/3D content. Scale computed text metrics instead: prose genuinely
      reflows inside the same viewport while media and Aloud's chrome stay
      at their original size. */
-  var textZoom = 1, textFitWidth = false, textFitRecord = null;
+  var textZoom = 1, textFitWidth = false, textFitRecord = null, textColumnScaled = false;
   var textZoomRecords = [], textZoomRefreshT = 0, textZoomTouchClearT = 0, textZoomTransitionT = 0;
   var textZoomViewportWidth = document.documentElement.clientWidth;
   var textZoomTouched = new WeakSet(), textZoomByEl = new WeakMap();
@@ -2681,8 +2681,44 @@ function ALOUD_FRAME_AGENT(cfg) {
       for (var k = 0; k < FIT_PROPS.length; k++) {
         saved[FIT_PROPS[k]] = { value: el.style.getPropertyValue(FIT_PROPS[k]), priority: el.style.getPropertyPriority(FIT_PROPS[k]) };
       }
-      textFitRecord.push({ el: el, saved: saved });
+      /* the column's natural size, for scaling it with the zoom (v6.29.1) */
+      var maxW = /px$/.test(cs.maxWidth) ? parseFloat(cs.maxWidth) : 0;
+      var par = el.parentElement, avail = 0;
+      if (par) {
+        var pcs = getComputedStyle(par);
+        avail = par.getBoundingClientRect().width - (parseFloat(pcs.paddingLeft) || 0) - (parseFloat(pcs.paddingRight) || 0);
+      }
+      textFitRecord.push({ el: el, saved: saved, baseMax: maxW, baseWidth: el.getBoundingClientRect().width, baseAvail: avail });
     }
+  }
+
+  /* Zoom widens the column too (v6.29.1). Fit width frees every cap on the
+     path; this scales each cap by the zoom instead, so 130% text gets a 130%
+     column (the parent widens the frame to match) and the words per line
+     hold steady. Off at 100%, and moot under fit width. */
+  function setTextColumnScale(factor) {
+    if (textFitWidth) return;
+    if (!(factor > 1.002)) {
+      if (textColumnScaled) { restoreTextFitWidth(); textColumnScaled = false; }
+      return;
+    }
+    if (!textFitRecord) captureTextFitWidth();
+    var recs = textFitRecord;
+    for (var i = 0; i < recs.length; i++) {
+      var r = recs[i], el = r.el;
+      textZoomTouched.add(el);
+      if (r.baseMax > 0) {
+        el.style.setProperty('max-width', Math.round(r.baseMax * factor) + 'px', 'important');
+      } else if (r.baseAvail > 0 && r.baseWidth < r.baseAvail - 8) {
+        /* no max-width, yet narrower than its parent: a fixed width. Grow it,
+           but never past what the (already widened) parent offers now */
+        var par = el.parentElement, pcs = getComputedStyle(par);
+        var avail = par.getBoundingClientRect().width - (parseFloat(pcs.paddingLeft) || 0) - (parseFloat(pcs.paddingRight) || 0);
+        el.style.setProperty('width', Math.round(Math.min(r.baseWidth * factor, avail)) + 'px', 'important');
+      }
+    }
+    clearTextZoomTouchesSoon();
+    textColumnScaled = true;
   }
 
   function setTextFitWidth(on) {
@@ -2691,11 +2727,13 @@ function ALOUD_FRAME_AGENT(cfg) {
       restoreTextFitWidth();
       textFitRecord = null;
       textFitWidth = false;
+      textColumnScaled = false;
       document.documentElement.classList.remove('aloud-fit-width');
       reportSoon();
       return;
     }
     if (!textFitRecord) captureTextFitWidth();
+    textColumnScaled = false;
     var recs = textFitRecord || [];
     for (var i = 0; i < recs.length; i++) {
       var el = recs[i].el;
@@ -2724,6 +2762,7 @@ function ALOUD_FRAME_AGENT(cfg) {
   function setDocumentView(scale, fitWidth, revision) {
     setTextFitWidth(fitWidth);
     setTextZoom(scale);
+    setTextColumnScale(textZoom);
     post({ t: 'aloud:zoomed', scale: textZoom, fitWidth: textFitWidth, revision: revision || 0 });
   }
 
@@ -3134,8 +3173,34 @@ function createHtmlTextZoom(root) {
       if (/^inline/.test(cs.display) || cs.position === 'fixed' || cs.position === 'absolute') continue;
       const saved = {};
       for (const p of FIT_PROPS) saved[p] = { value: el.style.getPropertyValue(p), priority: el.style.getPropertyPriority(p) };
-      fitRecord.push({ el, saved });
+      const baseMax = /px$/.test(cs.maxWidth) ? parseFloat(cs.maxWidth) : 0;
+      fitRecord.push({ el, saved, baseMax, baseWidth: el.getBoundingClientRect().width, baseAvail: availWidthOf(el) });
     }
+  }
+  /* the parent's content box; the root's own parent is the .html-host div
+     outside the shadow tree */
+  function availWidthOf(el) {
+    const host = el.parentElement || el.getRootNode()?.host || null;
+    if (!host) return 0;
+    const pcs = getComputedStyle(host), pr = host.getBoundingClientRect();
+    return pr.width - (parseFloat(pcs.paddingLeft) || 0) - (parseFloat(pcs.paddingRight) || 0);
+  }
+
+  /* zoom widens the column too — mirrors the frame agent's setTextColumnScale (v6.29.1) */
+  let columnScaled = false;
+  function setColumnScale(factor) {
+    if (fitWidth) return;
+    if (!(factor > 1.002)) {
+      if (columnScaled) { restoreFitWidth(); columnScaled = false; }
+      return;
+    }
+    if (!fitRecord) captureFitWidth();
+    for (const r of fitRecord) {
+      if (r.baseMax > 0) r.el.style.setProperty('max-width', Math.round(r.baseMax * factor) + 'px', 'important');
+      else if (r.baseAvail > 0 && r.baseWidth < r.baseAvail - 8)
+        r.el.style.setProperty('width', Math.round(Math.min(r.baseWidth * factor, availWidthOf(r.el))) + 'px', 'important');
+    }
+    columnScaled = true;
   }
 
   function setFitWidth(on) {
@@ -3144,10 +3209,12 @@ function createHtmlTextZoom(root) {
       restoreFitWidth();
       fitRecord = null;
       fitWidth = false;
+      columnScaled = false;
       root.classList.remove('aloud-fit-width');
       return;
     }
     if (!fitRecord) captureFitWidth();
+    columnScaled = false;
     for (const { el } of fitRecord) {
       el.style.setProperty('max-width', 'none', 'important');
       el.style.setProperty('width', 'auto', 'important');
@@ -3173,6 +3240,7 @@ function createHtmlTextZoom(root) {
     root.classList.toggle('aloud-text-zoomed', Math.abs(next - 1) >= .002);
     if (recapture || !records.length) capture();
     scale = next;
+    setColumnScale(scale);
     if (Math.abs(scale - 1) < .002) { restore(); return; }
     beginWrite();
     for (const r of records) {
