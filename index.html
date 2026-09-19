@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.27.0">
+<meta name="aloud-version" content="v6.28.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -119,6 +119,13 @@
   body.chrome-hidden:not(.rsvp-on) #player { transform: translate(-50%, 140%); }
   body.chrome-hidden { cursor: none; }
   body.chrome-hidden #zoom-bar { opacity: 0; pointer-events: none; }
+  /* v6.28.0: in full screen the text runs edge to edge, so the floating zoom
+     bar and timing badge sit on top of it. They stay off the whole time,
+     visible bars or not (the phone/landscape rules below use !important, so
+     match their specificity). Keyboard zoom still works. */
+  body.fullscreen #zoom-bar,
+  body.fullscreen.zoomable.html-zoomable #zoom-bar,
+  body.fullscreen #timing-badge { display: none !important; }
   #doc-title {
     grid-row: 1; grid-column: 1 / -1; justify-self: center;
     max-width: calc(100% - 2 * var(--title-side, 0px) - 24px);
@@ -1110,6 +1117,10 @@ let kokoroResumeOnForeground = false; // Metal inference cannot start while iOS 
 /* full-screen idle timer for the bars. Up here because setPlayIcon() reads it
    through showChrome() and can run before the UI-wiring section is reached. */
 let chromeIdleT = 0;
+/* how far the pointer must travel before it brings the bars back, and where it
+   was first seen after they hid (per source: 'win' / 'frame') — v6.28.0 */
+const CHROME_REVEAL_PX = 40;
+let chromeMoveAnchor = {};
 
 /* ---------------- state ---------------- */
 const S = {
@@ -2944,11 +2955,12 @@ function ALOUD_FRAME_AGENT(cfg) {
      it to bring the bars back in full screen. Throttled: one note per 400ms. */
   var activityAt = 0;
   ['pointermove', 'pointerdown', 'touchstart', 'wheel'].forEach(function (ev) {
-    document.addEventListener(ev, function () {
+    document.addEventListener(ev, function (e) {
       var now = Date.now();
       if (now - activityAt < 400) return;
       activityAt = now;
-      post({ t: 'aloud:activity' });
+      /* the position goes along so the parent can tell a nudge from a move */
+      post({ t: 'aloud:activity', move: ev === 'pointermove', x: e.clientX, y: e.clientY });
     }, { capture: true, passive: true });
   });
 
@@ -3285,7 +3297,9 @@ function renderHtmlInteractive(htmlText, opts = {}) {
     } else if (m.t === 'aloud:ls') {
       if (m.data && typeof m.data === 'object') store.set(f.lsKey, m.data);
     } else if (m.t === 'aloud:activity') {
-      if (isFullscreen()) showChrome();
+      if (!isFullscreen()) {}
+      else if (m.move) chromePointerMoved('frame', m.x, m.y);
+      else showChrome();
     } else if (m.t === 'aloud:key') {
       if (isFullscreen()) showChrome();
       if (document.querySelector('.sheet.open')) { if (m.key === 'Escape') closeSheets(); return; }
@@ -6005,7 +6019,10 @@ function togglePlay() {
 }
 
 function setPlayIcon(playing) {
-  if (typeof showChrome === 'function') showChrome();   // full screen: (re)arm the idle hide, or reveal the bars on pause
+  /* full screen: pausing reveals the bars; playing only (re)arms the idle hide.
+     This runs at every sentence start, and revealing here brought the bars
+     back mid-read with the mouse untouched (v6.28.0). */
+  if (typeof showChrome === 'function') { if (playing) armChromeHide(); else showChrome(); }
   $('ic-play').style.display = playing ? 'none' : 'block';
   $('ic-pause').style.display = playing ? 'block' : 'none';
   $('btn-play').setAttribute('aria-label', playing ? 'Pause' : 'Play');
@@ -6791,6 +6808,11 @@ function toggleFullscreen() {
 }
 function showChrome() {
   document.body.classList.remove('chrome-hidden');
+  armChromeHide();
+}
+/* start (or restart) the idle countdown without revealing anything: bars
+   already tucked away stay tucked away */
+function armChromeHide() {
   clearTimeout(chromeIdleT);
   if (!isFullscreen()) return;
   const arm = () => {
@@ -6799,9 +6821,23 @@ function showChrome() {
       /* the pointer resting on a bar means it is in use: wait, don't hide under it */
       if (document.querySelector('#topbar:hover, #player:hover, #zoom-bar:hover')) { arm(); return; }
       document.body.classList.add('chrome-hidden');
+      chromeMoveAnchor = {};   // forget where the pointer was: the next move sets the reference point
     }, 1800);
   };
   arm();
+}
+/* Pointer motion brings the bars back only once it adds up to a real move.
+   A mouse nudged by a keystroke or a hand resting on a trackpad jitters a few
+   pixels; that used to be enough. Measured from where the pointer first showed
+   up after the bars hid, per source (the window and the HTML frame report in
+   their own coordinates). While the bars are visible any motion re-arms. */
+function chromePointerMoved(src, x, y) {
+  if (!document.body.classList.contains('chrome-hidden')) { armChromeHide(); return; }
+  if (typeof x !== 'number' || typeof y !== 'number') return;
+  const a = chromeMoveAnchor[src];
+  if (!a) { chromeMoveAnchor[src] = { x, y }; return; }
+  if (Math.hypot(x - a.x, y - a.y) < CHROME_REVEAL_PX) return;
+  showChrome();
 }
 function onFullscreenChange() {
   const on = isFullscreen();
@@ -6815,8 +6851,9 @@ function onFullscreenChange() {
 }
 document.addEventListener('fullscreenchange', onFullscreenChange);
 document.addEventListener('webkitfullscreenchange', onFullscreenChange);
-['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(ev =>
+['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(ev =>
   window.addEventListener(ev, () => { if (isFullscreen()) showChrome(); }, { passive: true }));
+window.addEventListener('pointermove', e => { if (isFullscreen()) chromePointerMoved('win', e.clientX, e.clientY); }, { passive: true });
 $('btn-fullscreen').addEventListener('click', toggleFullscreen);
 
 if ('mediaSession' in navigator) {
