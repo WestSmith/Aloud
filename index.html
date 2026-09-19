@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.29.1">
+<meta name="aloud-version" content="v6.30.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -1239,6 +1239,64 @@ try {
 window.addEventListener('resize', syncChromeMetrics);
 window.visualViewport?.addEventListener('resize', invalidateReadingViewportBounds);
 function scrollOptions(top) { return { top, behavior: REDUCED_MOTION ? 'auto' : 'smooth' }; }
+
+/* ---- karaoke auto-scroll (v6.30.0): keep the spoken word at the centre of
+   the reading band, calmly.
+   Before, the word was left alone until it fell out of the band and the page
+   then flipped it back to centre — half a screen at a time. Now the word may
+   drift a little either side of centre (a "dead zone" of about a line); once
+   it leaves that, the page glides until the word is centred again. So each
+   move is about one line, a few seconds apart, like a teleprompter.
+   The glide is a critically damped spring stepped on animation frames rather
+   than the browser's own smooth scroll: it cannot overshoot, a new target
+   arriving mid-glide (the next line, a skipped sentence) bends the motion
+   instead of restarting it, and the eye never sees a jerk. A wheel or touch
+   scroll from the reader cancels the glide and holds auto-scroll off briefly,
+   so they can look around without the page fighting back; if the page moves
+   under the glide by any other hand (scrollbar drag, keyboard) it lets go. */
+const GLIDE_OMEGA = 11;          // rad/s: settles in roughly half a second
+const GLIDE_HOLD_MS = 1600;      // a reader's own scroll keeps auto-scroll away this long
+const glide = { raf: 0, x: 0, v: 0, set: 0, target: 0, t: 0, holdUntil: 0 };
+function maxScrollTop() { return Math.max(0, document.documentElement.scrollHeight - window.innerHeight); }
+function glideCancel() { if (glide.raf) cancelAnimationFrame(glide.raf); glide.raf = 0; glide.v = 0; }
+function glideTo(top) {
+  glide.target = Math.max(0, Math.min(maxScrollTop(), top));
+  if (REDUCED_MOTION) { glideCancel(); window.scrollTo(0, glide.target); return; }
+  if (glide.raf) return;                       // in flight: the new target just bends it
+  glide.x = glide.set = window.scrollY; glide.v = 0; glide.t = performance.now();
+  glide.raf = requestAnimationFrame(glideStep);
+}
+function glideStep(now) {
+  glide.raf = 0;
+  if (Math.abs(window.scrollY - glide.set) > 2) { glide.v = 0; return; }   // someone else moved the page
+  const dt = Math.min(0.05, Math.max(0.001, (now - glide.t) / 1000));
+  glide.t = now;
+  const d = glide.target - glide.x;
+  if (Math.abs(d) < 0.5 && Math.abs(glide.v) < 4) { glide.v = 0; window.scrollTo(0, glide.set = glide.target); return; }
+  glide.v += (GLIDE_OMEGA * GLIDE_OMEGA * d - 2 * GLIDE_OMEGA * glide.v) * dt;
+  glide.x += glide.v * dt;
+  window.scrollTo(0, glide.set = Math.max(0, Math.min(maxScrollTop(), glide.x)));
+  glide.raf = requestAnimationFrame(glideStep);
+}
+function readerScrolledByHand() { glide.holdUntil = Date.now() + GLIDE_HOLD_MS; glideCancel(); }
+['wheel', 'touchmove'].forEach(ev => window.addEventListener(ev, readerScrolledByHand, { passive: true }));
+/* the keep-it-centred rule shared by the flow/PDF views and the HTML frame:
+   `top`/`bottom` are the word's edges in viewport coordinates */
+function keepWordCentred(top, bottom, force) {
+  const band = readingViewportBounds();
+  const h = Math.max(0, bottom - top);
+  const middle = top + h / 2;
+  if (REDUCED_MOTION) {
+    /* no glide to soften small moves, so keep the old jump-only-when-it-leaves rule */
+    if (!force && top >= band.top && bottom <= band.bottom) return;
+    glideTo(window.scrollY + middle - band.center);
+    return;
+  }
+  const slack = Math.min(Math.max(28, h * 1.25), (band.bottom - band.top) * 0.2);
+  if (Math.abs(middle - band.center) <= slack) return;
+  if (!force && Date.now() < glide.holdUntil) return;
+  glideTo(window.scrollY + middle - band.center);
+}
 
 /* ---------------- tiny utils ---------------- */
 function toast(msg, ms = 3200) {
@@ -3372,6 +3430,7 @@ function renderHtmlInteractive(htmlText, opts = {}) {
     } else if (m.t === 'aloud:ls') {
       if (m.data && typeof m.data === 'object') store.set(f.lsKey, m.data);
     } else if (m.t === 'aloud:activity') {
+      if (m.ev === 'wheel' || m.ev === 'touchstart') readerScrolledByHand();
       if (isFullscreen()) chromeActivity(m.ev || (m.move ? 'pointermove' : 'pointerdown'), 'frame', m.x, m.y, !!m.touch);
     } else if (m.t === 'aloud:key') {
       if (isFullscreen()) peekChrome('player');
@@ -3403,10 +3462,7 @@ function frameApplyScroll(m) {
   const ir = f.el.getBoundingClientRect();
   const top = ir.top + (m.top || 0);
   const bottom = ir.top + (m.bottom || 0);
-  const band = readingViewportBounds();
-  if (!m.force && top >= band.top && bottom <= band.bottom) return;
-  const middle = top + Math.max(0, bottom - top) / 2;
-  window.scrollTo(scrollOptions(Math.max(0, window.scrollY + middle - band.center)));
+  keepWordCentred(top, bottom, !!m.force);
 }
 
 function renderHtmlNative(htmlText, opts = {}) {
@@ -3645,6 +3701,7 @@ function leaveDocument({ announce = true, focusLibrary = true } = {}) {
   hideTimingBadge();
   clearDocumentMediaSession();
   renderRecents();
+  glideCancel();
   window.scrollTo({ top: 0, behavior: 'auto' });
 
   if (hadDocument && announce) toast('Library ready — choose another document whenever you like.');
@@ -3724,6 +3781,7 @@ function finishOpen(opts = {}) {
   const native = S.mode !== 'flow';
   $('btn-view').textContent = native ? '¶' : '📄';
   $('btn-view').title = native ? 'Switch to plain text view' : 'Switch to original layout';
+  glideCancel();
   window.scrollTo(0, 0);
 
   /* zoom (v6.6.0): restore the saved zoom for this view mode */
@@ -3835,11 +3893,7 @@ function maybeScroll(el, force = false) {
     return;
   }
   const r = el.getBoundingClientRect();
-  const band = readingViewportBounds();
-  if (r.top < band.top || r.bottom > band.bottom) {
-    const middle = r.top + r.height / 2;
-    window.scrollTo(scrollOptions(Math.max(0, window.scrollY + middle - band.center)));
-  }
+  keepWordCentred(r.top, r.bottom, force);
 }
 function updateProgress() {
   const pct = S.sentences.length ? Math.round(100 * S.curSent / Math.max(1, S.sentences.length - 1)) : 0;
