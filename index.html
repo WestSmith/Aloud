@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.28.0">
+<meta name="aloud-version" content="v6.29.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -111,13 +111,16 @@
   body:not(.document-open) #btn-rsvp { display: none; }
   #topbar-actions { display: flex; align-items: center; gap: 6px; min-width: 0; justify-self: end; grid-row: 1; grid-column: 3; position: relative; z-index: 1; }
   #btn-fullscreen.on { background: var(--accent-soft); color: var(--accent-strong); }
-  /* full screen (v6.25.0): while playing, the bars step out of the way after a
-     moment of stillness and come back on any pointer or key */
-  body.chrome-hidden #topbar { transform: translateY(-110%); }
+  /* full screen (v6.25.0): the bars step out of the way after a moment of
+     stillness. v6.29.0: they come back one at a time — the top bar when the
+     pointer heads for the top edge, the player when it heads for the bottom
+     edge or a key is pressed — so a nudge of the mouse mid-page no longer
+     drops both bars over the text. */
+  body.chrome-hidden:not(.peek-top) #topbar { transform: translateY(-110%); }
   /* with the speed-reader open the panel IS the page: it and the player it
      is docked on stay put; only the top bar and zoom bar go */
-  body.chrome-hidden:not(.rsvp-on) #player { transform: translate(-50%, 140%); }
-  body.chrome-hidden { cursor: none; }
+  body.chrome-hidden:not(.rsvp-on):not(.peek-player) #player { transform: translate(-50%, 140%); }
+  body.chrome-hidden:not(.peek-top):not(.peek-player):not(.pointer-live) { cursor: none; }
   body.chrome-hidden #zoom-bar { opacity: 0; pointer-events: none; }
   /* v6.28.0: in full screen the text runs edge to edge, so the floating zoom
      bar and timing badge sit on top of it. They stay off the whole time,
@@ -1117,10 +1120,13 @@ let kokoroResumeOnForeground = false; // Metal inference cannot start while iOS 
 /* full-screen idle timer for the bars. Up here because setPlayIcon() reads it
    through showChrome() and can run before the UI-wiring section is reached. */
 let chromeIdleT = 0;
-/* how far the pointer must travel before it brings the bars back, and where it
-   was first seen after they hid (per source: 'win' / 'frame') — v6.28.0 */
+/* how far the pointer must travel before it counts as a move (it brings the
+   cursor back, not the bars — v6.29.0), and where it was first seen after the
+   bars hid (per source: 'win' / 'frame') — v6.28.0 */
 const CHROME_REVEAL_PX = 40;
 let chromeMoveAnchor = {};
+let chromePeekT = 0;        // re-tucks a bar the pointer or a key peeked out
+let chromePointerZone = null;   // 'top' | 'player' | null — where the pointer last was
 
 /* ---------------- state ---------------- */
 const S = {
@@ -2959,8 +2965,9 @@ function ALOUD_FRAME_AGENT(cfg) {
       var now = Date.now();
       if (now - activityAt < 400) return;
       activityAt = now;
-      /* the position goes along so the parent can tell a nudge from a move */
-      post({ t: 'aloud:activity', move: ev === 'pointermove', x: e.clientX, y: e.clientY });
+      /* the position goes along so the parent can tell a nudge from a move,
+         and which edge the pointer is heading for */
+      post({ t: 'aloud:activity', ev: ev, move: ev === 'pointermove', x: e.clientX, y: e.clientY, touch: e.pointerType === 'touch' });
     }, { capture: true, passive: true });
   });
 
@@ -3297,11 +3304,9 @@ function renderHtmlInteractive(htmlText, opts = {}) {
     } else if (m.t === 'aloud:ls') {
       if (m.data && typeof m.data === 'object') store.set(f.lsKey, m.data);
     } else if (m.t === 'aloud:activity') {
-      if (!isFullscreen()) {}
-      else if (m.move) chromePointerMoved('frame', m.x, m.y);
-      else showChrome();
+      if (isFullscreen()) chromeActivity(m.ev || (m.move ? 'pointermove' : 'pointerdown'), 'frame', m.x, m.y, !!m.touch);
     } else if (m.t === 'aloud:key') {
-      if (isFullscreen()) showChrome();
+      if (isFullscreen()) peekChrome('player');
       if (document.querySelector('.sheet.open')) { if (m.key === 'Escape') closeSheets(); return; }
       if (m.key === 'Escape') { if (S.rsvp.open) setRsvpOpen(false); return; }
       readerShortcut(m);
@@ -3497,6 +3502,7 @@ function resetDocState() {
   content.classList.remove('html-mode');
   content.classList.remove('fit-wide');
   content.style.zoom = '';
+  content.style.maxWidth = '';
   document.body.classList.remove('zoomable');
   document.body.classList.remove('html-zoomable');
   if (S.zoom) S.zoom.applied = 1;
@@ -3589,6 +3595,7 @@ function renderFlow(blocks, chapters, opts = {}) {
   resetDocState();
   S.mode = 'flow';
   S.chapters = chapters || [];
+  applyColumnWidth();
 
   const frag = document.createDocumentFragment();
   blocks.forEach((block, bi) => {
@@ -6022,7 +6029,7 @@ function setPlayIcon(playing) {
   /* full screen: pausing reveals the bars; playing only (re)arms the idle hide.
      This runs at every sentence start, and revealing here brought the bars
      back mid-read with the mouse untouched (v6.28.0). */
-  if (typeof showChrome === 'function') { if (playing) armChromeHide(); else showChrome(); }
+  if (typeof showChrome === 'function') { if (playing) armChromeHide(); else peekChrome('player'); }
   $('ic-play').style.display = playing ? 'none' : 'block';
   $('ic-pause').style.display = playing ? 'block' : 'none';
   $('btn-play').setAttribute('aria-label', playing ? 'Pause' : 'Play');
@@ -6267,6 +6274,7 @@ function applyZoom(save = true, recaptureHtml = false) {
   } else {
     content.style.zoom = Math.abs(z - 1) < 0.002 ? '' : String(z);
   }
+  applyColumnWidth();
   $('zoom-pct').textContent = Math.round(z * 100) + '%';
   $('zoom-fitw').classList.toggle('on', S.zoom.fit === 'width');
   $('zoom-fitp').classList.toggle('on', S.zoom.fit === 'page');
@@ -6595,7 +6603,23 @@ function applyFont() {
   $('font-select').value = contentFont;
   store.set('fontSize', contentSize);
   store.set('contentFont', contentFont);
+  applyColumnWidth();
   refreshTextSizeControl();
+}
+/* v6.29.0: making the text bigger also makes the column wider, up to the
+   window. Before, +/+ on an HTML document magnified the text inside the same
+   920px column, so every step meant fewer words per line and, at 200%, a
+   ribbon of text down the middle of a wide screen. The column now grows in
+   step with the zoom (HTML) or the text size (plain text view); the window
+   caps it, so on a phone nothing changes. Fit width already uses it all. */
+const HTML_COLUMN_PX = 920, FLOW_COLUMN_PX = 720, FLOW_BASE_SIZE_PX = 19;
+function applyColumnWidth() {
+  let px = '';
+  if (S.mode === 'html' && S.zoom.fit !== 'width' && S.zoom.applied > 1.002)
+    px = Math.round(HTML_COLUMN_PX * S.zoom.applied) + 'px';
+  else if (S.mode === 'flow' && contentSize > FLOW_BASE_SIZE_PX)
+    px = Math.round(FLOW_COLUMN_PX * contentSize / FLOW_BASE_SIZE_PX) + 'px';
+  content.style.maxWidth = px;
 }
 function refreshTextSizeControl() {
   const html = S.mode === 'html';
@@ -6807,7 +6831,9 @@ function toggleFullscreen() {
   } catch { toast('Full screen was blocked by the browser.'); }
 }
 function showChrome() {
-  document.body.classList.remove('chrome-hidden');
+  /* everything back at once: entering full screen, a tap on a touch screen */
+  document.body.classList.remove('chrome-hidden', 'peek-top', 'peek-player', 'pointer-live');
+  clearTimeout(chromePeekT);
   armChromeHide();
 }
 /* start (or restart) the idle countdown without revealing anything: bars
@@ -6821,23 +6847,76 @@ function armChromeHide() {
       /* the pointer resting on a bar means it is in use: wait, don't hide under it */
       if (document.querySelector('#topbar:hover, #player:hover, #zoom-bar:hover')) { arm(); return; }
       document.body.classList.add('chrome-hidden');
+      document.body.classList.remove('peek-top', 'peek-player', 'pointer-live');
       chromeMoveAnchor = {};   // forget where the pointer was: the next move sets the reference point
     }, 1800);
   };
   arm();
 }
-/* Pointer motion brings the bars back only once it adds up to a real move.
-   A mouse nudged by a keystroke or a hand resting on a trackpad jitters a few
-   pixels; that used to be enough. Measured from where the pointer first showed
-   up after the bars hid, per source (the window and the HTML frame report in
-   their own coordinates). While the bars are visible any motion re-arms. */
+/* v6.29.0: one bar at a time. 'top' is the top bar, 'player' the play
+   controls. With the bars still out this only restarts the idle countdown;
+   once they are tucked away it brings the one bar back and re-tucks it after
+   a moment unless the pointer is still on it or at its edge. */
+function peekChrome(part) {
+  if (!isFullscreen()) return;
+  if (!document.body.classList.contains('chrome-hidden')) { armChromeHide(); return; }
+  document.body.classList.add(part === 'top' ? 'peek-top' : 'peek-player');
+  armPeekHide();
+}
+function armPeekHide() {
+  clearTimeout(chromePeekT);
+  const arm = () => {
+    chromePeekT = setTimeout(() => {
+      if (!document.body.classList.contains('chrome-hidden')) return;
+      if (document.querySelector('.sheet.open')) { arm(); return; }
+      const b = document.body.classList;
+      const keepTop = chromePointerZone === 'top' || document.querySelector('#topbar:hover');
+      const keepPlayer = chromePointerZone === 'player' || document.querySelector('#player:hover');
+      if (!keepTop) b.remove('peek-top');
+      if (!keepPlayer) b.remove('peek-player');
+      if (!keepTop && !keepPlayer) b.remove('pointer-live');
+      if (b.contains('peek-top') || b.contains('peek-player')) arm();
+    }, 1800);
+  };
+  arm();
+}
+/* which bar the pointer is heading for: the strip along the top edge (the top
+   bar's height plus a little), the strip along the bottom (the player's) */
+function chromeZoneAt(y) {
+  if (typeof y !== 'number') return null;
+  if (y <= ($('topbar').offsetHeight || 62) + 20) return 'top';
+  if (y >= window.innerHeight - (($('player').offsetHeight || 96) + 34)) return 'player';
+  return null;
+}
+/* Pointer motion. While the bars are visible any motion re-arms the idle
+   countdown. Once they are tucked away it brings back the cursor, and the
+   one bar whose edge the pointer has reached — nothing else. The cursor
+   only comes back once the motion adds up to a real move: a mouse nudged by
+   a keystroke or a hand resting on a trackpad jitters a few pixels (v6.28.0).
+   Measured from where the pointer first showed up after the bars hid, per
+   source (the window and the HTML frame report in their own coordinates). */
 function chromePointerMoved(src, x, y) {
   if (!document.body.classList.contains('chrome-hidden')) { armChromeHide(); return; }
   if (typeof x !== 'number' || typeof y !== 'number') return;
+  let winY = y;
+  if (src === 'frame' && S.frame?.el) winY += S.frame.el.getBoundingClientRect().top;
+  chromePointerZone = chromeZoneAt(winY);
+  if (chromePointerZone) { peekChrome(chromePointerZone); return; }
   const a = chromeMoveAnchor[src];
   if (!a) { chromeMoveAnchor[src] = { x, y }; return; }
   if (Math.hypot(x - a.x, y - a.y) < CHROME_REVEAL_PX) return;
-  showChrome();
+  document.body.classList.add('pointer-live');
+  armPeekHide();
+}
+/* any other activity: a tap brings everything back (no edges to head for
+   on a touch screen); a click or a key brings the player; a scroll only the
+   cursor */
+function chromeActivity(ev, src, x, y, touch) {
+  if (ev === 'pointermove') { if (!touch) chromePointerMoved(src, x, y); return; }
+  if (ev === 'touchstart' || (ev === 'pointerdown' && touch)) { showChrome(); return; }
+  if (ev === 'pointerdown' || ev === 'keydown') { peekChrome('player'); return; }
+  if (document.body.classList.contains('chrome-hidden')) { document.body.classList.add('pointer-live'); armPeekHide(); }
+  else armChromeHide();
 }
 function onFullscreenChange() {
   const on = isFullscreen();
@@ -6845,15 +6924,15 @@ function onFullscreenChange() {
   $('btn-fullscreen').classList.toggle('on', on);
   $('btn-fullscreen').setAttribute('aria-pressed', String(on));
   $('btn-fullscreen').title = on ? 'Exit full screen (F)' : 'Full screen (F)';
-  if (on && !store.get('fsTipSeen', false)) { store.set('fsTipSeen', true); toast('Full screen — the bars tuck away when you hold still and return when you move. F or Esc to leave.', 5000); }
+  if (on && !store.get('fsTipSeen2', false)) { store.set('fsTipSeen2', true); toast('Full screen — the bars tuck away when you hold still. Move to the top edge for the top bar, to the bottom edge or press Space for the player. F or Esc to leave.', 6000); }
   showChrome();
   invalidateReadingViewportBounds();
 }
 document.addEventListener('fullscreenchange', onFullscreenChange);
 document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(ev =>
-  window.addEventListener(ev, () => { if (isFullscreen()) showChrome(); }, { passive: true }));
-window.addEventListener('pointermove', e => { if (isFullscreen()) chromePointerMoved('win', e.clientX, e.clientY); }, { passive: true });
+  window.addEventListener(ev, e => { if (isFullscreen()) chromeActivity(ev, 'win', e.clientX, e.clientY, e.pointerType === 'touch'); }, { passive: true }));
+window.addEventListener('pointermove', e => { if (isFullscreen() && e.pointerType !== 'touch') chromePointerMoved('win', e.clientX, e.clientY); }, { passive: true });
 $('btn-fullscreen').addEventListener('click', toggleFullscreen);
 
 if ('mediaSession' in navigator) {
