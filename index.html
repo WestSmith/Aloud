@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.30.0">
+<meta name="aloud-version" content="v6.31.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -5467,23 +5467,25 @@ function ensureNeuralAudio() {
   NA.preload = 'auto';
   try { NA.preservesPitch = true; NA.webkitPreservesPitch = true; } catch {}
   const syncClock = () => { const P = S.audioPlay; if (P) { P.clock.media = NA.currentTime; P.clock.wall = performance.now(); } };
-  NA.addEventListener('timeupdate', () => {
-    const P = S.audioPlay;
-    /* the element only reports a moving currentTime once it is genuinely
-       producing sound — that is the signal that makes wall-clock
-       extrapolation safe (see naMediaPos) */
-    if (P && NA.currentTime > 0) P.rolling = true;
-    syncClock();
-  });
-  NA.addEventListener('seeked', () => { syncClock(); if (S.audioPlay) S.audioPlay.shownAbs = -1; });   // real seek → regression allowed
+  /* v6.31.0: neither 'timeupdate' nor 'playing' sets P.rolling any more.
+     The tick does, the first time it SEES currentTime move (naMediaPos).
+     A post-seek timeupdate reports currentTime > 0 with nothing playing,
+     and 'playing' fires while the audio clock is still parked — measured
+     ~80ms of it in headless Chromium, longer on a loaded laptop — so both
+     used to license extrapolation through dead air, which at 2.75× is a
+     word or two of the next sentence lit before it was spoken. */
+  NA.addEventListener('timeupdate', () => syncClock());
+  /* a seek moves currentTime without any audio having played: tell the tick
+     so it does not mistake the jump for the clock starting */
+  NA.addEventListener('seeking', () => { const P = S.audioPlay; if (P) { P.lastCt = NA.currentTime; P.rolling = false; } });
+  NA.addEventListener('seeked', () => { const P = S.audioPlay; syncClock(); if (P) { P.lastCt = NA.currentTime; P.shownAbs = -1; } });   // real seek → regression allowed
   NA.addEventListener('play', () => { syncClock(); naTickStart(); });
-  /* 'playing' is the first frame of actual audio. Everything between play()
-     and here was silent load/decode time, so discard any word the tick
-     showed during it and restart the clock from the real position. */
+  /* 'playing' means the pipeline is about to render, not that the clock is
+     moving. Discard any word the tick showed during the silent load and
+     re-anchor; the tick decides for itself when extrapolation is safe. */
   NA.addEventListener('playing', () => {
     const P = S.audioPlay;
     if (!P) return;
-    P.rolling = true;
     P.shownAbs = -1;
     syncClock();
     naTickStart();
@@ -5552,9 +5554,21 @@ function primeAudioGesture() {
    before they were spoken — and P.shownAbs, which exists to stop visible
    rewinds, then pinned the highlight ahead so it could never recover. */
 function naMediaPos(P) {
-  if (NA.paused || NA.ended) return NA.currentTime;
+  const ct = NA.currentTime;
+  if (NA.paused || NA.ended) return ct;
+  /* v6.31.0 — the only proof the audio clock is running is that
+     currentTime has moved since the last look, and a move that is not a
+     seek is also the freshest anchor there is. 'playing' fires before the
+     clock moves (measured, tools/neural-clock-probe.mjs), and anchoring on
+     it extrapolated at full rate through that dead time. Seeks update
+     P.lastCt in their own handlers so a jump does not count as movement. */
+  if (ct !== P.lastCt) {
+    if (P.lastCt != null && ct > P.lastCt) P.rolling = true;
+    P.lastCt = ct;
+    P.clock.media = ct; P.clock.wall = performance.now();
+  }
   /* not yet producing sound, or buffering: report the true position */
-  if (!P.rolling || NA.readyState < 3) return NA.currentTime;
+  if (!P.rolling || NA.readyState < 3) return ct;
   let est = P.clock.media + ((performance.now() - P.clock.wall) / 1000) * NA.playbackRate;
   est = Math.min(est, P.clock.media + 1.5);
   return isFinite(NA.duration) ? Math.min(est, NA.duration) : est;
@@ -5739,7 +5753,7 @@ async function speakNeural(sentIdx, fromWord) {
   const P = S.audioPlay = {
     segs: [{ sentIdx, sentStart: sent.start, t0: 0, starts: entry.starts }],
     shownAbs: -1,
-    rolling: false,                     // set on 'playing': audio truly started
+    rolling: false,                     // set by naMediaPos once currentTime is seen moving
     clock: { media: 0, wall: performance.now() },
   };
   na.src = entry.url;
@@ -5766,7 +5780,7 @@ async function speakNeural(sentIdx, fromWord) {
     ? leadTrimSec(entry)                                        // skip measured silence only
     : Math.max(0, (entry.starts[rel] ?? 0) - 0.06);              // tap-to-read: land on that word
   if (seekTo > 0.04 && seekTo < entry.durationSec * 0.9) {
-    na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) na.currentTime = seekTo; }, { once: true });
+    na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) { na.currentTime = seekTo; P.lastCt = na.currentTime; } }, { once: true });
   }
   try {
     await na.play();

@@ -69,3 +69,14 @@ and the numbers behind the q8-on-mobile default are in the file's header.
     node tools/kokoro-wasm-bench.mjs model_quantized      # q8
     node tools/kokoro-wasm-bench.mjs model_q4
     THREADS=4 node tools/kokoro-wasm-bench.mjs model_quantized
+
+# neural-clock-probe
+
+The aligner checks above score the onsets fed to playback. This one scores
+the playback clock itself: it drives the real page in headless Chromium with
+synthetic clips of known onsets and reports every word lit before its audio.
+Setup and the numbers behind v6.31.0 are in the file's header.
+
+    http-server -p 8765 -s . &
+    node tools/neural-clock-probe.mjs 2.75 0
+    node tools/neural-clock-probe.mjs 2.75 8      # with CPU contention — must still be 0

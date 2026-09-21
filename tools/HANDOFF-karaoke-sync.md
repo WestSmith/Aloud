@@ -30,6 +30,9 @@ audio — worst at the start of a sentence — plus intermittent distortion.
 > quality tier, whether the model was still downloading (the cover engine's
 > timing is *estimated* and drifts at sentence starts by design — see
 > `KOKORO_COVER_DELAY_MS`), device thermal state, and document length.
+>
+> **Reported again 2026-09-21 and reproduced** — see "Cause 11" below. It was
+> not any of the nine; it was the playback clock trusting `'playing'`.
 
 ---
 
@@ -51,6 +54,7 @@ should assume the same: verify a hypothesis before building on it.
 | 6.14.0 | Numeric tokens expand unpredictably; aligner guessed in a 40-wide window | timing badge read "exact" |
 | 6.14.1 | Chunk joins re-inserted the lead-in pad **inside** a sentence | reader named a spot |
 | 6.15.0 | Aligner depended on the phoneme cache, which silently goes cold | **measured by the self-check** |
+| 6.31.0 | `'playing'` fired before the audio clock moved; the tick extrapolated at full rate through that dead time | **measured by `neural-clock-probe.mjs`** |
 
 ## Established facts — don't re-derive these
 
@@ -97,6 +101,38 @@ costs a session.
   `timeupdate` handler calls `syncClock()` as it sets the flag, re-anchoring
   `clock.media` to the true position. The comment on the `currentTime > 0`
   test is inaccurate for iOS, but the behaviour is safe.
+
+### Cause 11 — reported again 2026-09-21, and this time it reproduced
+
+Report: "first few words of sentences highlighted, and shown in the Spritz
+reader, before they are spoken", Kokoro, 2.75×, Puck, MacBook; turning on
+"Use all CPU cores" made the gap *bigger*. Same symptom as cause 1, different
+cause, and this one is **measured**, not reasoned.
+
+`tools/neural-clock-probe.mjs` drives the real page in headless Chromium
+with synthetic clips of known onsets and logs each highlight against
+`NA.currentTime`. At v6.30.0, 2.75×: **18 words lit before their audio, two
+at every sentence start**, ~0.10 s of media early with an idle CPU and
+~0.19 s with eight busy workers. The event log shows why: `'playing'` fires,
+`P.rolling` goes true, and `currentTime` then sits parked for ~80 ms before
+it moves. The tick extrapolated at 2.75× from that stale anchor until the
+next `timeupdate` (up to 250 ms away). Dead time × rate = words lit early,
+which is why it scales with speed and with CPU load, and why a real audio
+device (longer pipeline start than the headless fake sink) shows more of it.
+The post-seek `timeupdate` (currentTime > 0 with nothing playing) licensed
+the same thing on the other side of the seek.
+
+Fix: neither event sets `rolling` any more. `naMediaPos` reads
+`currentTime` every frame and treats the first *movement* (a seek does not
+count — the seek handlers pre-set `P.lastCt`) as proof the clock runs, and
+every later movement as the freshest anchor. After: 0 words early at 1×,
+2.75× and 4×, idle and loaded; the highlight is not late either (mean 15 ms
+of media, max 89 ms). The "Ruled out … `rolling` going true early costs
+nothing" entry above was true of the iOS seek path it measured and is not
+true in general — it is the entry cause 11 hid behind.
+
+Run the probe after any change to `ensureNeuralAudio`, `naMediaPos`,
+`naTick` or the sentence-boundary sequence in `speakNeural`.
 
 ## Open items
 
@@ -225,6 +261,7 @@ Fixed by segmentation, not in the harness (they need the real DOM):
     node tools/whole-text-fusion.mjs              # production fusion hazard
     node tools/whole-text-selfcheck.mjs           # onset error on the SHIPPING path
     SELFTEST=1 node tools/whole-text-selfcheck.mjs   # must NOT be 0ms
+    node tools/neural-clock-probe.mjs 2.75 8      # must be lit-before-audio 0 (clock path, Chromium)
 
 The two self-check runs must stay at 0 ms. `NOWARM=1` is not optional — that
 path was 500 ms out while the badge read "exact". `whole-text-fusion.mjs`
