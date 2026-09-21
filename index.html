@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.32.1">
+<meta name="aloud-version" content="v6.33.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -1136,6 +1136,7 @@ const S = {
   sentences: [],       // [{start, end, text, span?}]
   curSent: -1,
   curWord: -1,
+  paintedWord: -1,     // the word carrying .speaking / shown in RSVP; trails curWord during a sentence-start hold
   playing: false,
   /* A fresh native install now starts on Kokoro because its inference runs in
      Swift/MLX rather than WebKit. Existing users keep their explicit choice,
@@ -3608,7 +3609,7 @@ function resetDocState() {
   kokoroResumeOnForeground = false;
   S.docGeneration++;
   S.neuralGenToken++;
-  S.words = []; S.sentences = []; S.curSent = -1; S.curWord = -1;
+  S.words = []; S.sentences = []; S.curSent = -1; S.curWord = -1; S.paintedWord = -1;
   if (S.audioPlay?.batchUrl) URL.revokeObjectURL(S.audioPlay.batchUrl);
   S.audioPlay = null;
   clearNeuralCache();
@@ -3842,15 +3843,18 @@ function finishOpen(opts = {}) {
    ==================================================================== */
 
 function clearWordHl() {
-  if (S.curWord >= 0 && S.words[S.curWord]) S.words[S.curWord].el.classList.remove('speaking');
+  const p = S.paintedWord >= 0 ? S.paintedWord : S.curWord;
+  if (p >= 0 && S.words[p]) S.words[p].el.classList.remove('speaking');
+  S.paintedWord = -1;
 }
 function highlightWord(wIdx, force = false) {
   /* `force` repaints even when wIdx is already current — needed at sentence
      transitions, where setSentence assigns S.curWord BEFORE calling here, so
      the guard used to swallow the first word (no .speaking, no RSVP flash) */
-  if (wIdx === S.curWord && !force) return;
+  if (wIdx === S.paintedWord && !force) return;
   clearWordHl();
   S.curWord = wIdx;
+  S.paintedWord = wIdx;
   const w = S.words[wIdx];
   if (w) w.el.classList.add('speaking');
   if (S.rsvp.open && w) rsvpFlash(w.text);
@@ -3859,24 +3863,46 @@ function highlightWord(wIdx, force = false) {
    on a muted citation ("Slide 20: An individual may believe…") and the
    highlight should start on the first real word, not on skipped text */
 function firstSpokenWord(sent) {
-  for (let i = sent.start; i < sent.end; i++) if (!S.words[i].mute) return i;
+  for (let i = sent.start; i < sent.end; i++) if (!S.words[i].mute && !NONSPEECH_RE.test(S.words[i].text)) return i;
   return sent.start;
+}
+/* v6.33.0 — the word the highlight should REST on when a timing scan lands on
+   wIdx. A muted citation or a punctuation-only token (a lone "." the markup
+   split off its word, a closing quote in its own text node) is never spoken:
+   the aligner gives a trailing one the PREVIOUS word's onset and the scan
+   prefers the later of equal starts, so the speed reader used to flash "."
+   the instant the sentence's last word began. Hold the last real word. */
+function heldWord(wIdx, floor) {
+  while (wIdx > floor && S.words[wIdx] && (S.words[wIdx].mute || NONSPEECH_RE.test(S.words[wIdx].text))) wIdx--;
+  return wIdx;
+}
+/* true while the highlight is resting on an earlier sentence's word, waiting
+   for this sentence's first onset (see setSentence's hold) */
+function holdingBefore(sent) {
+  return S.paintedWord >= 0 && (S.paintedWord < sent.start || S.paintedWord >= sent.end);
 }
 function sentClass(sent, on) {
   if (!sent) return;
   if (sent.span) sent.span.classList.toggle('sent-active', on);
   else for (let i = sent.start; i < sent.end; i++) S.words[i].el.classList.toggle('sent-on', on);
 }
-function setSentence(sIdx, keepWord = false) {
+/* hold (v6.33.0): the sentence changes but the highlight and the speed reader
+   REST on the word they are on until the new sentence's first onset is
+   reached — used when playback advances on its own. Painting the next
+   sentence's first word at the moment the previous clip ended put it in the
+   RSVP panel through the breather, the lead-in and any generation wait,
+   which read as the reader running ahead. The timing tick paints it when
+   the audio gets there (naTick / estTick). */
+function setSentence(sIdx, keepWord = false, hold = false) {
   sIdx = Math.max(0, Math.min(sIdx, S.sentences.length - 1));
   if (S.curSent >= 0) sentClass(S.sentences[S.curSent], false);
-  clearWordHl();
+  if (!hold) clearWordHl();
   S.curSent = sIdx;
   const sent = S.sentences[sIdx];
   if (!sent) return;
   if (S.sentHl) sentClass(sent, true);
   if (!keepWord) S.curWord = firstSpokenWord(sent);
-  highlightWord(S.curWord, !keepWord);
+  if (!hold) highlightWord(S.curWord, !keepWord);
   maybeScroll(S.words[S.curWord]?.el);
   updateProgress();
   saveReadingProgress();
@@ -4035,7 +4061,8 @@ function initNativeEngine() {
       for (let i = 0; i < U.offsets.length; i++) { if (U.offsets[i] <= ev.charIndex) wi = i; else break; }
       wi = Math.max(wi, U.lastWi);          // monotonic within an utterance
       U.lastWi = wi;
-      if (U.idxs[wi] !== S.curWord) { highlightWord(U.idxs[wi]); maybeScroll(S.words[U.idxs[wi]].el); }
+      const hw = heldWord(U.idxs[wi], U.idxs[0]);
+      if (hw !== S.paintedWord) { highlightWord(hw); maybeScroll(S.words[hw].el); }
       return;
     }
 
@@ -4137,8 +4164,9 @@ function speakDevice(sentIdx, fromWord) {
     S.boundarySeen = true;
     let wi = 0;
     for (let i = 0; i < offsets.length; i++) { if (offsets[i] <= e.charIndex) wi = i; else break; }
-    highlightWord(idxs[wi]);
-    maybeScroll(S.words[idxs[wi]].el);
+    const hw = heldWord(idxs[wi], idxs[0]);
+    highlightWord(hw);
+    maybeScroll(S.words[hw].el);
   };
 
   /* estimated path: phoneme/syllable timeline × per-voice calibration.
@@ -4168,7 +4196,8 @@ function speakDevice(sentIdx, fromWord) {
         for (let i = 0; i < tl.spans.length; i++) { if (tl.spans[i].t0 <= t) wi = i; else break; }
         wi = Math.max(wi, lastWi);     // never step backwards
         lastWi = wi;
-        if (idxs[wi] !== S.curWord) { highlightWord(idxs[wi]); maybeScroll(S.words[idxs[wi]].el); }
+        const hw = heldWord(idxs[wi], idxs[0]);
+        if (hw !== S.paintedWord) { highlightWord(hw); maybeScroll(S.words[hw].el); }
       }
       S.estRAF = requestAnimationFrame(estTick);
     } else stopEstLoop();
@@ -4224,7 +4253,9 @@ function speakDevice(sentIdx, fromWord) {
 
   synth.cancel();
   synth.speak(u);
-  highlightWord(startWord);
+  /* holding from the previous sentence: estTick paints word one once the
+     engine reports it has started (setSentence hold) */
+  if (!holdingBefore(sent)) highlightWord(startWord);
 }
 
 /* ====================================================================
@@ -5637,19 +5668,24 @@ function naTick() {
   const ct = Math.max(0, naMediaPos(P) - karaokeLagSec());
   let seg = P.segs[0];
   for (const g of P.segs) { if (g.t0 <= ct + 0.02) seg = g; else break; }
-  if (seg.sentIdx !== S.curSent) setSentence(seg.sentIdx, true);
-  let wi = 0;
+  if (seg.sentIdx !== S.curSent) setSentence(seg.sentIdx, true, true);
+  let wi = -1;
   for (let i = 0; i < seg.starts.length; i++) { if (seg.starts[i] <= ct + 0.02) wi = i; else break; }
-  let wIdx = seg.sentStart + wi;
-  /* a muted citation shares the onset of the word after it, so the scan can
-     land on one. Nothing is spoken there — hold the last real word instead
-     of moving the highlight onto text the voice is passing over. */
-  while (wIdx > seg.sentStart && S.words[wIdx]?.mute) wIdx--;
+  /* before the first onset (lead-in, or the gap ahead of a stitched
+     sentence): rest on whatever is lit rather than jump to word one */
+  if (wi < 0) {
+    if (!NA.paused && !NA.ended) requestAnimationFrame(naTick); else P.ticking = false;
+    return;
+  }
+  /* a muted citation shares the onset of the word after it and a trailing
+     punctuation token the onset of the word before it, so the scan can land
+     on either. Nothing is spoken there — hold the last real word. */
+  let wIdx = heldWord(seg.sentStart + wi, seg.sentStart);
   /* clock resyncs can land a hair behind the extrapolation — hold rather
      than visibly rewind a word */
   if (wIdx < P.shownAbs) wIdx = P.shownAbs;
   P.shownAbs = wIdx;
-  if (wIdx !== S.curWord) { highlightWord(wIdx); maybeScroll(S.words[wIdx]?.el); }
+  if (wIdx !== S.paintedWord) { highlightWord(wIdx); maybeScroll(S.words[wIdx]?.el); }
   if (!NA.paused && !NA.ended) requestAnimationFrame(naTick);
   else P.ticking = false;
 }
@@ -5795,7 +5831,9 @@ async function speakNeural(sentIdx, fromWord) {
     handleNeuralFailure(e);
     return;
   }
-  highlightWord(startFrom);
+  /* holding from the previous sentence: the tick paints word one at its
+     onset (setSentence hold); otherwise show where playback starts */
+  if (!holdingBefore(sent)) highlightWord(startFrom);
   showTimingBadge(entry.timing);
 
   neuralPump();   // keep the runway of pre-generated sentences full
@@ -6141,7 +6179,7 @@ function advanceSentence(dir, keepPlaying) {
     toast('🌙 End of chapter — pausing here. Good night.');
     return;
   }
-  setSentence(next);
+  setSentence(next, false, keepPlaying && S.playing);
   if (keepPlaying && S.playing) playCurrent();
 }
 
