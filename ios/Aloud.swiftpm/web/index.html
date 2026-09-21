@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.32.0">
+<meta name="aloud-version" content="v6.32.1">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -6541,10 +6541,14 @@ function renderLagChips() {
   const box = $('lag-chips');
   if (!box) return;
   box.innerHTML = '';
+  const det = detectOutputLatency();
   LAG_PRESETS.forEach(([v, label]) => {
     const b = document.createElement('button');
     b.className = 'chip' + (v === S.karaokeLag ? ' on' : '');
-    b.textContent = label;
+    /* show what Auto is actually applying. A reader on AirPods saw "Auto"
+       and assumed it covered them; it was applying the ~10 ms the browser
+       reported (v6.32.0). The number is the only way to tell. */
+    b.textContent = v === 'auto' ? (det ? `Auto · ${det} ms` : 'Auto · none reported') : label;
     b.addEventListener('click', () => {
       S.karaokeLag = v; store.set('karaokeLag', v);
       renderLagChips();
@@ -6552,12 +6556,11 @@ function renderLagChips() {
     });
     box.appendChild(b);
   });
-  const det = detectOutputLatency();
   const note = $('lag-note');
   if (note) note.textContent =
     'If the highlighted word runs ahead of what you hear — most noticeable on the first words after a pause — hold it back here. ' +
     'The lag is your audio output, not the timing: Bluetooth headphones buffer 150–250 ms, wired almost nothing. ' +
-    (det ? `Auto uses what this browser reports for your output device (${det} ms).`
+    (det ? `Auto uses what this browser reports for your output device (${det} ms) — browsers often report far less than AirPods and other Bluetooth headphones really add, so if Auto still runs ahead, 160 or 240 ms is the usual fix.`
          : 'This browser does not report a figure for your output device, so Auto is no offset — pick one by ear.');
 }
 $('btn-speed').addEventListener('click', () => { renderSpeedSheet(); openSheet('speed-sheet'); });
