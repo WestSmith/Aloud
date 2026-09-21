@@ -92,3 +92,12 @@ exists because this was shipped and regressed twice.
 Linux, no Mac, no Xcode, no Swift toolchain — the iOS app cannot be compiled or
 tested here, only written. It also cannot *listen*, so audio distortion needs a
 human ear. Everything else is measurable and should be measured.
+
+## Merging is the assistant's job
+
+The owner has asked (2026-09-21) that every change be carried all the way:
+open the PR, wait for its checks, take it out of draft, squash-merge it, and
+clean up — reset the local checkout to `main` and delete the branch. Do not
+stop at "PR opened" and hand the merge back. The git proxy in the remote
+container returns 403 on branch deletes; if that is still the case, say so
+once rather than reporting the branch as deleted.
