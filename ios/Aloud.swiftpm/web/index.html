@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.33.0">
+<meta name="aloud-version" content="v6.33.1">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -3902,8 +3902,10 @@ function setSentence(sIdx, keepWord = false, hold = false) {
   if (!sent) return;
   if (S.sentHl) sentClass(sent, true);
   if (!keepWord) S.curWord = firstSpokenWord(sent);
-  if (!hold) highlightWord(S.curWord, !keepWord);
-  maybeScroll(S.words[S.curWord]?.el);
+  /* on a hold the paint, and the scroll that comes with it, happen when the
+     tick reaches the first onset — scrolling now would glide toward a word
+     that is not lit yet and could carry the lit one off-screen (Codex, #24) */
+  if (!hold) { highlightWord(S.curWord, !keepWord); maybeScroll(S.words[S.curWord]?.el); }
   updateProgress();
   saveReadingProgress();
 }
@@ -3999,7 +4001,7 @@ function speakNative(sentIdx, fromWord) {
     idxs.push(i);
     text += spokenOfWord(S.words[i]) + (i < sent.end - 1 ? ' ' : '');
   }
-  if (!text.trim()) return advanceSentence(1, true);
+  if (!text.trim()) return advanceSentence(1, true, true);
 
   const token = ++S.utterToken;
   nativeUtter = { token, idxs, offsets, lastWi: 0 };
@@ -4146,7 +4148,7 @@ function speakDevice(sentIdx, fromWord) {
     idxs.push(i);
     text += spokenOfWord(S.words[i]) + (i < sent.end - 1 ? ' ' : '');
   }
-  if (!text.trim()) return advanceSentence(1, true);
+  if (!text.trim()) return advanceSentence(1, true, true);
 
   const token = ++S.utterToken;
   S.boundarySeen = false;
@@ -4248,7 +4250,7 @@ function speakDevice(sentIdx, fromWord) {
       return;
     }
     if (S.speechErrAt == null) S.speechErrAt = sentIdx;
-    advanceSentence(1, true);
+    advanceSentence(1, true, true);
   };
 
   synth.cancel();
@@ -5510,7 +5512,14 @@ function ensureNeuralAudio() {
      so it does not mistake the jump for the clock starting */
   NA.addEventListener('seeking', () => { const P = S.audioPlay; if (P) { P.lastCt = NA.currentTime; P.rolling = false; } });
   NA.addEventListener('seeked', () => { const P = S.audioPlay; syncClock(); if (P) { P.lastCt = NA.currentTime; P.shownAbs = -1; } });   // real seek → regression allowed
-  NA.addEventListener('play', () => { syncClock(); naTickStart(); });
+  /* v6.33.1 — every lifecycle event re-bases the movement test, so
+     "currentTime moved" means moved between two ticks with NO event in
+     between. Chromium jumps currentTime forward at play() on a resume
+     (measured: 0.71 → 0.918 with nothing audible yet), and a stale baseline
+     from before a pause or a buffering stop would pass the test the same
+     way (Codex, #20). Either would license extrapolation through the
+     restart's dead time. */
+  NA.addEventListener('play', () => { const P = S.audioPlay; syncClock(); if (P) P.lastCt = NA.currentTime; naTickStart(); });
   /* 'playing' means the pipeline is about to render, not that the clock is
      moving. Discard any word the tick showed during the silent load and
      re-anchor; the tick decides for itself when extrapolation is safe. */
@@ -5518,6 +5527,7 @@ function ensureNeuralAudio() {
     const P = S.audioPlay;
     if (!P) return;
     P.shownAbs = -1;
+    P.lastCt = NA.currentTime;
     syncClock();
     naTickStart();
   });
@@ -5527,7 +5537,7 @@ function ensureNeuralAudio() {
      before the pause and jump the highlight the full 1.5s cap ahead. */
   ['waiting', 'stalled', 'suspend', 'pause'].forEach(ev => NA.addEventListener(ev, () => {
     const P = S.audioPlay;
-    if (P) { P.rolling = false; syncClock(); }
+    if (P) { P.rolling = false; P.lastCt = NA.currentTime; syncClock(); }
   }));
   NA.addEventListener('ended', () => {
     const P = S.audioPlay;
@@ -5663,6 +5673,14 @@ function naTickStart() {
 function naTick() {
   const P = S.audioPlay;
   if (!P || !S.playing) { if (P) P.ticking = false; return; }
+  /* v6.33.1 — a paused element must never move the highlight or the
+     sentence. A frame that lands between a Next-while-playing (the element
+     is paused, S.curSent already moved on) and the next clip's play() used
+     to find this play's old sentence, set S.curSent back to it, and make
+     speakNeural abort on its own sentence guard — playback simply stopped.
+     Cached sentences never left a frame's gap; an uncached one did. 'play'
+     restarts the loop. */
+  if (NA.paused || NA.ended) { P.ticking = false; return; }
   /* what you are HEARING right now, which trails the audio clock by the
      output latency (see karaokeLagSec) */
   const ct = Math.max(0, naMediaPos(P) - karaokeLagSec());
@@ -5863,7 +5881,7 @@ async function batchNext() {
   /* end of document, or a chapter boundary under the sleep timer — let the
      normal path handle its finish/goodnight messaging */
   if (!run.length || (S.sleep.mode === 'chapter' && chapterOf(run[0]) !== chapterOf(S.curSent))) {
-    advanceSentence(1, true);
+    advanceSentence(1, true, true);
     return;
   }
   if (run.length === 1) { setSentence(run[0]); if (S.playing) playCurrent(); return; }
@@ -6153,13 +6171,18 @@ function advanceAfterBreather() {
     ? Math.round(440 * S.breather / Math.max(0.6, S.rate)) : 0;
   if (gapMs > 0 && S.playing) {
     const tok = ++S.breatherToken;
-    setTimeout(() => { if (tok === S.breatherToken && S.playing) advanceSentence(1, true); }, gapMs);
+    setTimeout(() => { if (tok === S.breatherToken && S.playing) advanceSentence(1, true, true); }, gapMs);
   } else {
-    advanceSentence(1, true);
+    advanceSentence(1, true, true);
   }
 }
 
-function advanceSentence(dir, keepPlaying) {
+/* auto (v6.33.1): true when playback itself moved on — breather timer,
+   batch end, an engine skipping an empty or failed sentence. Only those
+   hold the highlight on the old word until the new audio arrives; a Next
+   button or a remote skip is a manual action and paints at once (Codex,
+   #24). Inferring it from S.playing treated Next-while-playing as automatic. */
+function advanceSentence(dir, keepPlaying, auto = false) {
   let next = S.curSent + dir;
   if (next >= 0 && next < S.sentences.length) {
     const p = seekPlayable(next, dir);           // hop over code blocks / skim-skipped sentences
@@ -6179,7 +6202,7 @@ function advanceSentence(dir, keepPlaying) {
     toast('🌙 End of chapter — pausing here. Good night.');
     return;
   }
-  setSentence(next, false, keepPlaying && S.playing);
+  setSentence(next, false, auto && keepPlaying && S.playing);
   if (keepPlaying && S.playing) playCurrent();
 }
 
@@ -6575,18 +6598,28 @@ const BREATHER_PRESETS = [[0, 'Off'], [0.6, 'Subtle'], [1, 'Normal'], [1.5, 'Ext
 /* how far the highlight trails the audio clock, in ms. Bluetooth output is
    commonly 150-250ms; wired is near zero. */
 const LAG_PRESETS = [['auto', 'Auto'], [0, 'None'], [80, '80 ms'], [160, '160 ms'], [240, '240 ms'], [320, '320 ms']];
+let lagRefreshT = 0, lagShownDet;
+function lagAutoLabel(det) { return det ? `Auto · ${det} ms` : 'Auto · none reported'; }
+function lagNoteText(det) {
+  return 'If the highlighted word runs ahead of what you hear — most noticeable on the first words after a pause — hold it back here. ' +
+    'The lag is your audio output, not the timing: Bluetooth headphones buffer 150–250 ms, wired almost nothing. ' +
+    (det ? `Auto uses what this browser reports for your output device (${det} ms) — browsers often report far less than AirPods and other Bluetooth headphones really add, so if Auto still runs ahead, 160 or 240 ms is the usual fix.`
+         : 'This browser does not report a figure for your output device, so Auto is no offset — pick one by ear.');
+}
 function renderLagChips() {
   const box = $('lag-chips');
   if (!box) return;
   box.innerHTML = '';
   const det = detectOutputLatency();
+  lagShownDet = det;
   LAG_PRESETS.forEach(([v, label]) => {
     const b = document.createElement('button');
     b.className = 'chip' + (v === S.karaokeLag ? ' on' : '');
     /* show what Auto is actually applying. A reader on AirPods saw "Auto"
        and assumed it covered them; it was applying the ~10 ms the browser
        reported (v6.32.0). The number is the only way to tell. */
-    b.textContent = v === 'auto' ? (det ? `Auto · ${det} ms` : 'Auto · none reported') : label;
+    b.textContent = v === 'auto' ? lagAutoLabel(det) : label;
+    if (v === 'auto') b.id = 'lag-chip-auto';
     b.addEventListener('click', () => {
       S.karaokeLag = v; store.set('karaokeLag', v);
       renderLagChips();
@@ -6595,11 +6628,22 @@ function renderLagChips() {
     box.appendChild(b);
   });
   const note = $('lag-note');
-  if (note) note.textContent =
-    'If the highlighted word runs ahead of what you hear — most noticeable on the first words after a pause — hold it back here. ' +
-    'The lag is your audio output, not the timing: Bluetooth headphones buffer 150–250 ms, wired almost nothing. ' +
-    (det ? `Auto uses what this browser reports for your output device (${det} ms) — browsers often report far less than AirPods and other Bluetooth headphones really add, so if Auto still runs ahead, 160 or 240 ms is the usual fix.`
-         : 'This browser does not report a figure for your output device, so Auto is no offset — pick one by ear.');
+  if (note) note.textContent = lagNoteText(det);
+  /* Auto re-reads the output latency every second (v6.32.0), so a device
+     switched while the sheet is open changes what it applies: keep the chip
+     and the note on the live figure instead of the one from render time
+     (Codex, #23). Text-only updates — rebuilding the chips would drop focus. */
+  clearInterval(lagRefreshT);
+  lagRefreshT = setInterval(() => {
+    const sheet = $('speed-sheet');
+    if (!sheet || !sheet.classList.contains('open')) { clearInterval(lagRefreshT); return; }
+    const now = detectOutputLatency();
+    if (now === lagShownDet) return;
+    lagShownDet = now;
+    const auto = $('lag-chip-auto');
+    if (auto) auto.textContent = lagAutoLabel(now);
+    if (note) note.textContent = lagNoteText(now);
+  }, 1000);
 }
 $('btn-speed').addEventListener('click', () => { renderSpeedSheet(); openSheet('speed-sheet'); });
 $('speed-range').addEventListener('input', e => {
