@@ -134,6 +134,19 @@ true in general — it is the entry cause 11 hid behind.
 Run the probe after any change to `ensureNeuralAudio`, `naMediaPos`,
 `naTick` or the sentence-boundary sequence in `speakNeural`.
 
+**Postscript, same day (v6.32.0).** With v6.31.0 confirmed on the reader's
+Mac the symptom still appeared, but only after a few minutes of listening,
+and the 240 ms Karaoke sync chip removed it: AirPods. Auto should have
+covered that. It did not because `detectOutputLatency` froze the FIRST
+figure the browser reported and never re-read it — the probe (`lag` line)
+shows the old build stuck at 10 ms (the context's baseLatency, read before
+the audio system was running) while the same browser reports 32 ms once it
+is; a Bluetooth device switched to mid-session was invisible to it for the
+same reason. Auto now re-reads every second. The rig cannot see the ear,
+so the ~45 ms of media "late" it now reports at 2.75× is that compensation
+being applied against a fake sink, not an error. Note the rig measures
+against the audio clock only; output latency is downstream of it.
+
 ## Open items
 
 1. **Feed Kokoro per-word phonemes instead of text** — the big one.
