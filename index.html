@@ -3902,8 +3902,10 @@ function setSentence(sIdx, keepWord = false, hold = false) {
   if (!sent) return;
   if (S.sentHl) sentClass(sent, true);
   if (!keepWord) S.curWord = firstSpokenWord(sent);
-  if (!hold) highlightWord(S.curWord, !keepWord);
-  maybeScroll(S.words[S.curWord]?.el);
+  /* on a hold the paint, and the scroll that comes with it, happen when the
+     tick reaches the first onset — scrolling now would glide toward a word
+     that is not lit yet and could carry the lit one off-screen (Codex, #24) */
+  if (!hold) { highlightWord(S.curWord, !keepWord); maybeScroll(S.words[S.curWord]?.el); }
   updateProgress();
   saveReadingProgress();
 }
@@ -3999,7 +4001,7 @@ function speakNative(sentIdx, fromWord) {
     idxs.push(i);
     text += spokenOfWord(S.words[i]) + (i < sent.end - 1 ? ' ' : '');
   }
-  if (!text.trim()) return advanceSentence(1, true);
+  if (!text.trim()) return advanceSentence(1, true, true);
 
   const token = ++S.utterToken;
   nativeUtter = { token, idxs, offsets, lastWi: 0 };
@@ -4146,7 +4148,7 @@ function speakDevice(sentIdx, fromWord) {
     idxs.push(i);
     text += spokenOfWord(S.words[i]) + (i < sent.end - 1 ? ' ' : '');
   }
-  if (!text.trim()) return advanceSentence(1, true);
+  if (!text.trim()) return advanceSentence(1, true, true);
 
   const token = ++S.utterToken;
   S.boundarySeen = false;
@@ -4248,7 +4250,7 @@ function speakDevice(sentIdx, fromWord) {
       return;
     }
     if (S.speechErrAt == null) S.speechErrAt = sentIdx;
-    advanceSentence(1, true);
+    advanceSentence(1, true, true);
   };
 
   synth.cancel();
@@ -5671,6 +5673,14 @@ function naTickStart() {
 function naTick() {
   const P = S.audioPlay;
   if (!P || !S.playing) { if (P) P.ticking = false; return; }
+  /* v6.33.1 — a paused element must never move the highlight or the
+     sentence. A frame that lands between a Next-while-playing (the element
+     is paused, S.curSent already moved on) and the next clip's play() used
+     to find this play's old sentence, set S.curSent back to it, and make
+     speakNeural abort on its own sentence guard — playback simply stopped.
+     Cached sentences never left a frame's gap; an uncached one did. 'play'
+     restarts the loop. */
+  if (NA.paused || NA.ended) { P.ticking = false; return; }
   /* what you are HEARING right now, which trails the audio clock by the
      output latency (see karaokeLagSec) */
   const ct = Math.max(0, naMediaPos(P) - karaokeLagSec());
@@ -5871,7 +5881,7 @@ async function batchNext() {
   /* end of document, or a chapter boundary under the sleep timer — let the
      normal path handle its finish/goodnight messaging */
   if (!run.length || (S.sleep.mode === 'chapter' && chapterOf(run[0]) !== chapterOf(S.curSent))) {
-    advanceSentence(1, true);
+    advanceSentence(1, true, true);
     return;
   }
   if (run.length === 1) { setSentence(run[0]); if (S.playing) playCurrent(); return; }
@@ -6161,13 +6171,18 @@ function advanceAfterBreather() {
     ? Math.round(440 * S.breather / Math.max(0.6, S.rate)) : 0;
   if (gapMs > 0 && S.playing) {
     const tok = ++S.breatherToken;
-    setTimeout(() => { if (tok === S.breatherToken && S.playing) advanceSentence(1, true); }, gapMs);
+    setTimeout(() => { if (tok === S.breatherToken && S.playing) advanceSentence(1, true, true); }, gapMs);
   } else {
-    advanceSentence(1, true);
+    advanceSentence(1, true, true);
   }
 }
 
-function advanceSentence(dir, keepPlaying) {
+/* auto (v6.33.1): true when playback itself moved on — breather timer,
+   batch end, an engine skipping an empty or failed sentence. Only those
+   hold the highlight on the old word until the new audio arrives; a Next
+   button or a remote skip is a manual action and paints at once (Codex,
+   #24). Inferring it from S.playing treated Next-while-playing as automatic. */
+function advanceSentence(dir, keepPlaying, auto = false) {
   let next = S.curSent + dir;
   if (next >= 0 && next < S.sentences.length) {
     const p = seekPlayable(next, dir);           // hop over code blocks / skim-skipped sentences
@@ -6187,7 +6202,7 @@ function advanceSentence(dir, keepPlaying) {
     toast('🌙 End of chapter — pausing here. Good night.');
     return;
   }
-  setSentence(next, false, keepPlaying && S.playing);
+  setSentence(next, false, auto && keepPlaying && S.playing);
   if (keepPlaying && S.playing) playCurrent();
 }
 

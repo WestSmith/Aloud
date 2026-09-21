@@ -26,6 +26,11 @@
            "ticks per frame" must stay ~1: >1 means leaked rAF chains.
    Env:    N=60 RUN_MS=40000 for a long run; PW / CHROME to point at
            another Playwright package / Chromium binary.
+           PAUSE=1 pauses and resumes mid-sentence through togglePlay and
+           reports words lit early in the 1.5 s after the resume (must be 0).
+           NEXT=1 presses Next mid-sentence while playing and reports how
+           long the new sentence's first word took to paint (must be a few
+           ms, and the run must play on — "final" shows where it ended).
 
    Measured 2026-09-21 (cause 11 in HANDOFF-karaoke-sync.md):
      v6.30.0  2.75× load 0: lit-before-audio 18   (2 per sentence start)
@@ -33,7 +38,13 @@
      v6.31.0  2.75× load 0/8, 1× , 4× load 8: 0   late mean 15ms max 89ms
      v6.32.1  2.75×: punctuation-only painted 5, first words early 19 of 10
      v6.33.0  2.75×: punctuation-only painted 0, first words early 1 of 10
-              (the press-play paint), every first word still painted */
+              (the press-play paint), every first word still painted
+     v6.33.1  PAUSE: 0 early after resume (old build also 0 — Codex's #20
+              scenario did not reproduce here; Chromium jumps currentTime at
+              play() on resume, 0.71 → 0.918). NEXT: first word 79 ms after
+              the press on v6.33.0 (it was holding), 12–15 ms on v6.33.1;
+              a naTick-on-paused-element race that stopped playback after
+              Next when the next sentence was not cached is fixed. */
 import { createRequire } from 'node:module';
 const PW = process.env.PW || '/opt/node22/lib/node_modules/playwright/package.json';
 const { chromium } = createRequire(PW)('playwright');
@@ -49,7 +60,7 @@ const text = Array.from({ length: +(process.env.N || 12) }, (_, i) =>
   `Sentence number ${i + 1} carries eight plain words here . Another short line follows it quickly now.`).join(' ');
 await page.evaluate(t => { $('paste-input').value = t; $('paste-read').click(); }, text);
 await page.waitForFunction(() => S.sentences.length > 10);
-await page.evaluate(ms => { window.__RUN_MS = ms; }, +(process.env.RUN_MS || 9000));
+await page.evaluate(([ms, pause, next]) => { window.__RUN_MS = ms; window.__PAUSE = pause; window.__NEXT = next; }, [+(process.env.RUN_MS || 9000), !!process.env.PAUSE, !!process.env.NEXT]);
 const res = await page.evaluate(async ({ RATE, LOAD }) => {
   const log = [], ev = [];
   const T0 = performance.now();
@@ -102,10 +113,24 @@ const res = await page.evaluate(async ({ RATE, LOAD }) => {
   requestAnimationFrame(frameCounter);
   setSentence(0);
   playCurrent();
+  /* PAUSE mode: an element-level pause/resume mid-sentence via togglePlay,
+     the path Codex flagged on #20 (P.lastCt stale across a pause) */
+  /* NEXT mode: press the Next button mid-sentence while playing — a manual
+     skip must paint the new sentence's first word at once (Codex, #24) */
+  if (window.__NEXT) {
+    await new Promise(r => setTimeout(r, 1200));
+    $('btn-next').click(); ev.push({ t: now(), e: 'USER-NEXT', ct: +na.currentTime.toFixed(3), rs: na.readyState, rolling: !!S.audioPlay?.rolling });
+  }
+  if (window.__PAUSE) {
+    await new Promise(r => setTimeout(r, 1200));
+    togglePlay(); ev.push({ t: now(), e: 'USER-PAUSE', ct: +na.currentTime.toFixed(3), rs: na.readyState, rolling: !!S.audioPlay?.rolling });
+    await new Promise(r => setTimeout(r, 700));
+    togglePlay(); ev.push({ t: now(), e: 'USER-RESUME', ct: +na.currentTime.toFixed(3), rs: na.readyState, rolling: !!S.audioPlay?.rolling });
+  }
   await new Promise(r => setTimeout(r, +(window.__RUN_MS || 9000)));
   window.__perFrame = perFrame;
   pauseAll();
-  return { log, ev, sentences: S.sentences.map(s => [s.start, s.end]), perFrame: window.__perFrame, curSent: S.curSent, lag: { det: detectOutputLatency(), base: audioLagCtx?.baseLatency, out: audioLagCtx?.outputLatency, state: audioLagCtx?.state, karaokeLag: S.karaokeLag } };
+  return { log, ev, sentences: S.sentences.map(s => [s.start, s.end]), perFrame: window.__perFrame, curSent: S.curSent, playing: S.playing, paused: na.paused, ended: na.ended, src: !!na.src, lag: { det: detectOutputLatency(), base: audioLagCtx?.baseLatency, out: audioLagCtx?.outputLatency, state: audioLagCtx?.state, karaokeLag: S.karaokeLag } };
 }, { RATE, LOAD });
 await browser.close();
 // analyse: for each highlight, true media position at that instant is na.currentTime (live in Chrome).
@@ -134,6 +159,21 @@ const tEnd = res.ev[s1]?.t || 0;
 for (const h of res.log.filter(h => h.t > tEnd - 50 && h.t < tEnd + 700)) console.log('  ', JSON.stringify(h));
 
 console.log('lag', JSON.stringify(res.lag));
+const nextAt = res.ev.find(e => e.e === 'USER-NEXT')?.t;
+if (nextAt != null) {
+  const p = res.log.find(h => h.t >= nextAt && h.first);
+  console.log(`after Next: first word of the new sentence painted ${p ? (p.t - nextAt).toFixed(1) + ' ms later' : 'NEVER'}`);
+  for (const e of res.ev.filter(e => e.t >= nextAt - 50 && e.t < nextAt + 2500)) console.log('  ev', JSON.stringify(e));
+  for (const h of res.log.filter(h => h.t >= nextAt - 50 && h.t < nextAt + 2500)) console.log('  hl', JSON.stringify(h));
+  console.log('  final', JSON.stringify({ playing: res.playing, curSent: res.curSent, paused: res.paused, ended: res.ended, src: res.src }));
+}
+const resumeAt = res.ev.find(e => e.e === 'USER-RESUME')?.t;
+if (resumeAt != null) {
+  const after = res.log.filter(h => h.t >= resumeAt && h.t < resumeAt + 1500 && h.onset != null);
+  const early = after.filter(h => h.onset - h.ct > 0.03);
+  console.log(`after resume: ${after.length} paints, ${early.length} before their audio`, early.map(h => `${h.text}@ct${h.ct}/onset${h.onset}`).join(' '));
+  for (const e of res.ev.filter(e => e.t >= resumeAt - 800 && e.t < resumeAt + 600)) console.log('  ', JSON.stringify(e));
+}
 const pf = res.perFrame || [];
 const q = n => pf.slice(Math.max(0, n - 30), n).reduce((a, b) => a + b, 0) / Math.min(30, n);
 console.log(`ticks per frame: at 1s ${q(60).toFixed(1)}, at 5s ${q(300).toFixed(1)}, at 20s ${q(1200).toFixed(1)}, at end ${q(pf.length).toFixed(1)}; sentences played ${res.curSent + 1}`);
