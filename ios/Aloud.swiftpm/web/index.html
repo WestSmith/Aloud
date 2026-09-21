@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.31.0">
+<meta name="aloud-version" content="v6.32.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -5591,11 +5591,15 @@ function naMediaPos(P) {
    reports for the output device; the chips let you dial it by ear. */
 let audioLagCtx = null, audioLagDetected = null, audioLagProbeAt = 0;
 function detectOutputLatency() {
-  if (audioLagDetected !== null) return audioLagDetected;
-  /* the figure only becomes available once the context is running, so keep
-     re-probing — but at most once a second, since naTick asks every frame */
+  /* Re-read every second, always. v6.31.0 and earlier froze the first figure
+     the browser ever reported: a reader who put AirPods on a minute into a
+     chapter (or whose Mac switched output to them on its own) kept the
+     built-in speakers' ~10 ms for the whole session, and at 2.75× the
+     150–250 ms Bluetooth adds is a word or two lit before it is heard —
+     "only after a few minutes of listening" (2026-09-21). outputLatency
+     tracks the current output device, so the latest read is the right one. */
   const now = performance.now();
-  if (now - audioLagProbeAt < 1000) return null;
+  if (now - audioLagProbeAt < 1000) return audioLagDetected;
   audioLagProbeAt = now;
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -5605,6 +5609,7 @@ function detectOutputLatency() {
        buffer and is the best fallback where outputLatency is unreported */
     const l = audioLagCtx.outputLatency || audioLagCtx.baseLatency || 0;
     if (l > 0 && l < 1) audioLagDetected = Math.round(l * 1000);
+    else if (audioLagDetected === null && audioLagCtx.state === 'running') audioLagDetected = 0;
   } catch { audioLagDetected = 0; }
   return audioLagDetected;   // null until a real number turns up
 }
