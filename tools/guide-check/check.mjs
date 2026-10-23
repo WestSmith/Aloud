@@ -77,7 +77,10 @@ try {
         await exercise(frame,expected);
         const before=await restoredSignature(frame,expected);
         // Verify actual parent-side shim state, not raw localStorage belonging to the file page.
-        if(expected.done||expected.mode||expected.collapse){await page.waitForFunction(()=>Object.keys(store.get(S.frame.lsKey,{})).length>0);const storage=await page.evaluate(()=>JSON.stringify(store.get(S.frame.lsKey,{})));assert(storage!=='{}');
+        if(expected.done||expected.mode||expected.collapse){
+          const snapshot=await frame.evaluate(()=>Object.fromEntries(Array.from({length:localStorage.length},(_,i)=>{const key=localStorage.key(i);return[key,localStorage.getItem(key)];})));
+          await page.waitForFunction(snapshot=>{const saved=store.get(S.frame.lsKey,{});return Object.keys(saved).length===Object.keys(snapshot).length&&Object.keys(snapshot).every(key=>Object.hasOwn(saved,key)&&saved[key]===snapshot[key]);},snapshot);
+          const storage=await page.evaluate(()=>JSON.stringify(store.get(S.frame.lsKey,{})));assert(storage!=='{}');
           await page.locator('#btn-library').click();await page.reload();await page.locator('.rr-open').first().click();await page.waitForFunction(()=>S.frame?.ready);
           const reopened=await page.locator('#content iframe').elementHandle().then(el=>el.contentFrame());assert.equal(await restoredSignature(reopened,expected),before,'Guide UI did not restore saved state');assert.equal(await page.evaluate(()=>JSON.stringify(store.get(S.frame.lsKey,{}))),storage,'Shim state lost on reload/reopen');
         }
