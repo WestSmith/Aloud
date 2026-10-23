@@ -68,9 +68,9 @@ try {
     await rawContext.close();
     for(const interactive of [true,false]){
       checking = path.basename(file) + ' at ' + viewport.width + 'px / ' + (interactive ? 'Interactive' : 'read-only');
-      const context=await browser.newContext({viewport,serviceWorkers:'block'});const errors=[];
-      await context.route('**/*',route=>new URL(route.request().url()).origin===origin?route.continue():route.abort());
-      await context.addInitScript(flag=>{localStorage.setItem('aloud.engine',JSON.stringify('device'));localStorage.setItem('aloud.htmlInteractive',JSON.stringify(flag));},interactive);
+      const context=await browser.newContext({viewport});const errors=[];
+      await context.route('**/*',route=>{const url=new URL(route.request().url());return url.origin===origin&&url.pathname!=='/sw.js'?route.continue():route.abort();});
+      await context.addInitScript(flag=>{if(window!==window.top)return;try{localStorage.setItem('aloud.engine',JSON.stringify('device'));localStorage.setItem('aloud.htmlInteractive',JSON.stringify(flag));}catch{}},interactive);
       const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(origin);await open(page,file,interactive);
       if(interactive){
         const frame=await page.locator('#content iframe').elementHandle().then(el=>el.contentFrame());assert(frame);
