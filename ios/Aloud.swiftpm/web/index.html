@@ -4904,7 +4904,7 @@ async function prepareCachedKokoro() {
 function loadKokoro(cachedModel = null) {
   if (!NATIVE?.nativeKokoro && (typeof Worker !== 'function' || typeof WebAssembly === 'undefined')) {
     S.kokoro.state = 'error';
-    pauseAll();
+    pauseAll(); NATIVE?.audioSession?.(false);
     renderKokoroStatus('Kokoro needs Web Workers and WebAssembly, which are unavailable in this browser. Open Voice and choose a built-in voice.', null);
     return Promise.resolve(false);
   }
@@ -4963,14 +4963,17 @@ function loadKokoro(cachedModel = null) {
       S.kokoro.state = 'ready'; S.kokoro.stage = 'ready';
       renderKokoroStatus('Kokoro is ready. Completed model files stay on this device; browser storage may be cleared by the OS.', 100);
       setTimeout(() => { if (owner === kokoroSetupId && S.kokoro.state === 'ready') hideKokoroStatus(); }, 3500);
-      if (S.playing && S.engine === 'neural') playCurrent(S.curWord);
+      if (S.playing && S.engine === 'neural') {
+        if (rsvpSilentActive()) playCurrent(S.curWord);
+        else speakNeural(S.curSent, S.curWord);
+      }
       return true;
     } catch (err) {
       if (owner !== kokoroSetupId) return false;
       store.set('nqLoadGuard', null);
       resetNeuralEngine();
       S.kokoro.state = 'error'; S.kokoro.stage = 'error';
-      if (S.engine === 'neural') pauseAll();
+      if (S.engine === 'neural') { pauseAll(); NATIVE?.audioSession?.(false); }
       renderKokoroStatus(`Kokoro setup failed: ${String(err?.message || err).slice(0, 240)} Your voice choice is unchanged.`, null);
       return false;
     } finally {
@@ -5913,6 +5916,7 @@ async function speakNeural(sentIdx, fromWord) {
     na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) { na.currentTime = seekTo; P.lastCt = na.currentTime; } }, { once: true });
   }
   try {
+    NATIVE?.audioSession?.(true);
     await na.play();
   } catch (e) {
     if (genToken !== S.neuralGenToken || S.audioPlay !== P || !S.playing) return;
@@ -6031,6 +6035,7 @@ async function speakNeuralStitched(run) {
     : tms.every(t => t === 'estimated') ? 'estimated'
     : 'mixed');
   try {
+    NATIVE?.audioSession?.(true);
     await na.play();
   } catch (e) {
     console.warn(e);
@@ -6192,7 +6197,7 @@ function renderRsvpMode() {
 function playCurrent(fromWord) {
   if (!S.sentences.length) return;
   stopVoicePreview();
-  if (!rsvpSilentActive()) NATIVE?.audioSession?.(true);
+  if (!rsvpSilentActive() && (S.engine !== 'neural' || S.kokoro.state === 'ready')) NATIVE?.audioSession?.(true);
   S.breatherToken++;          // manual (re)start cancels any pending paragraph gap
   S.playing = true;
   setPlayIcon(true);
@@ -6872,6 +6877,7 @@ $('kokoro-start').addEventListener('click', () => loadKokoro());
 $('kokoro-retry').addEventListener('click', () => loadKokoro());
 $('kokoro-cancel').addEventListener('click', () => {
   pauseAll(); stopVoicePreview(); resetNeuralEngine();
+  NATIVE?.audioSession?.(false);
   store.set('nqLoadGuard', null);
   S.kokoro.state = 'cancelled'; S.kokoro.stage = 'cancelled';
   renderKokoroStatus('Setup cancelled. Completed files stay cached; Retry resumes where supported. Your voice choice is unchanged.', null);
