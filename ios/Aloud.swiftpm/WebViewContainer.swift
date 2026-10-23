@@ -10,6 +10,14 @@ struct WebViewContainer: UIViewRepresentable {
     let source: URL
     let onFatalError: (String) -> Void
 
+    static var backingColor: UIColor {
+        UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 18.0 / 255, green: 18.0 / 255, blue: 26.0 / 255, alpha: 1)
+                : UIColor(red: 250.0 / 255, green: 249.0 / 255, blue: 246.0 / 255, alpha: 1)
+        }
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(shellOrigin: source, onFatalError: onFatalError)
     }
@@ -46,7 +54,7 @@ struct WebViewContainer: UIViewRepresentable {
         webView.scrollView.maximumZoomScale = 1
         webView.scrollView.pinchGestureRecognizer?.isEnabled = false
         webView.isOpaque = false
-        webView.backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.10, alpha: 1) // matches theme_color #12121a
+        webView.backgroundColor = Self.backingColor
         webView.scrollView.backgroundColor = webView.backgroundColor
 
         if #available(iOS 16.4, *) {
@@ -134,6 +142,16 @@ struct WebViewContainer: UIViewRepresentable {
             else { return }
 
             switch cmd {
+            case "appearance":
+                let style: UIUserInterfaceStyle
+                switch body["value"] as? String {
+                case "light": style = .light
+                case "dark": style = .dark
+                default: style = .unspecified
+                }
+                webView?.window?.overrideUserInterfaceStyle = style
+                webView?.window?.rootViewController?.setNeedsStatusBarAppearanceUpdate()
+
             case "speak":
                 let token = body["token"] as? Int ?? 0
                 let text = body["text"] as? String ?? ""

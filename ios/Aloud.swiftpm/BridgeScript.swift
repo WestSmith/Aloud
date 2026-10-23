@@ -88,6 +88,7 @@ enum BridgeScript {
         stop:   function () { post({ cmd: 'stop' }); },
         pause:  function () { post({ cmd: 'pause' }); },
         resume: function () { post({ cmd: 'resume' }); },
+        appearance: function (value) { post({ cmd: 'appearance', value: value }); },
 
         /* Resolves with [{id, name, lang, quality, gender}, ...] */
         listVoices: function () {
