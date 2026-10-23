@@ -2004,7 +2004,7 @@ function migrateDocumentState(legacy, key) {
   if (previous) {
     const current = recent.find(r => r.key === key);
     const migrated = { ...previous, ...current, key, noBlob: current?.noBlob ?? true };
-    store.set('recent', [migrated, ...recent.filter(r => r.key !== legacy && r.key !== key)]);
+    store.set('recent', recent.filter(r => r.key !== key).map(r => r.key === legacy ? migrated : r));
   }
   if (pendingLibraryRemoval?.record.key === legacy) pendingLibraryRemoval.record = { ...pendingLibraryRemoval.record, key };
   // Keep legacy values as a recovery copy. A crash before this marker can rerun safely.
