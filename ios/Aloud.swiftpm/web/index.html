@@ -6873,10 +6873,8 @@ function applyZoom(save = true, recaptureHtml = false) {
       pdf.pages.forEach(pg => { pg.canvas.width = pg.canvas.height = 0; });
       S.pdf.renderedOrder = [];
       pdf.resizing = false;
-      S.pdf.pages.forEach((pg, i) => {
-        const r = pg.div.getBoundingClientRect();
-        if (r.bottom > -1000 && r.top < window.innerHeight + 1000) renderPdfPage(i);
-      });
+      // Re-report intersections so already-nearby pages redraw through the same lazy path.
+      pdf.pages.forEach(pg => { pdf.io.unobserve(pg.div); pdf.io.observe(pg.div); });
     }, 260);
   }
 }
