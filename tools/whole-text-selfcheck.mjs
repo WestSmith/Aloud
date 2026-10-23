@@ -238,30 +238,34 @@ const cases = filter ? CASES.filter(([l]) => l.includes(filter)) : CASES;
 console.log('word-onset error of the SHIPPING path (whole-text phonemisation)');
 console.log('ground truth = the blob each token actually lands in, same clip\n');
 
-let worstAll = 0, allErrs = [], visible = 0;
+if (!cases.length) throw new Error('No matching cases — no measurement');
+let worstAll = 0, allErrs = [], visible = 0, measured = 0, negativeWorst = 0;
 for (const [label, text] of cases) {
   const tokens = text.split(/\s+/).filter(Boolean);
   const r = await runSentence(tokens);
-  if (!r) { console.log(`${label.padEnd(22)} nothing pronounceable`); continue; }
-  if (r.skip) { console.log(`${label.padEnd(22)} skipped (${r.skip})`); continue; }
-  if (!r.got) { console.log(`${label.padEnd(22)} aligner FAILED -> falls back to estimated`); continue; }
+  if (!r) throw new Error(label + ': nothing measured');
+  if (r.skip) throw new Error(label + ': no measurement: ' + r.skip);
+  if (!Array.isArray(r.got) || r.got.length !== tokens.length) throw new Error(label + ': missing/incomplete alignment');
   if (r.slipped) {
     /* Refusing to print a number is the whole point: an earlier revision of
        this walk missed an allophonic fusion ("of the" -> "ʌvðɪ" before a
        vowel), slipped one blob, and reported a confident 650ms error that was
        purely its own. An unreconciled walk means NO ground truth, not a
        finding. */
-    console.log(`${label.padEnd(22)} UNSCORED — blob walk did not reconcile; no ground truth`);
-    continue;
+    throw new Error(label + ': UNSCORED — blob walk did not reconcile; no ground truth');
   }
 
+  for (let i = 0; i < tokens.length; i++) if (r.truth[i] != null && !r.fused.has(i) && !Number.isFinite(r.got[i])) throw new Error(label + ': missing/non-finite comparable onset');
   const errs = [];
   for (let i = 0; i < tokens.length; i++) {
     if (r.fused.has(i)) continue;                        // unrecoverable by construction
     if (r.truth[i] == null || r.got[i] == null) continue;
     errs.push({ i, e: Math.abs(r.got[i] - r.truth[i]) });
   }
-  if (!errs.length) { console.log(`${label.padEnd(22)} no comparable tokens`); continue; }
+  if (errs.length < Math.ceil(tokens.length * 0.7) || errs.some(x => !Number.isFinite(x.e))) throw new Error(label + ': insufficient/invalid measured coverage');
+  measured++;
+  for (let i = 0; i < tokens.length - 1; i++) if (!r.fused.has(i) && r.truth[i] != null && r.got[i + 1] != null)
+    negativeWorst = Math.max(negativeWorst, Math.abs(r.got[i + 1] - r.truth[i]));
   errs.sort((a, b) => b.e - a.e);
   const worst = errs[0];
   const mean = errs.reduce((a, c) => a + c.e, 0) / errs.length;
@@ -280,3 +284,8 @@ for (const [label, text] of cases) {
 const mean = allErrs.length ? allErrs.reduce((a, c) => a + c, 0) / allErrs.length : 0;
 console.log(`\nacross ${allErrs.length} words: mean ${(mean * 1000).toFixed(0)}ms, worst ${(worstAll * 1000).toFixed(0)}ms`);
 console.log(`${visible} words off by more than 150ms (clearly visible desync)`);
+
+if (measured !== cases.length || !allErrs.length || negativeWorst <= 0.15 || worstAll > 0.001) {
+  console.error('FAIL: alignment error, insufficient coverage, or one-token negative control was not detected');
+  process.exitCode = 1;
+} else console.log('PASS: complete comparable coverage; one-token negative control correctly rejected');

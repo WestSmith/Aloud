@@ -9,7 +9,7 @@
 // Native Kokoro depends on MLX's C/C++/Metal targets, so the iPad Playgrounds
 // build service is not a supported compiler for this project.
 //
-// `AppleProductTypes` is only available in those two contexts (it is not part of
+// `AppleProductTypes` is provided by the Xcode app-package context (it is not part of
 // open-source SwiftPM), which is why a plain `swift build` from a terminal won't
 // work here. That is expected, not a misconfiguration.
 //
@@ -38,8 +38,8 @@ let package = Package(
             name: "Aloud",
             targets: ["AppModule"],
             bundleIdentifier: "com.westsmith.aloud",
-            displayVersion: "6.24.0",
-            bundleVersion: "13",
+            displayVersion: "6.38.0",
+            bundleVersion: "14",
             appIcon: .asset("AppIcon"),
             supportedDeviceFamilies: [.pad, .phone],
             supportedInterfaceOrientations: [
@@ -91,7 +91,8 @@ let package = Package(
                 // downloads the pinned BF16 model once, verifies its exact
                 // size and SHA-256, and keeps it in Application Support.
                 .copy("NativeKokoroAssets/voices.npz"),
-                .copy("NativeKokoroAssets/THIRD_PARTY_NOTICES.md")
+                .copy("NativeKokoroAssets/THIRD_PARTY_NOTICES.md"),
+                .copy("ThirdPartyLicenses.txt")
             ]
         )
     ]

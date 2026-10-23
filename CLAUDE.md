@@ -5,15 +5,16 @@ reading, and native PDF/HTML views.
 
 ## Shape of the repo
 
-`index.html` is the app — ~5,700 lines, ~2.1 MB, everything inline including a
+`index.html` is the app — one inline HTML file, everything inline including a
 bundled pdf.js. There is no build step and no bundler. It ships two ways from
 that one file:
 
 - **Web PWA** — GitHub Pages, deployed from `main` by `.github/workflows/pages.yml`.
   Live at <https://westsmith.github.io/Aloud/> (capital A; the lowercase path 404s).
-- **iOS app** — `ios/Aloud.swiftpm`, a Swift Playgrounds App package that opens
-  in Swift Playgrounds on an iPad *and* in Xcode on a Mac. It bundles a copy of
-  the web app and serves it from a loopback HTTP server. See `ios/README.md`.
+- **iOS app** — open `ios/Aloud.xcworkspace` in Xcode on a Mac. MLX native
+  targets are not supported by the iPad Swift Playgrounds build service. The
+  app bundles the web UI and serves it from a loopback HTTP server. See
+  `ios/README.md`.
 
 **The two are one codebase, deliberately.** The iOS app does not fork
 `index.html`; it bundles a byte-identical copy and injects `window.__aloudNative`.
@@ -27,8 +28,10 @@ Run `./ios/sync-web-assets.sh` and commit the refreshed copy under
 It is separate from `pages.yml` on purpose — a stale bundle must never block a
 web deploy.
 
-Bump `<meta name="aloud-version">` for anything user-visible. Nothing else
-tracks the version.
+Bump `<meta name="aloud-version">` for anything user-visible and keep
+`sw.js` VERSION (`aloud-` + that value), Package.swift displayVersion and the
+iOS README release line in step. Run `node tools/check-versions.mjs`; CI rejects
+drift. A changed worker VERSION rolls the shell cache even for HTML-only releases.
 
 Quick syntax check (there is no linter):
 
@@ -39,11 +42,11 @@ Quick syntax check (there is no linter):
 
 ### Declaration order is a real hazard
 
-The script is one long classic `<script>`, so a top-level `const`/`let`
-referenced by a function defined *earlier* in the file is a temporal-dead-zone
-`ReferenceError`, not a harmless `undefined`. Anything read by `pauseAll`,
-`setPlayIcon` or `loadKokoro` belongs up with the app state near the top —
-that is why `NATIVE`, `nativeUtter` and preview/setup ownership state live there.
+The app script is one long classic `<script>`. Defining a function before a
+`let`/`const` declaration is safe; **calling it before that binding's initializer
+runs** is a temporal-dead-zone `ReferenceError`. Inspect synchronous startup call
+paths, not just function-definition order. State read by early calls to
+`pauseAll`, `setPlayIcon` or `loadKokoro` belongs with the early app state.
 
 ## Karaoke sync — read the handoff before touching it
 
@@ -57,7 +60,8 @@ reasoned about instead of measured.
 
     node tools/karaoke-selfcheck.mjs              # must be 0 ms
     NOWARM=1 node tools/karaoke-selfcheck.mjs     # must be 0 ms, not optional
-    node tools/whole-text-fusion.mjs              # must be 0 hazards
+    node tools/whole-text-fusion.mjs              # diagnostic: known 1-of-4 fusion is expected
+    node tools/whole-text-selfcheck.mjs           # measures whole-text alignment; must be 0 ms
 
 The first two need espeak-ng, onnxruntime-node and the Kokoro model — setup is
 in the handoff. `whole-text-fusion.mjs` needs only espeak and answers a question
@@ -89,11 +93,18 @@ models prepare automatically on selection/launch; a required download waits for
 Start setup, Play or Preview. If Kokoro is unavailable, explain why and point to
 Voice so the user can explicitly choose another engine.
 
-## What this container cannot do
+## Release checks and environment limits
 
-Linux, no Mac, no Xcode, no Swift toolchain — the iOS app cannot be compiled or
-tested here, only written. It also cannot *listen*, so audio distortion needs a
-human ear. Everything else is measurable and should be measured.
+PR CI runs syntax, iOS sync, native token timing, version consistency, scoped
+offline/reset checks and the Chromium synthetic guide gate. See
+`tools/README-selfcheck.md`. Heavy ONNX/model checks stay local: run warm, NOWARM
+and whole-text alignment plus the fusion diagnostic before release. Fusions
+alone are not timing failures; missing measurements, non-zero alignment error
+or a broken negative control fail.
+
+Use the capabilities actually available in the session. Browser-engine tests and
+physical-device speech need independent verification when unavailable locally.
+A successful build cannot prove audible quality or lock-screen behavior.
 
 ## Merging is the assistant's job
 

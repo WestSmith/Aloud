@@ -9,7 +9,7 @@
    events), which the aligner self-checks cannot see.
 
    Setup:  the repo served on http://127.0.0.1:8765  (http-server -p 8765 -s .)
-           Playwright (any 1.5x) — edit PW below if it is not the global one
+           Playwright from tools/guide-check/ (PW overrides its package.json path)
    Run:    node tools/neural-clock-probe.mjs [rate] [busyWorkers] [file]
            node tools/neural-clock-probe.mjs 2.75 0
            node tools/neural-clock-probe.mjs 2.75 8      # CPU contention
@@ -46,19 +46,21 @@
               a naTick-on-paused-element race that stopped playback after
               Next when the next sentence was not cached is fixed. */
 import { createRequire } from 'node:module';
-const PW = process.env.PW || '/opt/node22/lib/node_modules/playwright/package.json';
+const PW = process.env.PW || new URL('./guide-check/node_modules/playwright/package.json', import.meta.url);
 const { chromium } = createRequire(PW)('playwright');
 const RATE = +(process.argv[2] || 2.75), LOAD = +(process.argv[3] || 0), FILE = process.argv[4] || 'index.html';
 const browser = await chromium.launch({ executablePath: process.env.CHROME || undefined,
   args: ['--autoplay-policy=no-user-gesture-required'] });
 const page = await browser.newPage();
-page.on('pageerror', e => console.log('PAGEERROR', e.message));
+const pageErrors = [];
+page.on('pageerror', e => { pageErrors.push(e.message); console.log('PAGEERROR', e.message); });
 page.on('console', m => { if (/PAUSE|error|warn|toast/i.test(m.text()) || m.type()!=='log') console.log('CONSOLE', m.type(), m.text().slice(0,300)); });
+await page.addInitScript(() => localStorage.setItem('aloud.engine', JSON.stringify('device')));
 await page.goto('http://127.0.0.1:8765/' + FILE);
 await page.waitForFunction(() => typeof S === 'object' && S.words);
 const text = Array.from({ length: +(process.env.N || 12) }, (_, i) =>
   `Sentence number ${i + 1} carries eight plain words here . Another short line follows it quickly now.`).join(' ');
-await page.evaluate(t => { $('paste-input').value = t; $('paste-read').click(); }, text);
+await page.evaluate(async t => { if (!await openFile(new File([t], 'clock-probe.txt', { type: 'text/plain' }))) throw new Error('Probe document did not open'); }, text);
 await page.waitForFunction(() => S.sentences.length > 10);
 await page.evaluate(([ms, pause, next]) => { window.__RUN_MS = ms; window.__PAUSE = pause; window.__NEXT = next; }, [+(process.env.RUN_MS || 9000), !!process.env.PAUSE, !!process.env.NEXT]);
 const res = await page.evaluate(async ({ RATE, LOAD }) => {
@@ -136,6 +138,7 @@ await browser.close();
 // analyse: for each highlight, true media position at that instant is na.currentTime (live in Chrome).
 // starts[w-rel] > ct + 0.03 means the word was lit before its audio was reached.
 const W = 0.28, LEAD = 0.40;
+const isAhead = h => h.onset - h.ct > 0.03;
 let phantom = 0, bySent = {}, punctPaints = 0, firstEarly = 0;
 for (const h of res.log) {
   if (h.onset == null) continue;
@@ -144,7 +147,7 @@ for (const h of res.log) {
   if (/^[^\p{L}\p{N}]+$/u.test(h.text || '')) punctPaints++;
   /* a first word painted while the element is still on the PREVIOUS clip (ended) or before its own onset */
   if (h.first && (h.ended || h.paused || ahead > 0.03)) firstEarly++;
-  if (ahead > 0.03 && rel > 0 && !h.paused) { phantom++; bySent[h.wsent] = (bySent[h.wsent] || 0) + 1; }
+  if (isAhead(h) && rel > 0 && !h.paused) { phantom++; bySent[h.wsent] = (bySent[h.wsent] || 0) + 1; }
 }
 for (const h of res.log.filter(h => h.first && (h.ended || h.paused || (h.onset - h.ct) > 0.03))) console.log('  early-first', JSON.stringify(h));
 console.log(`punctuation-only tokens painted: ${punctPaints}; first words painted before their audio: ${firstEarly}; first words painted at all: ${res.log.filter(h => h.first).length} of ${res.curSent + 1} sentences`);
@@ -177,3 +180,17 @@ if (resumeAt != null) {
 const pf = res.perFrame || [];
 const q = n => pf.slice(Math.max(0, n - 30), n).reduce((a, b) => a + b, 0) / Math.min(30, n);
 console.log(`ticks per frame: at 1s ${q(60).toFixed(1)}, at 5s ${q(300).toFixed(1)}, at 20s ${q(1200).toFixed(1)}, at end ${q(pf.length).toFixed(1)}; sentences played ${res.curSent + 1}`);
+
+const measured = res.log.filter(h => Number.isFinite(h.onset) && Number.isFinite(h.ct) && !h.first);
+const unique = new Set(measured.map(h => h.w)).size;
+const negativeDetected = measured.some(h => isAhead({ ...h, onset: h.ct + 0.5 }));
+const resumes = resumeAt == null ? null : measured.filter(h => h.t >= resumeAt && h.t < resumeAt + 1500);
+const nextPaint = nextAt == null ? null : res.log.find(h => h.first && h.t >= nextAt - 20 && h.t < nextAt + 100);
+if (pageErrors.length || unique < 8 || !lates.length || !res.ev.some(e => e.e === 'ended') || !negativeDetected
+    || phantom || punctPaints || firstEarly > 1 + (process.env.NEXT ? 1 : 0)
+    || (process.env.NEXT && !nextPaint)
+    || (process.env.PAUSE && (!resumes?.length || resumes.some(isAhead)))
+    || !pf.length || q(pf.length) > 1.2) {
+  console.error('Clock probe FAILED: timing error, missing coverage/boundary, page error or negative control failure');
+  process.exitCode = 1;
+} else console.log('Clock probe PASS: measured coverage and early-paint negative control verified');

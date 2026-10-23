@@ -167,16 +167,21 @@ const CASES = [
 
 console.log('word-onset error of the shipping aligner, against exact ground truth');
 console.log('(same audio, same duration tensor — the only difference is how onsets are derived)\n');
-let worst = 0, allErrs = [];
+let worst = 0, allErrs = [], negativeWorst = 0, measured = 0;
 for (const [label, text] of CASES) {
   const tokens = text.split(/\s+/).filter(Boolean);
   const r = await runSentence(tokens);
-  if (!r) { console.log(`${label.padEnd(22)} skipped (too long)`); continue; }
-  if (!r.got) { console.log(`${label.padEnd(22)} aligner FAILED -> would fall back to estimated`); continue; }
+  if (!r) throw new Error(label + ': no measurement (context/duration mismatch)');
+  if (!Array.isArray(r.got) || r.got.length !== tokens.length) throw new Error(label + ': missing/incomplete alignment');
+  if (process.env.SELFTEST) r.got = r.got.map((_, i) => r.got[Math.min(i + 1, r.got.length - 1)]);
+  for (let i = 0; i < tokens.length; i++) if (r.truth[i] != null && !Number.isFinite(r.got[i])) throw new Error(label + ': missing/non-finite comparable onset');
   const errs = [];
   for (let i = 0; i < tokens.length; i++)
     if (r.truth[i] != null && r.got[i] != null) errs.push({ i, e: Math.abs(r.got[i] - r.truth[i]) });
-  if (!errs.length) continue;
+  if (errs.length < Math.ceil(tokens.length * 0.7) || errs.some(x => !Number.isFinite(x.e))) throw new Error(label + ': insufficient/invalid measured coverage');
+  measured++;
+  for (let i = 0; i < r.truth.length - 1; i++) if (r.truth[i] != null && r.got[i + 1] != null)
+    negativeWorst = Math.max(negativeWorst, Math.abs(r.got[i + 1] - r.truth[i]));
   const mean = errs.reduce((a, c) => a + c.e, 0) / errs.length;
   const mx = errs.reduce((a, c) => c.e > a.e ? c : a, errs[0]);
   allErrs.push(...errs.map(x => x.e));
@@ -201,3 +206,8 @@ for (const [label, text] of CASES) {
 const m = allErrs.reduce((a, c) => a + c, 0) / (allErrs.length || 1);
 console.log(`\nacross ${allErrs.length} words: mean ${(m * 1000).toFixed(0)}ms, worst ${(worst * 1000).toFixed(0)}ms`);
 console.log(allErrs.filter(e => e > 0.15).length + ' words off by more than 150ms (clearly visible desync)');
+
+if (measured !== CASES.length || !allErrs.length || negativeWorst <= 0.15 || worst > 0.001) {
+  console.error('FAIL: alignment error, insufficient coverage, or one-token negative control was not detected');
+  process.exitCode = 1;
+} else console.log('PASS: complete coverage; one-token negative control correctly rejected');
