@@ -17,6 +17,7 @@
 <script>(() => {
   let theme = 'system';
   try { theme = JSON.parse(localStorage.getItem('aloud.theme')) || theme; } catch {}
+  window.__aloudNative?.appearance?.(theme);
   const light = theme === 'light' || (theme === 'system' && matchMedia('(prefers-color-scheme: light)').matches);
   document.documentElement.dataset.theme = light ? 'light' : 'dark';
   document.documentElement.style.colorScheme = light ? 'light' : 'dark';
@@ -2514,6 +2515,7 @@ const KARAOKE_SHADOW_CSS = `
   :host([data-paused]) .aloud-w.speaking { background: none !important; color: inherit !important; text-decoration: underline; text-underline-offset: 4px; }
   /* SVG has no background box: a diagram label marks the spoken word by colour */
   tspan.aloud-w.speaking { background: none !important; fill: #705fe9 !important; }
+  :host([data-paused]) tspan.aloud-w.speaking { fill: inherit !important; text-decoration: underline; }
 `;
 
 /* ====================================================================
@@ -2667,7 +2669,8 @@ function ALOUD_FRAME_AGENT(cfg) {
     /* SVG has no background box, so a diagram label marks the spoken word by
        colour instead. Weight is left alone: it would reflow the figure. */
     'tspan.' + CLS + '.speaking{background:none!important;fill:#705fe9!important}' +
-    'html.aloud-paused .' + CLS + '.speaking{background:none!important;color:inherit!important;text-decoration:underline;text-underline-offset:4px}';
+    'html.aloud-paused .' + CLS + '.speaking{background:none!important;color:inherit!important;text-decoration:underline;text-underline-offset:4px}' +
+    'html.aloud-paused tspan.' + CLS + '.speaking{fill:inherit!important;text-decoration:underline}';
   document.documentElement.classList.add('aloud-paused');
   document.head.appendChild(st);
 
@@ -7042,6 +7045,7 @@ function applyAppearance() {
   document.querySelector('meta[name="theme-color"]').content = light ? '#faf9f6' : '#12121a';
   document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]').content = light ? 'default' : 'black-translucent';
   $('theme-select').value = choice;
+  NATIVE?.appearance?.(choice);
 }
 $('theme-select').addEventListener('change', e => { store.set('theme', e.target.value); applyAppearance(); });
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyAppearance);

@@ -6,15 +6,14 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            // Matches the web app's --bg so there is no white flash between the
-            // launch screen and the first paint.
-            Color(red: 0.07, green: 0.07, blue: 0.10)
+            // Matches --bg in the effective native/web appearance.
+            Color(uiColor: WebViewContainer.backingColor)
                 .ignoresSafeArea()
 
             switch model.state {
             case .starting:
                 ProgressView()
-                    .tint(.white)
+                    .tint(.primary)
                     .controlSize(.large)
 
             case .local(let url):
@@ -27,10 +26,10 @@ struct ContentView: View {
                 VStack(spacing: 12) {
                     Text("Aloud couldn't start")
                         .font(.headline)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.primary)
                     Text(message)
                         .font(.footnote)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
                 .padding(32)
