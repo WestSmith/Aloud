@@ -6289,7 +6289,8 @@ function advanceSentence(dir, keepPlaying, auto = false) {
   }
   if (next >= S.sentences.length) {
     seekSentence(S.sentences.length - 1, false);
-    if (S.sleep.mode === 'chapter') { sleepClear(); NATIVE?.audioSession?.(false); }
+    if (S.sleep.mode === 'chapter') sleepClear();
+    NATIVE?.audioSession?.(false);
     toast('🏁 Finished! That’s the end of the document.');
     return;
   }
@@ -7495,13 +7496,13 @@ function stopVoicePreview(endListening = false) {
     synth?.cancel();
     previewButton.textContent = 'Preview'; previewButton.setAttribute('aria-pressed', 'false');
     previewButton = null;
-    if (endListening && !document.body.classList.contains('document-open')) NATIVE?.clearNowPlaying?.();
+    if (endListening && !S.playing) NATIVE?.audioSession?.(false);
   }
 }
 async function previewVoice(engine, voice, text = 'Welcome to Aloud. This is a voice preview.', button) {
   const stopping = previewButton === button;
   pauseAll(); stopVoicePreview();
-  if (stopping) { if (!S.sentences.length) NATIVE?.clearNowPlaying?.(); return; }
+  if (stopping) { NATIVE?.audioSession?.(false); return; }
   const owner = voicePreviewToken;
   previewButton = button;
   button.textContent = 'Stop preview'; button.setAttribute('aria-pressed', 'true');
