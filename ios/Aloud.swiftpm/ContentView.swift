@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
 
@@ -27,10 +28,23 @@ struct ContentView: View {
                     Text("Aloud couldn't start")
                         .font(.headline)
                         .foregroundStyle(.primary)
+                    Text("Your saved documents have not been reset.")
+                        .font(.subheadline)
+                    HStack {
+                        Button("Retry") { model.retry() }
+                            .buttonStyle(.borderedProminent)
+                        Button("Copy diagnostics") { UIPasteboard.general.string = model.diagnostics }
+                            .buttonStyle(.bordered)
+                    }
                     Text(message)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                        .textSelection(.enabled)
+                    DisclosureGroup("Troubleshooting") {
+                        Text("Check free storage, then retry. If this keeps happening, reopen Aloud and include the diagnostic text when asking for help.")
+                            .font(.footnote)
+                    }
                 }
                 .padding(32)
             }

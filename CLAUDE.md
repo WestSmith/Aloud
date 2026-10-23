@@ -43,7 +43,7 @@ The script is one long classic `<script>`, so a top-level `const`/`let`
 referenced by a function defined *earlier* in the file is a temporal-dead-zone
 `ReferenceError`, not a harmless `undefined`. Anything read by `pauseAll`,
 `setPlayIcon` or `loadKokoro` belongs up with the app state near the top —
-that is why `NATIVE`, `nativeUtter` and the Kokoro cover flags live there.
+that is why `NATIVE`, `nativeUtter` and preview/setup ownership state live there.
 
 ## Karaoke sync — read the handoff before touching it
 
@@ -78,14 +78,16 @@ Three, behind `S.engine`:
   its first words drift. On iOS it only ever reaches Apple's compact voices.
 - `neural` — Kokoro via kokoro-js, weights from HuggingFace. Best quality;
   onsets read from the model's own durations, so sync is exact. Costs a
-  155–305 MB one-time download.
+  92–326 MB one-time browser model download (327 MB in the native app).
 - `native` — `AVSpeechSynthesizer`, **iOS app only**. Reaches Premium/Enhanced
   voices Safari cannot see, no download, real word-boundary callbacks.
 
-Do not silently substitute one for another. Swapping `neural` for `device`
-trades exact timing for estimated timing, which reads to a user as the sync bug
-returning — see `KOKORO_COVER_DELAY_MS` in `index.html` for the guard that
-exists because this was shipped and regressed twice.
+Fresh installs default to Kokoro; saved engine choices are preserved. Aloud never
+substitutes engines automatically. While Kokoro downloads or initializes, wait
+with visible setup progress, a loading play button and Cancel. Existing cached
+models prepare automatically on selection/launch; a required download waits for
+Start setup, Play or Preview. If Kokoro is unavailable, explain why and point to
+Voice so the user can explicitly choose another engine.
 
 ## What this container cannot do
 

@@ -63,8 +63,14 @@ final class EnglishFallbackNetwork {
     return phonemes
   }
   
-  func callAsFunction(_ word: MToken) -> (phoneme: String, rating: Int) {
+  func callAsFunction(_ word: MToken) throws -> (phoneme: String, rating: Int) {
     let tokenIds = graphemesToTokens(word.text)
+    // BART adds two to every positional index; reject before MLX can trap.
+    guard tokenIds.count <= model.encoderPositionalEmbedding.weight.shape[0] - 2 else {
+      throw NSError(domain: "Aloud.Pronunciation", code: 1, userInfo: [
+        NSLocalizedDescriptionKey: "A word is too long for the pronunciation model. Add a shorter custom pronunciation, then retry."
+      ])
+    }
     let inputIds = MLXArray(tokenIds).reshaped([1, tokenIds.count])
     let generatedIds = model.generate(inputIds: inputIds)
     let outputText = tokensToPhonemes(generatedIds.asArray(Int.self))

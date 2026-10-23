@@ -152,9 +152,10 @@ final public class EnglishG2P {
     linkRegex.enumerateMatches(in: input, options: [], range: fullRange) { match, _, _ in
       guard let m = match else { return }
 
-      let range = m.range
-      let start = input.index(input.startIndex, offsetBy: range.location)
-      let end = input.index(start, offsetBy: range.length)
+      // NSRegularExpression reports UTF-16 offsets, not Character offsets.
+      guard let range = Range(m.range, in: input) else { return }
+      let start = range.lowerBound
+      let end = range.upperBound
 
       result += String(input[lastEnd..<start])
       tokens.append(contentsOf: String(input[lastEnd..<start]).split(separator: " ").map(String.init))
@@ -394,7 +395,7 @@ final public class EnglishG2P {
   }
    
   // Turns the text into phonemes that can then be fed to text-to-speech (TTS) engine for converting to audio
-  public func phonemize(text: String, performPreprocess: Bool = true) -> (String, [MToken]) {
+  public func phonemize(text: String, performPreprocess: Bool = true) throws -> (String, [MToken]) {
     let pre: PreprocessTuple
     if performPreprocess {
         pre = self.preprocess(text: text)
@@ -417,7 +418,7 @@ final public class EnglishG2P {
         }
         
         if w.phonemes == nil {
-          let out = fallback(w)
+          let out = try fallback(w)
           w.phonemes = out.0
           w.`_`.rating = out.1
         }
@@ -464,7 +465,7 @@ final public class EnglishG2P {
         if shouldFallback {
           let token = mergeTokens(arr)
           let first = arr[0]
-          let out = fallback(token)
+          let out = try fallback(token)
           first.phonemes = out.0
           first.`_`.rating = out.1
           arr[0] = first

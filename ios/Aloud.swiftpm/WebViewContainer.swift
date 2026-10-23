@@ -86,6 +86,7 @@ struct WebViewContainer: UIViewRepresentable {
         private let shellOrigin: URL
         private let onFatalError: (String) -> Void
         private var kokoroEventHandlerID: UUID?
+        private let audioOwner = UUID()
 
         init(shellOrigin: URL, onFatalError: @escaping (String) -> Void) {
             self.shellOrigin = shellOrigin
@@ -105,11 +106,7 @@ struct WebViewContainer: UIViewRepresentable {
             }
 
             // Lock screen / headphone buttons drive the web app's transport.
-            AudioSession.shared.onPlay = { [weak self] in self?.remote("play") }
-            AudioSession.shared.onPause = { [weak self] in self?.remote("pause") }
-            AudioSession.shared.onTogglePlayPause = { [weak self] in self?.remote("toggle") }
-            AudioSession.shared.onNextTrack = { [weak self] in self?.remote("next") }
-            AudioSession.shared.onPreviousTrack = { [weak self] in self?.remote("prev") }
+            AudioSession.shared.register(owner: audioOwner) { [weak self] action in self?.remote(action) }
         }
 
         func detach() {
@@ -119,11 +116,7 @@ struct WebViewContainer: UIViewRepresentable {
                 self.kokoroEventHandlerID = nil
             }
             speech.stop()
-            AudioSession.shared.onPlay = nil
-            AudioSession.shared.onPause = nil
-            AudioSession.shared.onTogglePlayPause = nil
-            AudioSession.shared.onNextTrack = nil
-            AudioSession.shared.onPreviousTrack = nil
+            AudioSession.shared.remove(owner: audioOwner)
         }
 
         deinit {
@@ -152,6 +145,12 @@ struct WebViewContainer: UIViewRepresentable {
                 webView?.window?.overrideUserInterfaceStyle = style
                 webView?.window?.rootViewController?.setNeedsStatusBarAppearanceUpdate()
 
+            case "audioSession":
+                let error = (body["active"] as? Bool == true)
+                    ? AudioSession.shared.acquire(owner: audioOwner)
+                    : AudioSession.shared.release(owner: audioOwner)
+                if let error { emit(["type": "audioSessionError", "active": body["active"] as? Bool ?? false, "message": error]) }
+
             case "speak":
                 let token = body["token"] as? Int ?? 0
                 let text = body["text"] as? String ?? ""
@@ -179,13 +178,18 @@ struct WebViewContainer: UIViewRepresentable {
 
             case "nowPlaying":
                 AudioSession.shared.updateNowPlaying(
+                    owner: audioOwner,
                     title: body["title"] as? String ?? "Aloud",
                     progress: body["progress"] as? Double ?? 0,
                     playing: body["playing"] as? Bool ?? false
                 )
 
             case "clearNowPlaying":
-                AudioSession.shared.clearNowPlaying()
+                AudioSession.shared.clearNowPlaying(owner: audioOwner)
+
+            case "kokoroCached":
+                guard let requestID = body["requestId"] as? String else { return }
+                kokoro.cached(requestID: requestID)
 
             case "kokoroPrepare":
                 guard let requestID = body["requestId"] as? String else { return }
@@ -278,10 +282,7 @@ struct WebViewContainer: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            // The session is already active from launch; re-assert on each load
-            // so a reload after an interruption still gets .playback.
             webProcessReloads = 0
-            AudioSession.shared.reactivate()
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
