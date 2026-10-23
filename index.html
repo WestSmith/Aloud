@@ -4119,6 +4119,7 @@ function speakNative(sentIdx, fromWord) {
 
   const token = ++S.utterToken;
   nativeUtter = { token, idxs, offsets, lastWi: 0 };
+  NATIVE.audioSession?.(true);
   NATIVE.speak(token, text, S.rate, S.nativeVoice || null);
   updateNativeNowPlaying();
 }
@@ -4161,7 +4162,7 @@ function initNativeEngine() {
   NATIVE.onEvent = (ev) => {
     if (!ev) return;
     if (ev.type === 'audioSessionError') {
-      if (ev.active) pauseAll();
+      if (ev.active) { pauseAll(); NATIVE.audioSession?.(false); }
       toast(ev.message, 10000); return;
     }
     if (ev.type === 'voices') { adoptNativeVoices(ev.voices); return; }
@@ -4198,7 +4199,9 @@ function initNativeEngine() {
       return;
     }
 
-    /* 'cancel' is always our own stop()/pause() — never a failure to report */
+    /* Our own stops have already invalidated U's token. A cancellation of
+       the live utterance leaves no speech queued. */
+    if (ev.type === 'cancel') { pauseAll(); NATIVE.audioSession?.(false); }
   };
 
   /* lock screen, headphones, CarPlay */
@@ -4346,7 +4349,7 @@ function speakDevice(sentIdx, fromWord) {
       S.fastEnds++;
       if (S.fastEnds >= 3) {
         S.fastEnds = 0;
-        pauseAll();
+        pauseAll(); NATIVE?.audioSession?.(false);
         toast('🔇 This voice doesn’t seem to be producing audio. Try another voice, or Kokoro.', 6000);
         return;
       }
@@ -4359,7 +4362,7 @@ function speakDevice(sentIdx, fromWord) {
   u.onerror = (e) => {
     if (token !== S.utterToken) return;
     stopEstLoop();
-    if (e.error === 'interrupted' || e.error === 'canceled') return;
+    if (e.error === 'interrupted' || e.error === 'canceled') { pauseAll(); NATIVE?.audioSession?.(false); return; }
     console.warn('speech error', e.error);
     if (!S.playing) return;
     /* v6.25.0: a voice that fails on every sentence used to be "advanced"
@@ -4372,7 +4375,7 @@ function speakDevice(sentIdx, fromWord) {
     if (S.speechErrs >= 2 || fatal) {
       const back = S.speechErrAt ?? sentIdx;
       S.speechErrs = 0; S.speechErrAt = null;
-      pauseAll();
+      pauseAll(); NATIVE?.audioSession?.(false);
       setSentence(back);
       toast(e.error === 'network'
         ? '🔇 This voice needs an internet connection and couldn’t reach it. Pick a local voice, or Kokoro (works offline once downloaded).'
@@ -4384,6 +4387,7 @@ function speakDevice(sentIdx, fromWord) {
   };
 
   synth.cancel();
+  NATIVE?.audioSession?.(true);
   synth.speak(u);
   /* holding from the previous sentence: estTick paints word one once the
      engine reports it has started (setSentence hold) */
@@ -5607,7 +5611,7 @@ function handleNeuralFailure(error, invalidateAudio = false) {
   if (!S.playing || S.engine !== 'neural') return;
   const waitForForeground = !!NATIVE?.nativeKokoro && (document.hidden || error?.code === 'app_inactive');
   if (invalidateAudio) invalidateNeuralSpeech();
-  pauseAll();
+  pauseAll(); NATIVE?.audioSession?.(false);
   if (waitForForeground) {
     kokoroResumeOnForeground = true;
     toast('Buffered Kokoro speech has ended. Return to Aloud to continue; your place is saved.', 10000);
@@ -6110,6 +6114,7 @@ function fitRsvpWord() {
 window.addEventListener('resize', () => { if (S.rsvp.open) fitRsvpWord(); });
 
 function rsvpPlay(fromWord) {
+  NATIVE?.audioSession?.(false);
   const token = ++S.rsvp.token;
   if (synth) synth.cancel();
   S.neuralGenToken++;
@@ -6121,14 +6126,21 @@ function rsvpPlay(fromWord) {
     if (token !== S.rsvp.token || !S.playing) return;
     if (w >= S.words.length) {
       pauseAll();
-      if (S.sleep.mode === 'chapter') { sleepClear(); NATIVE?.audioSession?.(false); }
+      if (S.sleep.mode === 'chapter') sleepClear();
+      NATIVE?.audioSession?.(false);
       toast('🏁 Finished! That’s the end of the document.');
       return;
     }
     let sIdx = S.words[w].sent;
     if (sIdx !== startSent && sentSkipped(sIdx)) {          // hop over code blocks / skim-skipped
       const j = seekPlayable(sIdx, 1);
-      if (j === -1) { pauseAll(); if (S.sleep.mode === 'chapter') { sleepClear(); NATIVE?.audioSession?.(false); } toast('🏁 Finished! That’s the end of the document.'); return; }
+      if (j === -1) {
+        pauseAll();
+        if (S.sleep.mode === 'chapter') sleepClear();
+        NATIVE?.audioSession?.(false);
+        toast('🏁 Finished! That’s the end of the document.');
+        return;
+      }
       w = S.sentences[j].start; sIdx = j;
     }
     if (sIdx !== S.curSent) {
@@ -6174,7 +6186,7 @@ function setRsvpOpen(open) {
     if (w) rsvpFlash(w.text);
     if (S.playing && S.rsvp.mode === 'silent') { pauseAll(); S.playing = true; setPlayIcon(true); rsvpPlay(S.curWord); }
   } else if (rsvpWasSilentPlaying()) {
-    pauseAll();
+    pauseAll(); NATIVE?.audioSession?.(false);
   } else {
     S.rsvp.token++;
     clearTimeout(S.rsvp.timer);
@@ -6197,7 +6209,6 @@ function renderRsvpMode() {
 function playCurrent(fromWord) {
   if (!S.sentences.length) return;
   stopVoicePreview();
-  if (!rsvpSilentActive() && (S.engine !== 'neural' || S.kokoro.state === 'ready')) NATIVE?.audioSession?.(true);
   S.breatherToken++;          // manual (re)start cancels any pending paragraph gap
   S.playing = true;
   setPlayIcon(true);
@@ -6207,7 +6218,7 @@ function playCurrent(fromWord) {
   if (S.engine === 'neural') speakNeural(S.curSent, fromWord);
   else if (S.engine === 'native' && NATIVE) speakNative(S.curSent, fromWord);
   else {
-    if (!synth) { pauseAll(); toast('No built-in speech is available. Choose Kokoro in Voice to set it up.', 8000); return; }
+    if (!synth) { pauseAll(); NATIVE?.audioSession?.(false); toast('No built-in speech is available. Choose Kokoro in Voice to set it up.', 8000); return; }
     speakDevice(S.curSent, fromWord);
   }
 }
@@ -7514,9 +7525,9 @@ async function previewVoice(engine, voice, text = 'Welcome to Aloud. This is a v
   button.textContent = 'Stop preview'; button.setAttribute('aria-pressed', 'true');
   const done = () => { if (owner === voicePreviewToken) stopVoicePreview(true); };
   try {
-    NATIVE?.audioSession?.(true);
     if (engine === 'native') {
       previewNativeToken = -(owner + 1);
+      NATIVE.audioSession?.(true);
       NATIVE.speak(previewNativeToken, text, 1, voice);
     } else if (engine === 'device') {
       if (!synth || !voice) throw new Error('No built-in voice is available.');
@@ -7524,6 +7535,7 @@ async function previewVoice(engine, voice, text = 'Welcome to Aloud. This is a v
       utterance.voice = voice; utterance.lang = voice.lang;
       utterance.onend = done;
       utterance.onerror = e => { if (owner === voicePreviewToken) { done(); toast(`Voice preview failed: ${e.error || 'unavailable'}.`); } };
+      NATIVE?.audioSession?.(true);
       synth.speak(utterance);
     } else {
       if (S.kokoro.state !== 'ready') await loadKokoro();
@@ -7539,6 +7551,7 @@ async function previewVoice(engine, voice, text = 'Welcome to Aloud. This is a v
       previewAudio = new Audio(audioBlobParts(raw));
       previewAudio.onended = done;
       previewAudio.onerror = () => { if (owner === voicePreviewToken) { done(); toast('Could not play this voice preview.'); } };
+      NATIVE?.audioSession?.(true);
       await previewAudio.play();
     }
   } catch (e) {
