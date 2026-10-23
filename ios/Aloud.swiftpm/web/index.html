@@ -1986,6 +1986,7 @@ async function openFile(file, opts = {}) {
     if (!openStillCurrent(openToken)) return;
     if (opts.autoplay && S.sentences.length) playCurrent(S.curWord);
     rememberFile(file).then(renderRecents);   // library: enable one-tap Continue next launch
+    return true;
   } catch (err) {
     if (!openStillCurrent(openToken)) return;
     console.error(err);
@@ -6519,7 +6520,7 @@ $('btn-paste-open').addEventListener('click', () => {
   openSheet('paste-sheet');
   setTimeout(() => $('paste-input').focus(), 250);
 });
-$('paste-read').addEventListener('click', () => {
+$('paste-read').addEventListener('click', async () => {
   const text = $('paste-input').value.trim();
   if (!text) { toast('Paste some text in first.'); return; }
   const firstLine = (text.split(/\n/).find(l => l.trim()) || '').trim().replace(/\s+/g, ' ');
@@ -6527,7 +6528,9 @@ $('paste-read').addEventListener('click', () => {
   primeAudioGesture();
   closeSheets(false);
   $('paste-input').value = '';
-  openFile(new File([text], title + '.txt', { type: 'text/plain' }), { autoplay: true });
+  const opened = await openFile(new File([text], title + '.txt', { type: 'text/plain' }), { autoplay: true });
+  $(opened ? 'btn-play' : 'btn-paste-open').focus({ preventScroll: true });
+  if (!opened && document.activeElement === document.body && document.body.classList.contains('document-open')) $('btn-play').focus({ preventScroll: true });
 });
 
 ['dragenter', 'dragover'].forEach(ev => document.addEventListener(ev, e => {
@@ -6555,7 +6558,8 @@ $('view-original').addEventListener('click', () => chooseDocumentView(true));
 $('view-reading').addEventListener('click', () => chooseDocumentView(false));
 async function chooseDocumentView(original) {
   closeSheets(false);
-  if (original === (S.mode !== 'flow')) { $('btn-view').focus(); return; }
+  $('btn-view').focus({ preventScroll: true });
+  if (original === (S.mode !== 'flow')) return;
   if (!S.lastFile) return;
   const isPdf = /\.pdf$/i.test(S.lastFile.name) || S.lastFile.type === 'application/pdf';
   const frac = S.words.length ? S.curWord / S.words.length : 0;
@@ -6569,12 +6573,14 @@ async function chooseDocumentView(original) {
   }
   const wasPlaying = S.playing;
   pauseAll();
-  await openFile(S.lastFile, { view: toView, resumeWord: -1, preserveSession: true });
+  const opened = await openFile(S.lastFile, { view: toView, resumeWord: -1, preserveSession: true });
+  if (!opened) return;
   const w = Math.round(frac * S.words.length);
   const sIdx = S.words[Math.min(w, S.words.length - 1)]?.sent ?? 0;
   setSentence(sIdx);
   maybeScroll(S.words[S.curWord]?.el, true);
   if (wasPlaying) playCurrent(S.curWord);
+  if (document.activeElement === document.body) $('btn-view').focus({ preventScroll: true });
 }
 
 /* ====================================================================
