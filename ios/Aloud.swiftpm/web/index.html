@@ -6483,9 +6483,11 @@ $('settings-nav').addEventListener('click', e => {
 });
 const compactToolbar = matchMedia('(max-width: 1100px)');
 function arrangeToolbar() {
+  const restoreFocus = isSheetOpen('more-sheet') && $('more-sheet').contains(document.activeElement);
   if (isSheetOpen('more-sheet')) closeSheets(false);
   (compactToolbar.matches ? $('more-actions') : $('topbar-actions')).appendChild($('secondary-actions'));
   (compactToolbar.matches ? $('more-actions') : $('topbar-actions')).prepend($('chapter-row'));
+  if (restoreFocus) $(compactToolbar.matches ? 'btn-more' : 'btn-settings').focus({ preventScroll: true });
   syncChromeMetrics();
 }
 compactToolbar.addEventListener('change', arrangeToolbar);
