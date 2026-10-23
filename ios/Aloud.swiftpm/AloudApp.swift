@@ -13,7 +13,6 @@ struct AloudApp: App {
         WindowGroup {
             ContentView(model: model)
                 .task { model.start() }
-                .preferredColorScheme(.dark)
                 .ignoresSafeArea(.keyboard)
         }
         // UIApplicationDelegate's active/inactive callbacks are not called by
