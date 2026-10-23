@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.34.1">
+<meta name="aloud-version" content="v6.35.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -403,6 +403,10 @@
     border-radius: 12px; border: 1px solid var(--border);
     background: var(--bg-elev2); color: var(--text); font-size: calc(1.0rem * var(--ui-scale) * var(--ui-system-scale, 1));
   }
+  #app-edit-input { width: 100%; margin-top: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-card); color: var(--text); font: inherit; }
+  .voice-choice { display: flex; align-items: center; gap: 8px; }
+  .voice-choice .voice-item { flex: 1; min-width: 0; }
+  .voice-choice .chip { flex: none; }
   #voice-search::placeholder { color: var(--text-dim); }
   #voice-count { flex: none; color: var(--text-dim); font-size: calc(0.71875rem * var(--ui-scale) * var(--ui-system-scale, 1)); font-variant-numeric: tabular-nums; }
   .voice-empty { padding: 22px 12px; text-align: center; color: var(--text-dim); font-size: calc(0.8125rem * var(--ui-scale) * var(--ui-system-scale, 1)); line-height: 1.5; }
@@ -927,6 +931,10 @@
     <button data-engine="native" hidden>📱 iOS <span style="font-weight:400">· premium</span></button>
   </div>
   <div id="kokoro-status" role="status" aria-live="polite"><span id="kokoro-status-text"></span><div class="bar" role="progressbar" aria-label="Kokoro model setup" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="kokoro-bar"></div></div></div>
+  <div id="kokoro-setup" hidden>
+    <div class="chips" style="margin:12px 0"><button class="chip on" id="kokoro-start">Start setup</button><button class="chip" id="kokoro-cancel" hidden>Cancel setup</button><button class="chip on" id="kokoro-retry" hidden>Retry setup</button></div>
+    <p class="voice-note" id="kokoro-background-note"></p>
+  </div>
   <div class="voice-note" id="voice-note"></div>
   <div class="voice-tools"><input type="search" id="voice-search" placeholder="Search voices…" autocomplete="off" spellcheck="false" aria-label="Search voices"><span id="voice-count" aria-live="polite"></span></div>
   <div class="voice-list" id="voice-list"></div>
@@ -1029,6 +1037,17 @@
   <div class="voice-note">Folders are labels on your home screen — files never leave your device, and nothing is moved or re-uploaded.</div>
 </div>
 
+<div class="sheet" id="app-edit-sheet">
+  <div class="grab"></div><h3 id="app-edit-title">Edit</h3>
+  <p class="voice-note" id="app-edit-note"></p>
+  <label for="app-edit-input" id="app-edit-label">Name</label>
+  <input id="app-edit-input" type="text" autocomplete="off" spellcheck="false">
+  <div class="chips" style="margin-top:14px">
+    <button class="chip" id="app-edit-preview">Preview</button>
+    <button class="chip on" id="app-edit-save">Save</button>
+  </div>
+</div>
+
 <div class="sheet" id="search-sheet">
   <div class="grab"></div>
   <h3>Search</h3>
@@ -1063,7 +1082,7 @@
   <p><a href="https://github.com/WestSmith/Aloud" target="_blank" rel="noopener">Source, documentation and license notices</a></p>
 </div>
 <div id="notices"><div class="toast-row"><div id="toast" role="status" aria-live="polite" aria-atomic="true"></div><button id="toast-dismiss" aria-label="Dismiss notification">×</button></div>
-<div id="kokoro-float" role="status" aria-live="polite"><span id="kokoro-float-text"></span><div class="bar" role="progressbar" aria-label="Kokoro model setup" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="kokoro-float-bar"></div></div></div>
+<div id="kokoro-float" role="status" aria-live="polite"><span id="kokoro-float-text"></span><button class="chip" id="kokoro-details" style="margin-left:8px">Setup</button><div class="bar" role="progressbar" aria-label="Kokoro model setup" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="kokoro-float-bar"></div></div></div>
 </div>
 <div id="timing-badge"></div>
 <div id="loading-overlay" role="status" aria-live="polite" aria-hidden="true"><div><div class="spin" aria-hidden="true"></div><div class="msg" id="loading-msg">Opening…</div></div></div>
@@ -1187,14 +1206,10 @@ if (NATIVE) {
    late callbacks (identical role to S.utterToken in the device engine), and
    offsets/idxs map a UTF-16 character index back onto a display word */
 let nativeUtter = null;
+let voicePreviewToken = 0, previewAudio = null, previewNativeToken = null, previewButton = null;
+let appDialogSave = null;
+let kokoroSetupId = 0, kokoroCancelLoad = null;
 
-/* another engine is covering for a Kokoro download that hasn't finished yet.
-   S.engine stays 'neural' the whole time — see speakNeural. Declared here, not
-   beside the neural engine, because loadKokoro() sits earlier in the file and
-   reads both. */
-let kokoroStopgapNoticed = false;   // one notice per session, not one per sentence
-let kokoroStopgapActive = false;
-let kokoroCoverTimer = null;        // delay before covering — see KOKORO_COVER_DELAY_MS
 let kokoroResumeOnForeground = false; // Metal inference cannot start while iOS is backgrounded
 
 /* full-screen idle timer for the bars. Up here because setPlayIcon() reads it
@@ -1218,10 +1233,8 @@ const S = {
   curWord: -1,
   paintedWord: -1,     // the word carrying .speaking / shown in RSVP; trails curWord during a sentence-start hold
   playing: false,
-  /* A fresh native install now starts on Kokoro because its inference runs in
-     Swift/MLX rather than WebKit. Existing users keep their explicit choice,
-     and the PWA still defaults to the regular device engine. */
-  engine: store.get('engine', NATIVE?.nativeKokoro ? 'neural' : (NATIVE ? 'native' : 'device')),
+  /* Kokoro is the fresh-install default on web and native. Keep saved choices. */
+  engine: store.get('engine', 'neural'),
   rate: store.get('rate', 1),
   deviceVoice: null,
   deviceVoices: [],
@@ -1244,7 +1257,7 @@ const S = {
   neuralGenToken: 0,
   docGeneration: 0,       // invalidates inference still finishing for an old document
   speechGeneration: 0,    // invalidates queued work after voice/mute/pronunciation changes
-  dict: store.get('dict', {}),        // lowercase word -> spoken replacement
+  dict: Object.assign(Object.create(null), Object.fromEntries(Object.entries(store.get('dict', {}) || {}).filter(([, v]) => typeof v === 'string'))),        // lowercase word -> spoken replacement
   dictVersion: 0,
   calib: store.get('calib', {}),      // voiceURI -> speed factor EMA
   lastFile: null,
@@ -1491,13 +1504,13 @@ function spokenFor(tok) {
   if (S.skipCode && URL_TOKEN_RE.test(tok)) return '';   // don't read web addresses aloud
   if (/^[.·…]{2,}$/.test(tok)) return '';                // dot leaders are layout, not speech
   const lower = tok.toLowerCase();
-  if (BUILTIN_SPOKEN[lower]) return BUILTIN_SPOKEN[lower];
+  if (Object.hasOwn(BUILTIN_SPOKEN, lower)) return BUILTIN_SPOKEN[lower];
   const { pre, core, post } = coreOf(tok);
   if (!core) return tok;
-  const rep = S.dict[core.toLowerCase()];
-  if (rep) return pre + rep + post;
-  const full = S.dict[lower];
-  if (full) return full;
+  const rep = Object.hasOwn(S.dict, core.toLowerCase()) ? S.dict[core.toLowerCase()] : null;
+  if (typeof rep === 'string' && rep) return pre + rep + post;
+  const full = Object.hasOwn(S.dict, lower) ? S.dict[lower] : null;
+  if (typeof full === 'string' && full) return full;
   /* after the user's own pronunciations, so a custom reading always wins */
   const num = verbalizeNumeric(tok);
   if (num !== null) return num;
@@ -1710,21 +1723,33 @@ function setPronunciation(word) {
   const { core } = coreOf(word);
   const key = (core || word).toLowerCase();
   if (!key) return;
-  const cur = S.dict[key] || '';
-  const rep = prompt(`How should “${core || word}” be pronounced?\n\nType it the way it sounds (e.g. “nee-CHUH” for Nietzsche, or “sequel” for SQL). Leave empty to remove.`, cur);
-  if (rep === null) return;
-  if (rep.trim()) {
-    S.dict[key] = rep.trim();
-    toast(`🗣️ Got it — “${core}” will be read as “${rep.trim()}”.`);
-  } else {
-    delete S.dict[key];
-    toast(`Removed custom pronunciation for “${core}”.`);
-  }
-  store.set('dict', S.dict);
-  S.dictVersion++;
-  invalidateNeuralSpeech();
-  renderDictList();
-  if (S.playing) playCurrent(S.curWord);
+  const wasPlaying = S.playing;
+  pauseAll();
+  showAppEdit('Pronunciation', 'Say it like', S.dict[key] || '', rep => {
+    if (rep.trim()) S.dict[key] = rep.trim();
+    else delete S.dict[key];
+    store.set('dict', S.dict);
+    S.dictVersion++;
+    invalidateNeuralSpeech();
+    renderDictList();
+    toast(rep.trim() ? `Pronunciation saved for “${core || word}”.` : `Removed pronunciation for “${core || word}”.`);
+    if (wasPlaying) playCurrent(S.curWord);
+  }, `How should “${core || word}” sound? Type it as it sounds; leave empty to remove. Saved on this device.`, true);
+  $('app-edit-preview').onclick = () => previewVoice(S.engine, currentVoice(), $('app-edit-input').value.trim() || core || word, $('app-edit-preview'));
+}
+
+function showAppEdit(title, label, value, save, note = '', preview = false, confirmOnly = false) {
+  $('app-edit-title').textContent = title;
+  $('app-edit-label').textContent = label;
+  $('app-edit-note').textContent = note;
+  $('app-edit-input').value = value;
+  $('app-edit-input').maxLength = preview ? 200 : 40;
+  $('app-edit-input').hidden = $('app-edit-label').hidden = confirmOnly;
+  $('app-edit-preview').hidden = !preview;
+  $('app-edit-save').textContent = confirmOnly ? 'Delete folder' : 'Save';
+  openSheet('app-edit-sheet');
+  appDialogSave = save;
+  if (!confirmOnly) requestAnimationFrame(() => $('app-edit-input').focus());
 }
 
 function renderDictList() {
@@ -1823,6 +1848,10 @@ async function ensurePhonemes(displayTokens, maxWaitMs = 1500) {
       new Promise(r => setTimeout(r, Math.max(2500, maxWaitMs), null)),
     ]);
     if (!completed) reserved.forEach(word => { if (phonemeCache.get(word) === null) phonemeCache.delete(word); });
+  }
+  for (const [key, value] of phonemeCache) {
+    if (phonemeCache.size <= 4096) break;
+    if (value !== null) phonemeCache.delete(key);
   }
 }
 
@@ -3501,11 +3530,7 @@ function renderHtmlInteractive(htmlText, opts = {}) {
       const wIdx = m.word | 0;
       if (!S.words[wIdx]) return;
       primeAudioGesture();
-      pauseAll();
-      setSentence(S.words[wIdx].sent);
-      highlightWord(wIdx);
-      S.playing = true; setPlayIcon(true);
-      playCurrent(wIdx);
+      seekSentence(S.words[wIdx].sent, true, wIdx);
     } else if (m.t === 'aloud:doubletap') {
       htmlDoubleTapZoom(m.word | 0);
     } else if (m.t === 'aloud:press') {
@@ -3743,8 +3768,6 @@ function saveReadingProgress() {
    serial queue prevents a second model call from overlapping it. */
 function cancelDocumentWork() {
   kokoroResumeOnForeground = false;
-  kokoroStopgapActive = false;
-  clearTimeout(kokoroCoverTimer);
   try { NATIVE?.kokoro?.cancelGenerations?.(); } catch {}
   stopAll();
 }
@@ -4124,7 +4147,7 @@ function adoptNativeVoices(voices) {
   }
 
   if (isSheetOpen('voice-sheet')) renderVoiceList();
-  if (S.engine === 'device') updateVoicePill();
+  if (S.engine === 'native') updateVoicePill();
 }
 
 function initNativeEngine() {
@@ -4133,16 +4156,24 @@ function initNativeEngine() {
   document.querySelectorAll('#engine-seg button[data-engine="native"]').forEach(b => { b.hidden = false; });
 
   const homeHint = $('home-voice-hint');
-  if (homeHint) homeHint.innerHTML = '<b>Three voice engines:</b> full-quality <b>native Kokoro</b>, Apple’s installed <b>Premium/Enhanced voices</b>, or instant browser voices. Everything stays on this device. PDFs open as real pages with highlighting right on them.';
+  if (homeHint) homeHint.innerHTML = '<b>Three voice engines:</b> full-quality <b>native Kokoro</b>, Apple’s installed <b>Premium/Enhanced voices</b>, or instant browser voices. Apple and Kokoro voices process text on this device; online browser voices send text to their provider. PDFs open as real pages with highlighting right on them.';
 
   NATIVE.onEvent = (ev) => {
     if (!ev) return;
+    if (ev.type === 'audioSessionError') {
+      if (ev.active) pauseAll();
+      toast(ev.message, 10000); return;
+    }
     if (ev.type === 'voices') { adoptNativeVoices(ev.voices); return; }
     if (ev.type === 'appActivity') {
       // Swift owns the authoritative iPad lifecycle state. Its activation
       // event cannot race ahead of the native MLX gate the way a guessed
       // visibility timeout can.
       if (ev.active) resumeKokoroAfterForeground(0);
+      return;
+    }
+    if (previewNativeToken != null && ev.token === previewNativeToken) {
+      if (ev.type === 'end' || ev.type === 'cancel') stopVoicePreview(true);
       return;
     }
     const U = nativeUtter;
@@ -4162,11 +4193,7 @@ function initNativeEngine() {
 
     if (ev.type === 'end') {
       nativeUtter = null;
-      /* no engine check: the token guard above already proves this is the live
-         utterance. It may have been spoken as 'native', or while covering a
-         Kokoro download with S.engine still 'neural' — and the covering case
-         can have the flag cleared out from under it when the model lands
-         mid-sentence, so keying on the flag would strand the last sentence. */
+      // The token guard above proves this is the live native utterance.
       if (S.playing) advanceAfterBreather();
       return;
     }
@@ -4177,8 +4204,8 @@ function initNativeEngine() {
   /* lock screen, headphones, CarPlay */
   NATIVE.remote = {
     play:  () => { if (S.sentences.length && !S.playing) togglePlay(); },
-    pause: () => { kokoroResumeOnForeground = false; if (S.sentences.length && S.playing) togglePlay(); },
-    toggle: () => { if (S.sentences.length) togglePlay(); },
+    pause: () => { kokoroResumeOnForeground = false; stopVoicePreview(true); if (S.sentences.length && S.playing) togglePlay(); },
+    toggle: () => { if (previewButton) stopVoicePreview(true); else if (S.sentences.length) togglePlay(); },
     next:  () => { if (S.sentences.length) { kokoroResumeOnForeground = false; advanceSentence(1, true); } },
     prev:  () => { if (S.sentences.length) { kokoroResumeOnForeground = false; advanceSentence(-1, true); } },
   };
@@ -4202,6 +4229,7 @@ function updateNativeNowPlaying() {
    ENGINE: DEVICE (Web Speech API)
    ==================================================================== */
 
+const NOVELTY_VOICES = new Set(['albert', 'bad news', 'bahh', 'bells', 'boing', 'bubbles', 'cellos', 'good news', 'jester', 'organ', 'superstar', 'trinoids', 'whisper', 'wobble', 'zarvox', 'deranged', 'hysterical', 'pipe organ']);
 const synth = window.speechSynthesis || null;
 
 function refreshDeviceVoices() {
@@ -4209,16 +4237,25 @@ function refreshDeviceVoices() {
   const vs = synth.getVoices();
   if (!vs.length) return;
   S.deviceVoices = vs.slice().sort((a, b) => {
+    if (a.localService !== b.localService) return a.localService ? -1 : 1;
+    const an = NOVELTY_VOICES.has(a.name.toLowerCase()), bn = NOVELTY_VOICES.has(b.name.toLowerCase());
+    const ad = a.default && !an, bd = b.default && !bn;
+    if (ad !== bd) return ad ? -1 : 1;
     const ae = a.lang.startsWith('en') ? 0 : 1, be = b.lang.startsWith('en') ? 0 : 1;
     if (ae !== be) return ae - be;
-    return (b.localService ? 0 : 1) - (a.localService ? 0 : 1) || a.name.localeCompare(b.name);
+    if (a.lang !== b.lang) return a.lang.localeCompare(b.lang);
+    if (an !== bn) return an ? 1 : -1;
+    return a.name.localeCompare(b.name);
   });
-  if (!S.deviceVoice) {
-    const savedURI = store.get('deviceVoiceURI', null);
-    S.deviceVoice = (savedURI && S.deviceVoices.find(v => v.voiceURI === savedURI))
-      || S.deviceVoices.find(v => /natural|neural|premium|enhanced|siri/i.test(v.name) && v.lang.startsWith('en'))
-      || S.deviceVoices.find(v => v.lang.startsWith('en')) || S.deviceVoices[0];
-  }
+  const savedURI = store.get('deviceVoiceURI', null);
+  const regular = S.deviceVoices.filter(v => !NOVELTY_VOICES.has(v.name.toLowerCase()));
+  S.deviceVoice = (savedURI && S.deviceVoices.find(v => v.voiceURI === savedURI))
+      || regular.find(v => v.localService && v.default)
+      || regular.find(v => v.localService && /natural|neural|premium|enhanced|siri/i.test(v.name) && v.lang.startsWith('en'))
+      || regular.find(v => v.localService && v.lang.startsWith('en'))
+      || regular.find(v => v.localService)
+      || regular.find(v => v.default) || regular.find(v => v.lang.startsWith('en')) || regular[0] || null;
+
   if (isSheetOpen('voice-sheet')) renderVoiceList();
   if (S.engine === 'device') updateVoicePill();
 }
@@ -4394,6 +4431,9 @@ function clearNeuralCache() {
 }
 
 function invalidateNeuralSpeech() {
+  if (S.audio) S.audio.pause();
+  if (S.audioPlay?.batchUrl) URL.revokeObjectURL(S.audioPlay.batchUrl);
+  S.audioPlay = null;
   S.speechGeneration++;
   S.neuralGenToken++;
   S.neuralPending.clear();
@@ -4612,8 +4652,9 @@ async function nativeKokoroGenerate(text, voice) {
   }
 }
 
-async function initNativeKokoro() {
+async function initNativeKokoro(owner) {
   NATIVE.kokoro.onProgress = ev => {
+    if (owner !== kokoroSetupId) return;
     S.kokoro.progressAt = Date.now();
     S.kokoro.stage = ev.stage || 'preparing';
     S.kokoro.progress = Number.isFinite(ev.progress) ? ev.progress : S.kokoro.progress;
@@ -4625,12 +4666,13 @@ async function initNativeKokoro() {
     }
     renderKokoroStatus(message, S.kokoro.progress);
   };
-  renderKokoroStatus('Opening full-quality Kokoro on this device…', 1);
+  renderKokoroStatus('Checking the full-quality Kokoro model…', null);
   await NATIVE.kokoro.prepare();
+  if (owner !== kokoroSetupId) return;
   S.kokoro.workerGenerate = nativeKokoroGenerate;
 }
 
-function initKokoroWorker() {
+function initKokoroWorker(owner, model = KOKORO_MODEL, fallbackModel = KOKORO_MODEL_FALLBACK) {
   return new Promise((resolve, reject) => {
     let worker;
     try {
@@ -4643,7 +4685,8 @@ function initKokoroWorker() {
        the neural engine until reload */
     const rejectAll = (err) => { pending.forEach(p => { clearTimeout(p.tm); p.reject(err); }); pending.clear(); };
     S.kokoro.rejectPending = rejectAll;
-    const fail = (err) => { try { worker.terminate(); } catch {} rejectAll(err); S.kokoro.worker = null; S.kokoro.workerGenerate = null; S.kokoro.rejectPending = null; reject(err); };
+    const fail = (err) => { try { worker.terminate(); } catch {} rejectAll(err); if (S.kokoro.worker === worker) { S.kokoro.worker = null; S.kokoro.workerGenerate = null; S.kokoro.rejectPending = null; } reject(err); };
+    S.kokoro.cancelSetup = fail;
     worker.onerror = (e) => {
       if (!ready) fail(new Error(e.message || 'worker error'));
       else {
@@ -4665,23 +4708,17 @@ function initKokoroWorker() {
       }
     };
     worker.onmessage = (e) => {
+      if (owner !== kokoroSetupId) return;
       const m = e.data;
       if (m.type === 'stage') {
         S.kokoro.progressAt = Date.now();
         S.kokoro.stage = m.stage || 'starting';
         if (S.kokoro.state === 'loading') {
-          renderKokoroStatus(m.message || 'Preparing the neural engine…', Math.max(2, S.kokoro.progress || 2));
+          renderKokoroStatus(m.message || 'Preparing the neural engine…', null);
         }
       } else if (m.type === 'progress') {
-        S.kokoro.progressAt = Date.now();          // proof of life for the stall guard
-        S.kokoro.stage = 'download';
-        const pct = Math.round(5 + 92 * (m.loaded / m.total));
-        /* show the megabytes, not just the percentage — on a large model a
-           percentage that moves slowly reads as "stuck", and the only way to
-           tell a slow download from a dead one is watching the bytes climb */
-        const mb = (n) => (n / 1048576).toFixed(0);
-        if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}% (${mb(m.loaded)} of ${mb(m.total)} MB)`, pct); }
-      } else if (m.type === 'ready') { ready = true; S.kokoro.progressAt = Date.now(); S.kokoro.threads = m.threads || 1; resolve(); }
+        kokoroDownloadProgress(m);
+      } else if (m.type === 'ready') { ready = true; S.kokoro.cancelSetup = null; S.kokoro.progressAt = Date.now(); S.kokoro.threads = m.threads || 1; resolve(); }
       else if (m.type === 'initerror') { if (!ready) fail(new Error(m.message)); }
       else if (m.type === 'result') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ audio: m.audio, sampling_rate: m.sr, pwords: m.pwords || null, nIds: m.nIds || 0 }); } }
       else if (m.type === 'error') { const p = pending.get(m.id); if (p) { pending.delete(m.id); p.reject(new Error(m.message)); } }
@@ -4709,7 +4746,7 @@ function initKokoroWorker() {
     });
     renderKokoroStatus('Downloading the voice model (one time — cached by your browser after this)…', 5);
     const cfg = kokoroConfig();
-    worker.postMessage({ type: 'init', model: KOKORO_MODEL, fallbackModel: KOKORO_MODEL_FALLBACK, dtype: cfg.dtype, device: cfg.device });
+    worker.postMessage({ type: 'init', model, fallbackModel, dtype: cfg.dtype, device: cfg.device });
   });
 }
 
@@ -4750,6 +4787,11 @@ function kokoroConfig() {
    worker alone leaves them pending forever, which wedges genTail and bricks
    the engine), then drop the worker, then flush the generation queue. */
 function resetNeuralEngine() {
+  kokoroSetupId++;
+  const cancelled = Object.assign(new Error('Kokoro setup cancelled'), { name: 'EngineReset' });
+  kokoroCancelLoad?.(cancelled); kokoroCancelLoad = null;
+  S.kokoro.cancelSetup?.(cancelled); S.kokoro.cancelSetup = null;
+  NATIVE?.kokoro?.cancelSetup?.();
   try { S.kokoro.rejectPending?.(Object.assign(new Error('engine reset'), { name: 'EngineReset' })); } catch {}
   try { S.kokoro.worker?.terminate(); } catch {}
   S.kokoro.worker = null; S.kokoro.workerGenerate = null; S.kokoro.rejectPending = null;
@@ -4782,7 +4824,8 @@ function setNeuralQuality(q) {
   const tail = heavyWarn ? ' ⚠️ This tier holds far more memory than Standard and may be killed on a phone/iPad — pick Standard or Auto if it crashes.' : '';
   if (S.engine === 'neural') {
     toast('Switching neural quality — the new model will download now.' + tail, heavyWarn ? 8000 : 3500);
-    loadKokoro().then(() => { if (wasPlaying) playCurrent(S.curWord); });
+    const owner = S.neuralGenToken, doc = S.docGeneration;
+    loadKokoro().then(ready => { if (ready && wasPlaying && owner === S.neuralGenToken && doc === S.docGeneration && S.engine === 'neural') playCurrent(S.curWord); });
   } else {
     toast('Neural voice quality saved — it downloads next time you use the neural voice.' + tail, heavyWarn ? 8000 : 3500);
   }
@@ -4806,152 +4849,149 @@ function renderNeuralQuality() {
   });
 }
 
-async function loadKokoroMainThread() {
+async function loadKokoroMainThread(owner, model = KOKORO_MODEL, allowFallback = true) {
   const mod = await import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm');
   const KokoroTTS = mod.KokoroTTS || mod.default?.KokoroTTS;
   if (!KokoroTTS) throw new Error('kokoro-js loaded but KokoroTTS not found');
+  if (owner !== kokoroSetupId) return;
   const cfg = kokoroConfig();
-  renderKokoroStatus('Downloading the voice model (one time — cached by your browser after this)…', 5);
+  renderKokoroStatus('Downloading model files; completed files are cached by the browser…', null);
   const opts = {
     dtype: cfg.dtype,
     device: cfg.device,
-    progress_callback: (p) => {
-      if (p.status === 'progress' && p.total) {
-        S.kokoro.progressAt = Date.now();          // proof of life for the stall guard
-        const pct = Math.round(5 + 92 * (p.loaded / p.total));
-        if (pct > S.kokoro.progress) { S.kokoro.progress = pct; renderKokoroStatus(`Downloading voice model… ${pct}%`, pct); }
-      }
-    },
+    progress_callback: p => { if (owner === kokoroSetupId) kokoroDownloadProgress(p); },
   };
-  try { S.kokoro.tts = await KokoroTTS.from_pretrained(KOKORO_MODEL, opts); }
+  let tts;
+  try { tts = await KokoroTTS.from_pretrained(model, opts); }
   catch (err) {
+    if (owner !== kokoroSetupId) return;
+    if (!allowFallback) throw err;
     console.warn('timestamped Kokoro repo unavailable, using stock', err);
-    S.kokoro.tts = await KokoroTTS.from_pretrained(KOKORO_MODEL_FALLBACK, opts);
+    tts = await KokoroTTS.from_pretrained(KOKORO_MODEL_FALLBACK, opts);
   }
+  if (owner !== kokoroSetupId) return;
+  S.kokoro.tts = tts;
   S.kokoro.tsCap = instrumentKokoroTTS(S.kokoro.tts);
 }
 
-/* Nothing in the load path has a timeout of its own: the module import, the
-   model download and from_pretrained can all stall indefinitely, and a worker
-   the OS kills under memory pressure (an iPad's favourite move) fires no
-   event at all — not even onerror. Any of those left the load promise
-   unsettled forever, so S.kokoro.state stuck on 'loading', the play button
-   pulsed for good, and loadKokoro's own "already loading" guard meant every
-   later tap was a no-op. Only a reload got you out.
-   So: watch for total silence. Every progress tick stamps progressAt, and if
-   nothing at all happens for KOKORO_STALL_MS we fail loudly, which lets the
-   existing catch fall back to the device voice and keep playing. */
-const KOKORO_STALL_MS = NATIVE?.nativeKokoro ? 180000 : 60000;
-const KOKORO_LOAD_DEADLINE_MS = NATIVE?.nativeKokoro ? 30 * 60 * 1000 : 0;
-function kokoroStallGuard() {
-  return new Promise((_resolve, reject) => {
-    const tick = setInterval(() => {
-      if (S.kokoro.state !== 'loading') { clearInterval(tick); return; }   // settled: stand down
-      if (Date.now() - S.kokoro.progressAt > KOKORO_STALL_MS) {
-        clearInterval(tick);
-        const stage = S.kokoro.stage && S.kokoro.stage !== 'idle' ? ` during ${S.kokoro.stage}` : '';
-        reject(new Error(`the neural voice stopped responding${stage}`));
-      }
-    }, 5000);
-  });
+/* Inspect existing cache keys only: do not fetch weights to probe availability. */
+async function cachedKokoroModel() {
+  if (NATIVE?.nativeKokoro) return (await NATIVE.kokoro.cached()).cached ? KOKORO_MODEL : null;
+  if (!window.caches) return null;
+  const modelFile = { q8: 'model_quantized.onnx', q4: 'model_q4.onnx', q4f16: 'model_q4f16.onnx', fp32: 'model.onnx' }[kokoroConfig().dtype];
+  const paths = new Set();
+  for (const name of await caches.keys()) {
+    const cache = await caches.open(name);
+    for (const request of await cache.keys()) paths.add(new URL(request.url).pathname);
+  }
+  for (const model of [KOKORO_MODEL, KOKORO_MODEL_FALLBACK]) {
+    const files = ['config.json', 'tokenizer.json', 'tokenizer_config.json', `onnx/${modelFile}`];
+    if (files.every(file => [...paths].some(path => path.startsWith('/' + model + '/resolve/') && path.endsWith('/' + file)))) return model;
+  }
+  return null;
+}
+async function prepareCachedKokoro() {
+  if (!['idle', 'error'].includes(S.kokoro.state)) return;
+  const owner = kokoroSetupId;
+  try {
+    const model = await cachedKokoroModel();
+    if (model && owner === kokoroSetupId && S.engine === 'neural' && ['idle', 'error'].includes(S.kokoro.state)) loadKokoro(model);
+  } catch {} // An unavailable cache is a miss; Play/Start setup remains explicit.
 }
 
-function kokoroDeadlineGuard() {
-  if (!KOKORO_LOAD_DEADLINE_MS) return new Promise(() => {});
-  return new Promise((_resolve, reject) => {
-    setTimeout(() => {
-      if (S.kokoro.state === 'loading') {
-        const stage = S.kokoro.stage && S.kokoro.stage !== 'idle' ? ` (last stage: ${S.kokoro.stage})` : '';
-        const mins = Math.round(KOKORO_LOAD_DEADLINE_MS / 60000);
-        reject(new Error(`this device could not finish loading Kokoro within ${mins} minutes${stage}`));
-      }
-    }, KOKORO_LOAD_DEADLINE_MS);
-  });
-}
-
-async function loadKokoro() {
-  if (S.kokoro.state === 'ready' || S.kokoro.state === 'loading') return;
+/* Downloads prove liveness with byte events. Native verification/session
+   initialization can be quiet and gets a longer, stage-specific allowance. */
+function loadKokoro(cachedModel = null) {
+  if (!NATIVE?.nativeKokoro && (typeof Worker !== 'function' || typeof WebAssembly === 'undefined')) {
+    S.kokoro.state = 'error';
+    pauseAll();
+    renderKokoroStatus('Kokoro needs Web Workers and WebAssembly, which are unavailable in this browser. Open Voice and choose a built-in voice.', null);
+    return Promise.resolve(false);
+  }
+  if (S.kokoro.state === 'ready') return Promise.resolve(true);
+  if (S.kokoro.state === 'loading') return S.kokoro.loadPromise;
+  const owner = ++kokoroSetupId;
   S.kokoro.state = 'loading';
   S.kokoro.stage = 'starting';
   S.kokoro.progressAt = Date.now();
-  /* crash-loop guard: note that a load is in flight (and how heavy). If the
-     tab dies mid-load (phone OOM on a heavy tier), the sentinel survives and
-     the next launch falls back to Auto instead of crashing at every boot. */
   if (!NATIVE?.nativeKokoro) store.set('nqLoadGuard', { dtype: kokoroConfig().dtype, at: Date.now() });
-  renderKokoroStatus('Loading the Kokoro neural voice engine…', 2);
-  try {
-    await Promise.race([(async () => {
-      if (NATIVE?.nativeKokoro) {
-        await initNativeKokoro();
-      } else try {
-        try {
-          await initKokoroWorker();               // preferred: off the main thread
-        } catch (gpuErr) {
-          /* a WebGPU session that fails to start is retried on the CPU in a
-             NEW worker: a retry inside the failed worker still reports the
-             cached adapter error (measured in Chromium). onnxruntime keeps
-             that failure for the life of the worker. */
-          if (NATIVE || kokoroConfig().device !== 'webgpu' || !/backend|adapter|webgpu/i.test(String(gpuErr?.message || gpuErr))) throw gpuErr;
-          console.warn('WebGPU unusable, retrying Kokoro on wasm', gpuErr);
-          S.kokoro.noGpu = true;
-          S.kokoro.progressAt = Date.now();
-          renderKokoroStatus('The GPU path failed — opening the Standard model on the CPU instead…', 2);
-          await initKokoroWorker();
-        }
-      } catch (workerErr) {
-        /* A main-thread ONNX fallback can block WKWebView so completely that
-           neither this watchdog nor the UI can run (the pulse keeps animating
-           in the compositor). The native app must fail visibly instead of
-           entering that unobservable state. Browser builds retain the legacy
-           fallback for older desktop worker implementations. */
-        if (NATIVE) throw new Error(`the neural worker could not start: ${workerErr.message || workerErr}`);
-        console.warn('Kokoro worker unavailable, using main thread', workerErr);
-        S.kokoro.progressAt = Date.now();         // fresh start for the guard
-        await loadKokoroMainThread();
-      }
-    })(), kokoroStallGuard(), kokoroDeadlineGuard()]);
-    store.set('nqLoadGuard', null);
-    S.kokoro.state = 'ready';
-    renderKokoroStatus(NATIVE?.nativeKokoro
-      ? '✅ Native Kokoro is ready — full quality and on-device.'
-      : `✅ Neural voice ready — works offline from now on.${S.kokoro.threads > 1 ? ` (${S.kokoro.threads} cores)` : ''}`, 100);
-    setTimeout(() => { if (S.kokoro.state === 'ready') hideKokoroStatus(); }, 3500);
-    toast(NATIVE?.nativeKokoro ? '✨ Native Kokoro is ready.' : '✨ Kokoro neural voice is ready.');
-    if (kokoroStopgapActive) {
-      /* another engine is mid-sentence, covering the download. Let it finish:
-         the next sentence goes through speakNeural again and picks up Kokoro by
-         itself. Cutting in here would swap voice mid-sentence, which is more
-         jarring than waiting a few seconds — and would have to restart the
-         sentence to do it. Just start the generation runway. */
-      kokoroStopgapActive = false;
-      neuralPump();
-    } else if (S.playing && S.engine === 'neural') playCurrent(S.curWord);
-    else neuralPump();
-  } catch (err) {
-    console.error(err);
-    store.set('nqLoadGuard', null);   // a caught failure isn't a crash — don't trip the guard
-    /* a stalled load leaves a worker still chewing on a download; drop it so a
-       retry starts clean (this also resets state, so set 'error' after) */
-    try { resetNeuralEngine(); } catch {}
-    S.kokoro.state = 'error';
-    $('btn-play').classList.remove('loading');   // stop the pulse: the tap is answered, one way or the other
-    /* put the real reason on screen. It used to go only to console.error, which
-       on an iPad needs a Mac and a cable to read — so every distinct failure
-       (no network, blocked CDN, worker refused, out of memory) looked like the
-       same generic message, and none of them could be told apart from a hang. */
-    kokoroStopgapActive = false;   // no handover is coming; the covering engine keeps the floor
-    const why = String((err && err.message) || err || '').slice(0, 200);
-    renderKokoroStatus(NATIVE?.nativeKokoro
-      ? `⚠️ Native Kokoro could not start — ${why || 'unknown error'}. If this build did not include the model, it needs internet once to download it. Tap Kokoro to retry; other voices still work.`
-      : `⚠️ Could not load the neural engine — ${why || 'unknown error'}. It needs an internet connection the first time, and a fairly recent browser. Other voices still work.`, 0);
-    if (S.engine === 'neural') {
-      if (NATIVE?.nativeKokoro) {
-        pauseAll(); // keep the user's Kokoro preference; the next tap retries setup
-        if (document.hidden || err?.code === 'app_inactive') kokoroResumeOnForeground = true;
-      }
-      else setEngine(NATIVE ? 'native' : 'device');
+  renderKokoroStatus('Loading Kokoro engine code…', null);
+  S.kokoro.loadPromise = (async () => {
+    let watchdog;
+    const started = Date.now();
+    try {
+      await Promise.race([
+        (async () => {
+          if (NATIVE?.nativeKokoro) return initNativeKokoro(owner);
+          let model = cachedModel || KOKORO_MODEL;
+          try {
+            try { await initKokoroWorker(owner, model, cachedModel ? null : KOKORO_MODEL_FALLBACK); }
+            catch (gpuErr) {
+              if (owner !== kokoroSetupId || kokoroConfig().device !== 'webgpu' || !/backend|adapter|webgpu/i.test(String(gpuErr?.message || gpuErr))) throw gpuErr;
+              S.kokoro.noGpu = true;
+              S.kokoro.progressAt = Date.now();
+              renderKokoroStatus('GPU unavailable. Preparing Kokoro on the CPU…', null);
+              if (cachedModel) {
+                model = await cachedKokoroModel();
+                if (!model) throw new Error('This device needs the Standard CPU model. Choose Retry setup in Voice to download it.');
+                if (owner !== kokoroSetupId) throw gpuErr;
+              }
+              await initKokoroWorker(owner, model, cachedModel ? null : KOKORO_MODEL_FALLBACK);
+            }
+          } catch (workerErr) {
+            if (owner !== kokoroSetupId || NATIVE || S.kokoro.stage !== 'starting') throw workerErr;
+            // Only an unsupported worker gets the legacy same-engine fallback;
+            // a failed download/session must not repeat itself on the UI thread.
+            await loadKokoroMainThread(owner, model, !cachedModel);
+          }
+        })(),
+        new Promise((_resolve, reject) => {
+          kokoroCancelLoad = reject;
+          watchdog = setInterval(() => {
+            if (owner !== kokoroSetupId) return;
+            const stage = S.kokoro.stage;
+            // A deferred native setup is waiting for the app, not hung.
+            if (stage === 'waiting-for-foreground') { S.kokoro.progressAt = Date.now(); return; }
+            const quietLimit = stage === 'download' || stage === 'downloading-model' ? 120000 : NATIVE?.nativeKokoro ? 600000 : 180000;
+            if (Date.now() - S.kokoro.progressAt > quietLimit || Date.now() - started > 30 * 60000)
+              reject(new Error(`Kokoro stopped responding during ${stage}. Check the connection and retry.`));
+          }, 5000);
+        }),
+      ]);
+      if (owner !== kokoroSetupId) return false;
+      store.set('nqLoadGuard', null);
+      S.kokoro.state = 'ready'; S.kokoro.stage = 'ready';
+      renderKokoroStatus('Kokoro is ready. Completed model files stay on this device; browser storage may be cleared by the OS.', 100);
+      setTimeout(() => { if (owner === kokoroSetupId && S.kokoro.state === 'ready') hideKokoroStatus(); }, 3500);
+      if (S.playing && S.engine === 'neural') playCurrent(S.curWord);
+      return true;
+    } catch (err) {
+      if (owner !== kokoroSetupId) return false;
+      store.set('nqLoadGuard', null);
+      resetNeuralEngine();
+      S.kokoro.state = 'error'; S.kokoro.stage = 'error';
+      if (S.engine === 'neural') pauseAll();
+      renderKokoroStatus(`Kokoro setup failed: ${String(err?.message || err).slice(0, 240)} Your voice choice is unchanged.`, null);
+      return false;
+    } finally {
+      clearInterval(watchdog);
+      if (owner === kokoroSetupId) kokoroCancelLoad = null;
     }
-  }
+  })();
+  return S.kokoro.loadPromise;
+}
+
+function kokoroDownloadProgress(p) {
+  S.kokoro.progressAt = Date.now();
+  const file = String(p.file || p.name || 'model files').split('/').pop();
+  const loaded = Number(p.loaded), total = Number(p.total);
+  S.kokoro.stage = p.status === 'done' ? 'preparing' : 'download';
+  const known = total > 0 && loaded >= 0 && loaded <= total;
+  const bytes = n => n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+  const text = p.status === 'done' ? `${file} downloaded or cached. Preparing Kokoro…`
+    : `Downloading ${file}… ${known ? `${bytes(loaded)} of ${bytes(total)}` : loaded > 0 ? `${bytes(loaded)} received; total unavailable` : 'size unavailable; waiting for bytes'}`;
+  S.kokoro.progress = known ? Math.round(100 * loaded / total) : null;
+  renderKokoroStatus(text, S.kokoro.progress);
 }
 
 /* silence analysis of the generated waveform: lead/tail trim + internal pauses */
@@ -5310,7 +5350,7 @@ function audioBlobParts(raw) {
 /* all generation flows through one serial queue: neither ONNX nor native MLX
    benefits from overlapping requests, and racing jobs was a source of stalls */
 let genTail = Promise.resolve();
-function generateNeural(sentIdx) {
+function generateNeural(sentIdx, lookahead = false) {
   const docGeneration = S.docGeneration;
   const speechGeneration = S.speechGeneration;
   const voice = S.neuralVoice;
@@ -5319,7 +5359,10 @@ function generateNeural(sentIdx) {
   if (cached) return Promise.resolve(cached);
   const pending = S.neuralPending.get(key);
   if (pending) return pending;
-  const job = genTail.catch(() => {}).then(() => generateNeuralNow(sentIdx, key, docGeneration, speechGeneration, voice));
+  const job = genTail.catch(() => {}).then(() => {
+    if (lookahead && !S.playing) throw Object.assign(new Error('lookahead paused'), { name: 'EngineReset' });
+    return generateNeuralNow(sentIdx, key, docGeneration, speechGeneration, voice);
+  });
   genTail = job.catch(() => {});
   S.neuralPending.set(key, job);
   job.finally(() => S.neuralPending.delete(key)).catch(() => {});
@@ -5327,18 +5370,17 @@ function generateNeural(sentIdx) {
 }
 
 /* keep a runway of generated sentences ahead of the listen position —
-   deeper at higher speeds, and it keeps building even while paused */
+   deeper at higher speeds; pause stops further speculative inference */
 async function neuralPump() {
-  if (S.pumpBusy || S.kokoro.state !== 'ready' || S.engine !== 'neural' || rsvpSilentActive()) return;
+  if (!S.playing || S.pumpBusy || S.kokoro.state !== 'ready' || S.engine !== 'neural' || rsvpSilentActive()) return;
   S.pumpBusy = true;
   try {
     const depth = Math.min(10, 2 + Math.ceil(S.rate * 2));
     for (let k = 1; k <= depth; k++) {
       const idx = S.curSent + k;
       if (idx < 0 || idx >= S.sentences.length) break;
-      if (!S.playing && k > 4) break;              // modest runway when paused
-      if (S.engine !== 'neural') break;
-      await generateNeural(idx);
+      if (!S.playing || S.engine !== 'neural') break;
+      await generateNeural(idx, true);
     }
   } catch {}
   S.pumpBusy = false;
@@ -5565,6 +5607,7 @@ function handleNeuralFailure(error, invalidateAudio = false) {
   pauseAll();
   if (waitForForeground) {
     kokoroResumeOnForeground = true;
+    toast('Buffered Kokoro speech has ended. Return to Aloud to continue; your place is saved.', 10000);
     return;
   }
   const detail = String(error?.message || error || 'unknown error').replace(/\s+/g, ' ').slice(0, 160);
@@ -5802,79 +5845,12 @@ function naTick() {
   else P.ticking = false;
 }
 
-/* kokoroStopgapNoticed / kokoroStopgapActive / kokoroCoverTimer are declared up
-   with the app state: loadKokoro() sits earlier in this file and reads them,
-   which for a `let` declared here would be a temporal-dead-zone ReferenceError
-   the moment anything called it before this line evaluated. */
-
-/* How long to wait, in silence, before handing the sentence to another engine.
-   This exists because covering is not free: the device engine's timing is
-   ESTIMATED (buildTimeline + calibFactor) and takes a sentence or two to
-   calibrate, so its first few words drift — exactly the desync Kokoro's
-   exact-onset path was built to eliminate. Covering a load that was about to
-   finish anyway trades good sync for bad.
-
-   So cover only a wait that is genuinely long. A cached model — the normal
-   desktop case, where the weights are already in Cache Storage and only the
-   ONNX session has to spin up — lands well inside this window and never
-   triggers a cover at all, which is how it behaved before covering existed.
-   A real download runs to minutes and is nothing like it. */
-const KOKORO_COVER_DELAY_MS = 5000;
-
-/* Wait, then cover. In a browser, only cover a genuine DOWNLOAD, never a
-   normal cached-model start. In the native app the Apple engine is always
-   available and the user deserves audible feedback even if WebKit stalls at
-   module import or ONNX initialization (0% / 95%), so cover every load stage.
-   A cached model emits no progress events at all: that path is pure ONNX
-   session init, and it finishes on its own. Covering it would swap Kokoro's
-   exact onsets for the device engine's estimated timing for no reason, which
-   is the regression this guard exists to prevent. So when nothing is
-   downloading, keep waiting and re-check. A load that is neither downloading
-   nor finishing is still bounded — kokoroStallGuard() fails it at 60s. */
-function armKokoroCover(cover) {
-  clearTimeout(kokoroCoverTimer);
-  kokoroCoverTimer = setTimeout(() => {
-    if (S.kokoro.state === 'ready' || !S.playing || S.engine !== 'neural') return;
-    /* <95: bytes still moving. At the top of the range the download is done
-       and only init remains, which is again not worth covering. */
-    const downloading = S.kokoro.progress > 0 && S.kokoro.progress < 95;
-    if (!downloading && !NATIVE) return armKokoroCover(cover);
-    kokoroStopgapActive = true;
-    $('btn-play').classList.remove('loading');
-    if (!kokoroStopgapNoticed) {
-      kokoroStopgapNoticed = true;
-      const action = downloading ? 'downloading' : 'preparing';
-      toast(`⏳ The Kokoro voice is still ${action} — reading with the ${cover === 'native' ? 'iOS' : 'device'} voice until it's ready, then it takes over automatically.`, 7000);
-    }
-    playCurrent(S.curWord);
-  }, KOKORO_COVER_DELAY_MS);
-}
-
 async function speakNeural(sentIdx, fromWord) {
   if (S.kokoro.state !== 'ready') {
-    /* Kokoro isn't here yet. The original code pulsed the play button and
-       returned, so the reader stayed silent for the whole 155–305MB download —
-       minutes on a tablet, and indistinguishable from a hang. (The stall guard
-       only fires after 60s of ZERO progress, so a download that is slow but
-       healthy never trips it and the pulse just continues.)
-
-       S.engine stays 'neural' throughout: the user picked that, and a slow
-       download is not a reason to rewrite their choice — least of all a
-       persisted one. */
-    loadKokoro();
-    const cover = NATIVE ? 'native' : (synth ? 'device' : null);
-    if (!cover) { $('btn-play').classList.add('loading'); return; }
-
-    if (kokoroStopgapActive) {   // already covering — keep the chain going
-      return cover === 'native' ? speakNative(sentIdx, fromWord) : speakDevice(sentIdx, fromWord);
-    }
-
     $('btn-play').classList.add('loading');
-    armKokoroCover(cover);
+    loadKokoro();
     return;
   }
-  kokoroStopgapActive = false;
-  clearTimeout(kokoroCoverTimer);
   const sent = S.sentences[sentIdx];
   if (!sent) return stopAll();
   const genToken = ++S.neuralGenToken;
@@ -5883,6 +5859,7 @@ async function speakNeural(sentIdx, fromWord) {
   try {
     entry = await generateNeural(sentIdx);
   } catch (err) {
+    if (genToken !== S.neuralGenToken || !S.playing || S.engine !== 'neural') return;
     console.error(err);
     $('btn-play').classList.remove('loading');
     if (err && err.name === 'EngineReset') return;   // deliberate teardown (quality switch) — not a playback error
@@ -5938,11 +5915,13 @@ async function speakNeural(sentIdx, fromWord) {
   try {
     await na.play();
   } catch (e) {
+    if (genToken !== S.neuralGenToken || S.audioPlay !== P || !S.playing) return;
     console.warn(e);
-    if (S.audioPlay === P) S.audioPlay = null;
+    S.audioPlay = null;
     handleNeuralFailure(e);
     return;
   }
+  if (genToken !== S.neuralGenToken || S.audioPlay !== P || !S.playing) return;
   /* holding from the previous sentence: the tick paints word one at its
      onset (setSentence hold); otherwise show where playback starts */
   if (!holdingBefore(sent)) highlightWord(startFrom);
@@ -5979,8 +5958,10 @@ async function batchNext() {
     return;
   }
   if (run.length === 1) { setSentence(run[0]); if (S.playing) playCurrent(); return; }
+  const owner = S.neuralGenToken + 1;
   try { await speakNeuralStitched(run); }
   catch (e) {
+    if (owner !== S.neuralGenToken || !S.playing || S.engine !== 'neural') return;
     console.warn('stitch failed, falling back to per-sentence', e);
     setSentence(run[0]);
     if (S.playing) playCurrent();
@@ -5990,7 +5971,10 @@ async function batchNext() {
 async function speakNeuralStitched(run) {
   const genToken = ++S.neuralGenToken;
   const entries = [];
-  for (const i of run) entries.push(await generateNeural(i));
+  for (const i of run) {
+    entries.push(await generateNeural(i));
+    if (genToken !== S.neuralGenToken || !S.playing) return;
+  }
   if (genToken !== S.neuralGenToken || !S.playing) return;
   /* decode each cached WAV back to samples (16-bit mono — our own format
      from audioBlobParts, so a 44-byte header + PCM is a safe assumption) */
@@ -6056,6 +6040,7 @@ async function speakNeuralStitched(run) {
     }
     throw e;
   }
+  if (genToken !== S.neuralGenToken || S.audioPlay !== playState || !S.playing) return;
   neuralPump();   // keep generating ahead while the batch plays
 }
 
@@ -6131,18 +6116,19 @@ function rsvpPlay(fromWord) {
     if (token !== S.rsvp.token || !S.playing) return;
     if (w >= S.words.length) {
       pauseAll();
+      if (S.sleep.mode === 'chapter') { sleepClear(); NATIVE?.audioSession?.(false); }
       toast('🏁 Finished! That’s the end of the document.');
       return;
     }
     let sIdx = S.words[w].sent;
     if (sIdx !== startSent && sentSkipped(sIdx)) {          // hop over code blocks / skim-skipped
       const j = seekPlayable(sIdx, 1);
-      if (j === -1) { pauseAll(); toast('🏁 Finished! That’s the end of the document.'); return; }
+      if (j === -1) { pauseAll(); if (S.sleep.mode === 'chapter') { sleepClear(); NATIVE?.audioSession?.(false); } toast('🏁 Finished! That’s the end of the document.'); return; }
       w = S.sentences[j].start; sIdx = j;
     }
     if (sIdx !== S.curSent) {
       if (S.sleep.mode === 'chapter' && chapterOf(sIdx) !== chapterOf(S.curSent)) {
-        setSentence(sIdx); pauseAll(); sleepClear();
+        setSentence(sIdx); pauseAll(); sleepClear(); NATIVE?.audioSession?.(false);
         toast('🌙 End of chapter — pausing here. Good night.');
         return;
       }
@@ -6205,6 +6191,8 @@ function renderRsvpMode() {
 
 function playCurrent(fromWord) {
   if (!S.sentences.length) return;
+  stopVoicePreview();
+  if (!rsvpSilentActive()) NATIVE?.audioSession?.(true);
   S.breatherToken++;          // manual (re)start cancels any pending paragraph gap
   S.playing = true;
   setPlayIcon(true);
@@ -6214,19 +6202,19 @@ function playCurrent(fromWord) {
   if (S.engine === 'neural') speakNeural(S.curSent, fromWord);
   else if (S.engine === 'native' && NATIVE) speakNative(S.curSent, fromWord);
   else {
-    if (!synth) { toast('⚠️ This browser has no built-in speech — switching to the neural voice.'); setEngine('neural'); return speakNeural(S.curSent, fromWord); }
+    if (!synth) { pauseAll(); toast('No built-in speech is available. Choose Kokoro in Voice to set it up.', 8000); return; }
     speakDevice(S.curSent, fromWord);
   }
 }
 
 function pauseAll() {
+  stopVoicePreview();
   S.playing = false;
   setPlayIcon(false);
   $('btn-play').classList.remove('loading');
   S.utterToken++; stopEstLoop();
   if (synth) synth.cancel();
   if (NATIVE) { try { NATIVE.stop(); } catch {} nativeUtter = null; }
-  clearTimeout(kokoroCoverTimer);   // a pause must not spawn a cover voice later
   S.neuralGenToken++;
   if (S.audio) S.audio.pause();
   S.rsvp.token++;
@@ -6293,27 +6281,38 @@ function advanceAfterBreather() {
    button or a remote skip is a manual action and paints at once (Codex,
    #24). Inferring it from S.playing treated Next-while-playing as automatic. */
 function advanceSentence(dir, keepPlaying, auto = false) {
+  const resume = keepPlaying && S.playing;
   let next = S.curSent + dir;
   if (next >= 0 && next < S.sentences.length) {
     const p = seekPlayable(next, dir);           // hop over code blocks / skim-skipped sentences
     next = (p === -1) ? (dir > 0 ? S.sentences.length : 0) : p;
   }
   if (next >= S.sentences.length) {
-    pauseAll();
-    setSentence(S.sentences.length - 1);
+    seekSentence(S.sentences.length - 1, false);
+    if (S.sleep.mode === 'chapter') { sleepClear(); NATIVE?.audioSession?.(false); }
     toast('🏁 Finished! That’s the end of the document.');
     return;
   }
-  if (next < 0) { setSentence(0); if (keepPlaying && S.playing) playCurrent(); return; }
+  if (next < 0) { seekSentence(0, resume); return; }
   /* sleep timer: "end of chapter" */
   if (S.sleep.mode === 'chapter' && keepPlaying && S.playing && dir > 0 && chapterOf(next) !== chapterOf(S.curSent)) {
     setSentence(next);
-    pauseAll(); sleepClear();
+    pauseAll(); sleepClear(); NATIVE?.audioSession?.(false);
     toast('🌙 End of chapter — pausing here. Good night.');
     return;
   }
-  setSentence(next, false, auto && keepPlaying && S.playing);
-  if (keepPlaying && S.playing) playCurrent();
+  if (!auto) { seekSentence(next, resume); return; }
+  setSentence(next, false, resume);
+  if (resume) playCurrent();
+}
+
+function seekSentence(sentIdx, keepPlaying = S.playing, fromWord) {
+  pauseAll();
+  if (S.audioPlay?.batchUrl) URL.revokeObjectURL(S.audioPlay.batchUrl);
+  S.audioPlay = null;
+  setSentence(sentIdx);
+  if (fromWord != null) highlightWord(fromWord, true);
+  if (keepPlaying) playCurrent(fromWord);
 }
 
 function togglePlay() {
@@ -6328,9 +6327,13 @@ function togglePlay() {
     /* resume mid-sentence only when there's a live play (S.audioPlay) — the
        element also carries the silent prime clip, which must not "resume" */
     if (S.engine === 'neural' && !rsvpSilentActive() && S.audioPlay && S.audio && S.audio.currentTime > 0 && !S.audio.ended && S.audio.src) {
+      NATIVE?.audioSession?.(true);
       S.playing = true; setPlayIcon(true);
       S.audio.playbackRate = S.rate;
-      S.audio.play().catch(() => playCurrent(S.curWord));
+      const owner = S.neuralGenToken, audioPlay = S.audioPlay;
+      S.audio.play().catch(() => {
+        if (owner === S.neuralGenToken && S.playing && S.audioPlay === audioPlay && S.engine === 'neural') playCurrent(S.curWord);
+      });
     } else {
       playCurrent(S.curWord);
     }
@@ -6364,6 +6367,8 @@ function setEngine(engine, { prepare = true } = {}) {
   const wasPlaying = S.playing;
   kokoroResumeOnForeground = false;
   pauseAll();
+  if (S.audioPlay?.batchUrl) URL.revokeObjectURL(S.audioPlay.batchUrl);
+  S.audioPlay = null;
   S.engine = engine;
   store.set('engine', engine);
   const pill = $('btn-engine');
@@ -6374,7 +6379,7 @@ function setEngine(engine, { prepare = true } = {}) {
       store.set('neuralMobileWarned', true);
       toast('Kokoro can be heavy on phones. If it stops, choose a built-in voice. Help has setup details.', 8000);
     }
-    if (prepare && (S.kokoro.state === 'idle' || S.kokoro.state === 'error')) loadKokoro();
+    if (prepare) prepareCachedKokoro();
   } else if (engine === 'native') {
     pill.textContent = 'Apple voice';
     pill.classList.remove('engine-neural');
@@ -6448,6 +6453,7 @@ function setModalBackgroundInert(inert) {
   modalBackground.forEach(id => { const el = $(id); if (el) el.inert = inert || (id === 'rsvp' && !S.rsvp.open); });
 }
 function openSheet(id) {
+  stopVoicePreview(true);
   const sheet = $(id);
   if (!document.querySelector('.sheet.open')) sheetReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   document.querySelectorAll('.sheet').forEach(s => {
@@ -6464,6 +6470,8 @@ function openSheet(id) {
   requestAnimationFrame(() => sheet.querySelector('.sheet-close')?.focus({ preventScroll: true }));
 }
 function closeSheets(restoreFocus = true) {
+  stopVoicePreview(true);
+  appDialogSave = null;
   document.querySelectorAll('.sheet').forEach(s => {
     s.classList.remove('open');
     s.setAttribute('aria-hidden', 'true');
@@ -6478,6 +6486,18 @@ function closeSheets(restoreFocus = true) {
 }
 $('backdrop').addEventListener('click', closeSheets);
 
+$('app-edit-save').addEventListener('click', () => {
+  const save = appDialogSave, value = $('app-edit-input').value;
+  closeSheets();
+  save?.(value);
+  requestAnimationFrame(() => {
+    if (document.activeElement === document.body || document.activeElement?.closest('[inert]'))
+      $(document.body.classList.contains('document-open') ? 'btn-play' : 'lib-newfolder').focus({ preventScroll: true });
+  });
+});
+$('app-edit-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('app-edit-save').click(); }
+});
 $('toast-dismiss').addEventListener('click', dismissToast);
 $('btn-more').addEventListener('click', () => openSheet('more-sheet'));
 $('btn-help').addEventListener('click', () => openSheet('help-sheet'));
@@ -6740,8 +6760,8 @@ $('rsvp-wpm-range').addEventListener('input', e => {
 });
 
 $('btn-play').addEventListener('click', togglePlay);
-$('btn-prev').addEventListener('click', () => { const p = S.playing; pauseAll(); S.playing = p; setSentence(Math.max(0, S.curSent - 1)); if (p) playCurrent(); });
-$('btn-next').addEventListener('click', () => { const p = S.playing; pauseAll(); S.playing = p; advanceSentence(1, p); });
+$('btn-prev').addEventListener('click', () => seekSentence(Math.max(0, S.curSent - 1)));
+$('btn-next').addEventListener('click', () => advanceSentence(1, S.playing));
 /* speed sheet: slider + presets up to 4× */
 const SPEED_PRESETS = [1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4];
 function renderSpeedSheet() {
@@ -6847,6 +6867,16 @@ $('btn-voice').addEventListener('click', () => {
   setTimeout(() => $('voice-search').focus(), REDUCED_MOTION ? 0 : 220);
 });
 $('voice-search').addEventListener('input', renderVoiceList);
+$('kokoro-start').addEventListener('click', () => loadKokoro());
+$('kokoro-retry').addEventListener('click', () => loadKokoro());
+$('kokoro-cancel').addEventListener('click', () => {
+  pauseAll(); stopVoicePreview(); resetNeuralEngine();
+  store.set('nqLoadGuard', null);
+  S.kokoro.state = 'cancelled'; S.kokoro.stage = 'cancelled';
+  renderKokoroStatus('Setup cancelled. Completed files stay cached; Retry resumes where supported. Your voice choice is unchanged.', null);
+  $('kokoro-retry').focus();
+});
+$('kokoro-details').addEventListener('click', () => { renderVoiceList(); openSheet('voice-sheet'); });
 $('btn-settings').addEventListener('click', () => { renderDictList(); renderNeuralQuality(); openSheet('settings-sheet'); });
 document.querySelectorAll('#engine-seg button').forEach(b => b.addEventListener('click', () => { primeAudioGesture(); setEngine(b.dataset.engine); }));
 
@@ -6907,11 +6937,7 @@ function playFromWordElement(w) {
   const wIdx = +w.dataset.word;
   const sIdx = S.words[wIdx].sent;
   primeAudioGesture();
-  pauseAll();
-  setSentence(sIdx);
-  highlightWord(wIdx);   /* no pre-assignment — assigning S.curWord first made the guard skip the tapped word */
-  S.playing = true; setPlayIcon(true);
-  playCurrent(wIdx);
+  seekSentence(sIdx, true, wIdx);
 }
 content.addEventListener('click', e => {
   if (suppressClick) { suppressClick = false; clearTimeout(htmlTapTimer); htmlTapTimer = null; return; }
@@ -6937,9 +6963,7 @@ content.addEventListener('click', e => {
   };
   const seekTo = (frac, wasPlaying = S.playing) => {
     frac = Math.max(0, Math.min(1, frac));
-    pauseAll(); S.playing = wasPlaying;
-    setSentence(Math.round(frac * (S.sentences.length - 1)));
-    if (wasPlaying) playCurrent();
+    seekSentence(Math.round(frac * (S.sentences.length - 1)), wasPlaying);
   };
   let scrub = null;
   wrap.addEventListener('pointerdown', e => {
@@ -6968,9 +6992,7 @@ content.addEventListener('click', e => {
 $('chapter-select').addEventListener('change', e => {
   const blockIdx = +e.target.value;
   const target = content.querySelector(`[data-block="${blockIdx}"] .sent`);
-  const p = S.playing; pauseAll(); S.playing = p;
-  if (target) setSentence(+target.dataset.sent);
-  if (p) playCurrent();
+  if (target) seekSentence(+target.dataset.sent);
 });
 
 /* settings */
@@ -7095,7 +7117,7 @@ $('htmlinteractive-switch').addEventListener('click', async e => {
   if (S.mode === 'html' && S.lastFile && !/\.pdf$/i.test(S.lastFile.name)) {
     const wasPlaying = S.playing;
     pauseAll();
-    await openFile(S.lastFile, { view: 'native', resumeWord: S.curWord, preserveSession: true });
+    if (!await openFile(S.lastFile, { view: 'native', resumeWord: S.curWord, preserveSession: true })) return;
     if (wasPlaying) playCurrent(S.curWord);
   }
 });
@@ -7160,7 +7182,7 @@ $('smallprint-switch').addEventListener('click', async e => {
     const wasPlaying = S.playing;
     pauseAll();
     closeSheets();
-    await openFile(f, { resumeWord: -1, preserveSession: true });
+    if (!await openFile(f, { resumeWord: -1, preserveSession: true })) return;
     const w = Math.round(frac * S.words.length);
     setSentence(S.words[Math.min(w, Math.max(0, S.words.length - 1))]?.sent ?? 0);
     maybeScroll(S.words[S.curWord]?.el, true);
@@ -7362,8 +7384,8 @@ $('btn-fullscreen').addEventListener('click', e => {
 
 if ('mediaSession' in navigator) {
   try {
-    navigator.mediaSession.setActionHandler('play', togglePlay);
-    navigator.mediaSession.setActionHandler('pause', togglePlay);
+    navigator.mediaSession.setActionHandler('play', () => { if (!S.playing) togglePlay(); });
+    navigator.mediaSession.setActionHandler('pause', () => { kokoroResumeOnForeground = false; stopVoicePreview(true); if (S.playing) togglePlay(); });
     navigator.mediaSession.setActionHandler('nexttrack', () => { if (S.sentences.length) $('btn-next').click(); });
     navigator.mediaSession.setActionHandler('previoustrack', () => { if (S.sentences.length) $('btn-prev').click(); });
   } catch {}
@@ -7374,7 +7396,15 @@ if ('mediaSession' in navigator) {
    ==================================================================== */
 
 function renderKokoroStatus(text, pct) {
-  const progress = Math.max(0, Math.min(100, Number(pct) || 0));
+  const known = Number.isFinite(pct);
+  const progress = known ? Math.max(0, Math.min(100, pct)) : 35;
+  const state = S.kokoro.state;
+  const focusedAction = ['kokoro-start', 'kokoro-cancel', 'kokoro-retry'].includes(document.activeElement?.id);
+  $('kokoro-start').hidden = state !== 'idle';
+  $('kokoro-cancel').hidden = state !== 'loading';
+  $('kokoro-retry').hidden = state !== 'error' && state !== 'cancelled';
+  if (focusedAction && isSheetOpen('voice-sheet'))
+    (state === 'loading' ? $('kokoro-cancel') : state === 'error' || state === 'cancelled' ? $('kokoro-retry') : $('voice-sheet').querySelector('.sheet-close')).focus({ preventScroll: true });
   $('kokoro-status').style.display = 'block';
   $('kokoro-status-text').textContent = text;
   $('kokoro-bar').style.width = progress + '%';
@@ -7388,9 +7418,20 @@ function renderKokoroStatus(text, pct) {
   $('kokoro-float-bar').style.width = progress + '%';
   f.querySelector('[role="progressbar"]')?.setAttribute('aria-valuenow', String(progress));
   clearTimeout(f._h);
-  if (S.kokoro.state !== 'loading') f._h = setTimeout(() => { f.style.display = 'none'; }, 8000);
+  for (const bar of [$('kokoro-status'), f].map(el => el.querySelector('[role="progressbar"]'))) {
+    if (known) bar.setAttribute('aria-valuenow', String(progress));
+    else bar.removeAttribute('aria-valuenow');
+    bar.setAttribute('aria-valuetext', text);
+  }
+  if (state !== 'loading') f._h = setTimeout(() => {
+    if (f.contains(document.activeElement)) (document.querySelector('.sheet.open .sheet-close') || $(document.body.classList.contains('document-open') ? 'btn-play' : 'btn-paste-open')).focus({ preventScroll: true });
+    f.style.display = 'none';
+  }, 8000);
 }
-function hideKokoroStatus() { $('kokoro-status').style.display = 'none'; $('kokoro-float').style.display = 'none'; }
+function hideKokoroStatus() {
+  if ($('kokoro-float').contains(document.activeElement)) (document.querySelector('.sheet.open .sheet-close') || $(document.body.classList.contains('document-open') ? 'btn-play' : 'btn-paste-open')).focus({ preventScroll: true });
+  $('kokoro-status').style.display = 'none'; $('kokoro-float').style.display = 'none';
+}
 function hideKokoroSheetStatus() { $('kokoro-status').style.display = 'none'; }
 
 /* opt-in Settings toggle: label the playing sentence with its timing mode
@@ -7443,9 +7484,78 @@ function refocusSelectedVoice() {
   requestAnimationFrame(() => $('voice-list').querySelector('.voice-item.on')?.focus({ preventScroll: true }));
 }
 
+function currentVoice() {
+  return S.engine === 'device' ? S.deviceVoice : S.engine === 'native' ? S.nativeVoice : S.neuralVoice;
+}
+function stopVoicePreview(endListening = false) {
+  voicePreviewToken++;
+  if (previewAudio) { previewAudio.pause(); URL.revokeObjectURL(previewAudio.src); previewAudio = null; }
+  if (previewNativeToken != null) { NATIVE?.stop(); previewNativeToken = null; }
+  if (previewButton) {
+    synth?.cancel();
+    previewButton.textContent = 'Preview'; previewButton.setAttribute('aria-pressed', 'false');
+    previewButton = null;
+    if (endListening && !document.body.classList.contains('document-open')) NATIVE?.clearNowPlaying?.();
+  }
+}
+async function previewVoice(engine, voice, text = 'Welcome to Aloud. This is a voice preview.', button) {
+  const stopping = previewButton === button;
+  pauseAll(); stopVoicePreview();
+  if (stopping) { if (!S.sentences.length) NATIVE?.clearNowPlaying?.(); return; }
+  const owner = voicePreviewToken;
+  previewButton = button;
+  button.textContent = 'Stop preview'; button.setAttribute('aria-pressed', 'true');
+  const done = () => { if (owner === voicePreviewToken) stopVoicePreview(true); };
+  try {
+    NATIVE?.audioSession?.(true);
+    if (engine === 'native') {
+      previewNativeToken = -(owner + 1);
+      NATIVE.speak(previewNativeToken, text, 1, voice);
+    } else if (engine === 'device') {
+      if (!synth || !voice) throw new Error('No built-in voice is available.');
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.voice = voice; utterance.lang = voice.lang;
+      utterance.onend = done;
+      utterance.onerror = e => { if (owner === voicePreviewToken) { done(); toast(`Voice preview failed: ${e.error || 'unavailable'}.`); } };
+      synth.speak(utterance);
+    } else {
+      if (S.kokoro.state !== 'ready') await loadKokoro();
+      if (owner !== voicePreviewToken) return;
+      if (S.kokoro.state !== 'ready') { done(); return; }
+      const job = genTail.catch(() => {}).then(() => {
+        if (owner !== voicePreviewToken) return null;
+        return S.kokoro.workerGenerate ? S.kokoro.workerGenerate(text, voice) : S.kokoro.tts.generate(text, { voice, speed: 1 });
+      });
+      genTail = job.catch(() => {});
+      const raw = await job;
+      if (owner !== voicePreviewToken || !raw) return;
+      previewAudio = new Audio(audioBlobParts(raw));
+      previewAudio.onended = done;
+      previewAudio.onerror = () => { if (owner === voicePreviewToken) { done(); toast('Could not play this voice preview.'); } };
+      await previewAudio.play();
+    }
+  } catch (e) {
+    if (owner !== voicePreviewToken) return;
+    done(); toast(`Voice preview failed: ${e.message || e}.`, 7000);
+  }
+}
+function appendVoiceChoice(list, button, engine, voice, name) {
+  const row = document.createElement('div'); row.className = 'voice-choice';
+  const preview = document.createElement('button'); preview.className = 'chip';
+  preview.textContent = 'Preview'; preview.setAttribute('aria-label', `Preview ${name}`);
+  preview.setAttribute('aria-pressed', 'false');
+  preview.addEventListener('click', () => previewVoice(engine, voice, undefined, preview));
+  row.append(button, preview); list.appendChild(row);
+}
+
 function renderVoiceList() {
+  stopVoicePreview(true);
   const list = $('voice-list');
   const note = $('voice-note');
+  $('kokoro-setup').hidden = S.engine !== 'neural';
+  $('kokoro-background-note').textContent = NATIVE?.nativeKokoro
+    ? 'iOS Kokoro plays buffered speech while locked, then waits for Aloud to be active. Your place is kept and reading resumes on return. For long background listening, choose an Apple voice. Setup may need about 700 MB free. Cancel keeps partial downloads; current verification may finish at a safe boundary.'
+    : 'One-time model download: about 92–326 MB, plus engine files. Completed files are cached locally, subject to browser storage limits. Keep Aloud open during setup. Background listening depends on your browser; buffered speech may stop when locked.';
   list.innerHTML = '';
   if (S.engine === 'device') {
     hideKokoroSheetStatus();
@@ -7455,8 +7565,8 @@ function renderVoiceList() {
       finishVoiceList(0, 0);
       return;
     }
-    const all = S.deviceVoices.slice(0, 60);
-    const voices = voiceFilter(all, v => [v.name, v.lang, v.localService ? 'on device exact' : 'cloud calibrated']);
+    const all = S.deviceVoices;
+    const voices = voiceFilter(all, v => [v.name, v.lang, v.localService ? 'on device exact' : 'online estimated']);
     voices.forEach((v, i) => {
       const b = document.createElement('button');
       b.className = 'voice-item' + (v === S.deviceVoice ? ' on' : '');
@@ -7472,14 +7582,14 @@ function renderVoiceList() {
         refocusSelectedVoice();
         if (S.playing && S.engine === 'device') playCurrent(S.curWord);
       });
-      list.appendChild(b);
+      appendVoiceChoice(list, b, 'device', v, v.name);
     });
     finishVoiceList(voices.length, all.length);
   } else if (S.engine === 'native') {
     hideKokoroSheetStatus();
     note.innerHTML = 'Apple’s built-in voices, spoken by the app itself rather than the browser. Every word is reported as it’s said, so karaoke timing is <b>exact</b> at any speed — no download, no waiting. <b>Premium</b> and <b>Enhanced</b> voices are the good ones; add more in <i>Settings ▸ Accessibility ▸ Spoken Content ▸ Voices</i> and they’ll appear here.';
     if (!S.nativeVoices.length) { note.textContent = 'Loading the device’s installed voices…'; finishVoiceList(0, 0); return; }
-    const all = S.nativeVoices.slice(0, 80);
+    const all = S.nativeVoices;
     const voices = voiceFilter(all, v => [v.name, v.lang, v.quality || '']);
     voices.forEach((v, i) => {
       const b = document.createElement('button');
@@ -7496,14 +7606,14 @@ function renderVoiceList() {
         refocusSelectedVoice();
         if (S.playing && S.engine === 'native') playCurrent(S.curWord);
       });
-      list.appendChild(b);
+      appendVoiceChoice(list, b, 'native', v.id, v.name);
     });
     finishVoiceList(voices.length, all.length);
   } else {
     note.textContent = NATIVE?.nativeKokoro
-      ? 'Kokoro-82M — English (US / UK). The full-quality model running natively with Apple MLX, outside the browser. The model downloads once when you first press Play, then all 28 voices stay on this device. Model-derived timing keeps karaoke closely synced at any speed up to 4×.'
+      ? 'Kokoro-82M — English (US / UK). The full-quality model running natively with Apple MLX, outside the browser. Start setup or press Play to download the model once; all 28 voices then stay on this device. Model-derived timing keeps karaoke closely synced at any speed up to 4×.'
       : 'Kokoro-82M — English (US / UK). An open-source (Apache-2.0) neural voice that runs entirely in your browser. One-time download (92–326 MB depending on the quality tier in Settings), then it works offline. Model-derived timing keeps karaoke closely synchronized at speeds up to 4×.';
-    if (S.kokoro.state === 'loading') renderKokoroStatus($('kokoro-status-text').textContent || 'Loading…', S.kokoro.progress);
+    if (S.kokoro.state !== 'ready') renderKokoroStatus($('kokoro-status-text').textContent || 'Start setup or press Play to download Kokoro once.', S.kokoro.progress);
     const voices = voiceFilter(KOKORO_VOICES, v => [v.name, v.meta, v.recommended ? 'recommended' : '']);
     voices.forEach(v => {
       const b = document.createElement('button');
@@ -7518,7 +7628,7 @@ function renderVoiceList() {
         refocusSelectedVoice();
         if (S.engine === 'neural' && S.playing) playCurrent(S.curWord);
       });
-      list.appendChild(b);
+      appendVoiceChoice(list, b, 'neural', v.id, v.name);
     });
     finishVoiceList(voices.length, KOKORO_VOICES.length);
   }
@@ -7566,11 +7676,9 @@ $('btn-speed').textContent = S.rate + '×';
 initNativeEngine();     // no-op outside the iOS app
 /* a stored 'native' engine is only honoured when the bridge is actually there —
    otherwise an app user who later opens the web build would land on a dead engine */
-/* Rendering an existing preference must stay lightweight. Swift Playgrounds
-   starts an App Preview while opening the project; preparing a 327 MB MLX
-   model there can terminate the editor before the user ever presses Run.
-   A deliberate engine tap or the first Play starts the one-time setup. */
-setEngine(S.engine === 'neural' ? 'neural' : (S.engine === 'native' && NATIVE) ? 'native' : 'device', { prepare: false });
+/* Prepare an existing local model on launch. A required download still waits
+   for Start setup, Play or Preview; no new model storage is introduced. */
+setEngine(S.engine === 'neural' ? 'neural' : (S.engine === 'native' && NATIVE) ? 'native' : 'device');
 applyFont();
 
 /* PWA: register the service worker when served over http(s) */
@@ -7667,15 +7775,17 @@ const SORTS = [
 let libExpanded = false;
 const libName = r => r.title || r.name || '';
 const folders = () => store.get('folders', []);
-function askFolder(preset) {
-  const name = (prompt('Name this folder — a class, a project, anything.', preset || '') || '').trim().slice(0, 40);
-  if (!name) return null;
-  const list = folders();
-  const existing = list.find(f => f.toLowerCase() === name.toLowerCase());
-  if (existing) return existing;
-  store.set('folders', [...list, name]);
-  return name;
+function askFolder(done) {
+  showAppEdit('New folder', 'Folder name', '', value => {
+    const name = value.trim().slice(0, 40);
+    if (!name) return;
+    const list = folders();
+    const existing = list.find(f => f.toLowerCase() === name.toLowerCase());
+    if (!existing) store.set('folders', [...list, name]);
+    done(existing || name);
+  }, 'Name a class, project or anything else. Folders are saved on this device.');
 }
+
 function setFolder(key, folder) {
   store.set('recent', store.get('recent', []).map(r => r.key === key ? { ...r, folder } : r));
   renderRecents();
@@ -7697,7 +7807,7 @@ function openFolderSheet(r) {
   };
   chip('Unfiled', !cur, () => { setFolder(folderTarget, ''); closeSheets(); });
   for (const f of folders()) chip(f, f === cur, () => { setFolder(folderTarget, f); closeSheets(); toast(`🗂 Moved to “${f}”.`); });
-  chip('＋ New folder…', false, () => { const f = askFolder(); if (f) { setFolder(folderTarget, f); closeSheets(); toast(`🗂 Moved to “${f}”.`); } });
+  chip('＋ New folder…', false, () => { const key = folderTarget; askFolder(f => { setFolder(key, f); toast(`Moved to “${f}”.`); }); });
   openSheet('folder-sheet');
 }
 function renderRecents() {
@@ -7798,32 +7908,32 @@ $('lib-sort').addEventListener('click', () => {
   store.set('libSort', SORTS[(i + 1) % SORTS.length][0]);
   renderRecents();
 });
-$('lib-newfolder').addEventListener('click', () => {
-  const f = askFolder();
-  if (!f) return;
+$('lib-newfolder').addEventListener('click', () => askFolder(f => {
   store.set('libFolder', f);
   renderRecents();
-  toast(`🗂 “${f}” created — tap 🗂 on a file to put it in here.`, 4500);
-});
+  toast(`“${f}” created — use Move to folder on a document to put it here.`, 4500);
+}));
 $('lib-rename').addEventListener('click', () => {
   const cur = store.get('libFolder', '');
   if (!cur || cur === UNFILED) return;
-  const name = (prompt('Rename this folder.', cur) || '').trim().slice(0, 40);
-  if (!name || name === cur) return;
-  store.set('folders', folders().map(f => f === cur ? name : f));
-  store.set('recent', store.get('recent', []).map(r => r.folder === cur ? { ...r, folder: name } : r));
-  store.set('libFolder', name);
-  renderRecents();
+  showAppEdit('Rename folder', 'Folder name', cur, value => {
+    const name = value.trim().slice(0, 40);
+    if (!name || name === cur) return;
+    store.set('folders', [...new Set(folders().map(f => f === cur ? name : f))]);
+    store.set('recent', store.get('recent', []).map(r => r.folder === cur ? { ...r, folder: name } : r));
+    store.set('libFolder', name);
+    renderRecents();
+  });
 });
 $('lib-delfolder').addEventListener('click', () => {
   const cur = store.get('libFolder', '');
   if (!cur || cur === UNFILED) return;
-  const n = store.get('recent', []).filter(r => r.folder === cur).length;
-  if (n && !confirm(`Delete the folder “${cur}”?\n\nThe ${n} file${n === 1 ? '' : 's'} inside stay in your list — they just go back to Unfiled.`)) return;
-  store.set('folders', folders().filter(f => f !== cur));
-  store.set('recent', store.get('recent', []).map(r => r.folder === cur ? { ...r, folder: '' } : r));
-  store.set('libFolder', '');
-  renderRecents();
+  showAppEdit('Delete folder?', '', '', () => {
+    store.set('folders', folders().filter(f => f !== cur));
+    store.set('recent', store.get('recent', []).map(r => r.folder === cur ? { ...r, folder: '' } : r));
+    store.set('libFolder', '');
+    renderRecents();
+  }, `Delete “${cur}”? Its documents stay in your Library under Unfiled.`, false, true);
 });
 renderRecents();
 
@@ -7854,7 +7964,7 @@ function sleepTick() {
   if (S.sleep.mode !== 'timer') return;
   if (Date.now() >= S.sleep.until) {
     sleepClear();
-    if (S.playing) fadeOutAndPause(); else updateSleepBtn();
+    if (S.playing) fadeOutAndPause(); else { NATIVE?.audioSession?.(false); updateSleepBtn(); }
     return;
   }
   updateSleepBtn();
@@ -7866,9 +7976,9 @@ function fadeOutAndPause() {
     const iv = setInterval(() => {
       t += 0.1;
       a.volume = Math.max(0, v0 * (1 - t / 4));
-      if (t >= 4 || a.paused) { clearInterval(iv); pauseAll(); a.volume = v0; toast('🌙 Sleep timer — paused. Good night.'); }
+      if (t >= 4 || a.paused) { clearInterval(iv); pauseAll(); NATIVE?.audioSession?.(false); a.volume = v0; toast('🌙 Sleep timer — paused. Good night.'); }
     }, 100);
-  } else { pauseAll(); toast('🌙 Sleep timer — paused. Good night.'); }
+  } else { pauseAll(); NATIVE?.audioSession?.(false); toast('🌙 Sleep timer — paused. Good night.'); }
 }
 function updateSleepBtn() {
   const b = $('btn-sleep');
@@ -7932,9 +8042,8 @@ function renderBmList() {
     });
     row.querySelector('.rr-open').addEventListener('click', () => {
       closeSheets();
-      setSentence(b.sent);
+      seekSentence(b.sent);
       maybeScroll(S.words[S.curWord]?.el, true);
-      if (S.playing) playCurrent();
     });
     box.appendChild(row);
   });
@@ -7972,9 +8081,8 @@ function runSearch() {
     row.setAttribute('aria-label', `Search result at ${pct.textContent}: ${name.textContent}`);
     const openResult = () => {
       closeSheets();
-      setSentence(i);
+      seekSentence(i);
       maybeScroll(S.words[S.curWord]?.el, true);
-      if (S.playing) playCurrent();
     };
     row.addEventListener('click', openResult);
     row.addEventListener('keydown', e => {

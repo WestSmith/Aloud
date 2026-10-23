@@ -23,14 +23,11 @@ struct AloudApp: App {
             let active = phase == .active
             print("[Aloud] Aggregate scene active: \(active)")
             NativeKokoroEngine.shared.setAppActive(active)
-            if active {
-                AudioSession.shared.reactivate()
-            }
         }
     }
 }
 
-/// Owns launch order: audio session first, then the local server, then the URL
+/// Owns launch order: the local server, then the URL
 /// the web view should load.
 @MainActor
 final class AppModel: ObservableObject {
@@ -44,24 +41,19 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var state: LoadState = .starting
 
-    private let server: LocalWebServer?
-    private let startupFailure: String?
+    private var server: LocalWebServer?
     private var started = false
 
-    init() {
-        guard let webRoot = Self.bundledWebRoot() else {
-            server = nil
-            startupFailure = "The bundled Aloud reader is missing from this app build. Reinstall this version of Aloud."
-            return
-        }
-        do {
-            let audioRoot = try NativeKokoroPaths.audioDirectory()
-            server = LocalWebServer(root: webRoot, nativeAudioRoot: audioRoot)
-            startupFailure = nil
-        } catch {
-            server = nil
-            startupFailure = "Aloud could not create its private Kokoro audio cache. Check that the iPad has free storage, then reopen the app.\n\n\(error.localizedDescription)"
-        }
+    func retry() {
+        started = false
+        state = .starting
+        start()
+    }
+
+    var diagnostics: String {
+        let detail: String
+        if case .failed(let message) = state { detail = message } else { detail = "Starting reader" }
+        return "Aloud native startup • iOS \(UIDevice.current.systemVersion)\n\(detail)"
     }
 
     /// Locate the bundled copy of the web app.
@@ -108,14 +100,19 @@ final class AppModel: ObservableObject {
         guard !started else { return }
         started = true
 
-        // Before anything loads: claim a .playback session so the very first
-        // sound the web view makes is already exempt from the silent switch.
-        AudioSession.shared.activate()
-
-        guard let server else {
-            state = .failed(startupFailure ?? "Aloud could not start its bundled reader.")
-            return
+        if server == nil {
+            guard let webRoot = Self.bundledWebRoot() else {
+                state = .failed("The bundled reader is missing. Reinstall this version of Aloud.")
+                return
+            }
+            do {
+                server = LocalWebServer(root: webRoot, nativeAudioRoot: try NativeKokoroPaths.audioDirectory())
+            } catch {
+                state = .failed("Aloud could not create its private audio cache. Check free storage and retry.\n\n\(error.localizedDescription)")
+                return
+            }
         }
+        guard let server else { return }
 
         // The completion already lands on the main queue, but it is a plain
         // non-isolated closure, so hop explicitly rather than relying on that —

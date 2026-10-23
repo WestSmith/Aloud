@@ -69,13 +69,8 @@ self.onmessage = async (event) => {
         dtype: message.dtype,
         device: message.device,
         progress_callback: (progress) => {
-          if (progress.status === 'progress' && progress.total) {
-            self.postMessage({
-              type: 'progress',
-              loaded: progress.loaded,
-              total: progress.total,
-            });
-          }
+          self.postMessage({ type: 'progress', status: progress.status,
+            file: progress.file || progress.name, loaded: progress.loaded, total: progress.total });
         },
       };
 

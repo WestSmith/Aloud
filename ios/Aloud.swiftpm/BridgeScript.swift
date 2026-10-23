@@ -88,6 +88,7 @@ enum BridgeScript {
         stop:   function () { post({ cmd: 'stop' }); },
         pause:  function () { post({ cmd: 'pause' }); },
         resume: function () { post({ cmd: 'resume' }); },
+        audioSession: function (active) { post({ cmd: 'audioSession', active: !!active }); },
         appearance: function (value) { post({ cmd: 'appearance', value: value }); },
 
         /* Resolves with [{id, name, lang, quality, gender}, ...] */
@@ -110,6 +111,9 @@ enum BridgeScript {
            local WAV URL and token timestamps cross this boundary. */
         kokoro: {
           onProgress: function () {},
+          cached: function () {
+            return kokoroRequest('kokoroCached', null, 10000);
+          },
           prepare: function () {
             return kokoroRequest('kokoroPrepare', null, 30 * 60 * 1000);
           },
@@ -124,6 +128,12 @@ enum BridgeScript {
               function (pending) { return pending.cmd === 'kokoroGenerate'; },
               'The open document changed.',
               'document_changed'
+            );
+          },
+          cancelSetup: function () {
+            cancelKokoroRequests(
+              function (pending) { return pending.cmd === 'kokoroPrepare'; },
+              'Kokoro setup was cancelled.', 'setup_cancelled'
             );
           },
           release: function (audioId) {

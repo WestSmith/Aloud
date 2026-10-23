@@ -35,7 +35,7 @@ final class MisakiG2PProcessor : G2PProcessor {
   /// - Throws: `G2PProcessorError.processorNotInitialized` if `setLanguage(_:)` has not been called.
   func process(input: String) throws -> (String, [MToken]?) {
     guard let misaki else { throw G2PProcessorError.processorNotInitialized }
-    return misaki.phonemize(text: input)
+    return try misaki.phonemize(text: input)
   }
 }
 

@@ -24,101 +24,85 @@ final class AudioSession {
 
     private init() {}
 
-    /// Callbacks into whatever is currently producing audio. The web view sets
-    /// these so the lock screen and headphone buttons drive the real player.
-    var onPlay: (() -> Void)?
-    var onPause: (() -> Void)?
-    var onTogglePlayPause: (() -> Void)?
-    var onNextTrack: (() -> Void)?
-    var onPreviousTrack: (() -> Void)?
-
+    // Each scene owns its callbacks. An idle/closing window cannot clear the
+    // playing window's remote controls or metadata. Access is on the main queue.
+    private var owners: [UUID: (String) -> Void] = [:]
+    private var metadata: [UUID: [String: Any]] = [:]
+    private var playingOwners = Set<UUID>()
+    private var activeOwner: UUID?
     private var configured = false
+    private var sessionActive = false
 
-    func activate() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .spokenAudio, options: [])
-            try session.setActive(true, options: [])
-        } catch {
-            // Non-fatal: audio may still work, it just won't survive the mute
-            // switch or a screen lock. Worth surfacing in the console rather
-            // than dying, since the reader itself is still perfectly usable.
-            print("[Aloud] AVAudioSession setup failed: \(error)")
-        }
-
+    func register(owner: UUID, remote: @escaping (String) -> Void) {
+        owners[owner] = remote
         guard !configured else { return }
         configured = true
-
-        registerRemoteCommands()
-        observeInterruptions()
-    }
-
-    /// Re-assert the session after an interruption (call, Siri, another app).
-    /// iOS deactivates us on interruption and does not always restore cleanly.
-    func reactivate() {
-        do {
-            try AVAudioSession.sharedInstance().setActive(true, options: [])
-        } catch {
-            print("[Aloud] AVAudioSession reactivate failed: \(error)")
-        }
-    }
-
-    // MARK: - Lock screen / headphone controls
-
-    private func registerRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
-
-        center.playCommand.addTarget { [weak self] _ in
-            guard let onPlay = self?.onPlay else { return .commandFailed }
-            onPlay()
-            return .success
-        }
-        center.pauseCommand.addTarget { [weak self] _ in
-            guard let onPause = self?.onPause else { return .commandFailed }
-            onPause()
-            return .success
-        }
-        center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let onTogglePlayPause = self?.onTogglePlayPause else { return .commandFailed }
-            onTogglePlayPause()
-            return .success
-        }
-        center.nextTrackCommand.addTarget { [weak self] _ in
-            guard let next = self?.onNextTrack else { return .commandFailed }
-            next()
-            return .success
-        }
-        center.previousTrackCommand.addTarget { [weak self] _ in
-            guard let prev = self?.onPreviousTrack else { return .commandFailed }
-            prev()
-            return .success
-        }
-    }
-
-    private func observeInterruptions() {
-        NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main
-        ) { [weak self] note in
-            guard
-                let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                let type = AVAudioSession.InterruptionType(rawValue: raw)
-            else { return }
-
-            switch type {
-            case .began:
-                self?.onPause?()
-            case .ended:
-                self?.reactivate()
-            @unknown default:
-                break
+        for (command, action) in [(center.playCommand, "play"), (center.pauseCommand, "pause"),
+                                  (center.togglePlayPauseCommand, "toggle"),
+                                  (center.nextTrackCommand, "next"), (center.previousTrackCommand, "prev")] {
+            command.addTarget { [weak self] _ in
+                DispatchQueue.main.async {
+                    guard let self, let owner = self.activeOwner else { return }
+                    self.owners[owner]?(action)
+                }
+                return .success
             }
         }
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(), queue: .main
+        ) { [weak self] note in
+            guard let self,
+                  let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
+            self.sessionActive = false
+            for owner in self.playingOwners { self.owners[owner]?("pause") }
+            // Resume only on an explicit Play; do not take audio back from Siri
+            // or another app just because Aloud comes to the foreground.
+        }
     }
 
-    /// Populate the lock screen with what is currently being read.
-    func updateNowPlaying(title: String, progress: Double, playing: Bool) {
+    /// Called on requested playback, never at launch, setup or foregrounding.
+    func acquire(owner: UUID) -> String? {
+        do {
+            if !sessionActive {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .spokenAudio, options: [])
+                try session.setActive(true)
+                sessionActive = true
+            }
+            playingOwners.insert(owner)
+            activeOwner = owner
+            return nil
+        } catch {
+            return "Aloud could not activate playback audio: \(error.localizedDescription)"
+        }
+    }
+
+    func release(owner: UUID) -> String? {
+        playingOwners.remove(owner)
+        guard playingOwners.isEmpty, sessionActive else { return nil }
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            sessionActive = false
+            return nil
+        } catch {
+            return "Aloud could not release playback audio: \(error.localizedDescription)"
+        }
+    }
+
+    func remove(owner: UUID) {
+        _ = release(owner: owner)
+        owners.removeValue(forKey: owner)
+        metadata.removeValue(forKey: owner)
+        if activeOwner == owner {
+            activeOwner = playingOwners.first ?? metadata.keys.first
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = activeOwner.flatMap { metadata[$0] }
+        }
+    }
+
+    func updateNowPlaying(owner: UUID, title: String, progress: Double, playing: Bool) {
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: title,
             MPMediaItemPropertyArtist: "Aloud",
@@ -127,13 +111,17 @@ final class AudioSession {
         if progress.isFinite, progress >= 0, progress <= 1 {
             info[MPNowPlayingInfoPropertyPlaybackProgress] = Float(progress)
         }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        metadata[owner] = info
+        if activeOwner == nil { activeOwner = owner }
+        if activeOwner == owner { MPNowPlayingInfoCenter.default().nowPlayingInfo = info }
     }
 
-    /// Remove a document that is no longer open from the lock screen and
-    /// Control Centre without deactivating the app's playback audio session.
-    /// The next document can therefore publish metadata and play immediately.
-    func clearNowPlaying() {
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    func clearNowPlaying(owner: UUID) {
+        _ = release(owner: owner)
+        metadata.removeValue(forKey: owner)
+        if activeOwner == owner {
+            activeOwner = playingOwners.first ?? metadata.keys.first
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = activeOwner.flatMap { metadata[$0] }
+        }
     }
 }

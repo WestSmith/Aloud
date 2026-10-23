@@ -83,6 +83,7 @@ final class NativeKokoroEngine {
     private var tts: KokoroTTS?
     private var voices: [String: MLXArray] = [:]
     private var downloader: NativeKokoroDownloader?
+    private var downloadCancelled = false
     private var rejectedBundledModel = false
 
     private init() {
@@ -138,6 +139,21 @@ final class NativeKokoroEngine {
             self.state = .preparing
             print("[Aloud] Native Kokoro resuming deferred preparation")
             self.beginPreparation()
+        }
+    }
+
+    /// Read existing file metadata only; cached preparation still verifies it.
+    func cached(requestID: String) {
+        queue.async { [weak self] in
+            guard let self, !self.consumeCancellation(requestID) else { return }
+            let bundled = self.bundledResource(name: "kokoro-v1_0", extension: "safetensors")
+            let directory = try? NativeKokoroPaths.downloadedModelDirectory()
+            let candidates = [bundled, directory?.appendingPathComponent(Self.modelFileName),
+                              directory?.appendingPathComponent("\(Self.modelFileName).partial")]
+            let cached = self.state == .ready || candidates.compactMap { $0 }.contains {
+                self.fileSize($0) == Self.expectedModelBytes
+            }
+            self.replySuccess(requestID: requestID, result: ["cached": cached])
         }
     }
 
@@ -288,6 +304,11 @@ final class NativeKokoroEngine {
                     message: "This text segment is too long for Kokoro.",
                     retryable: true
                 )
+            } catch let error as NSError where error.domain == "Aloud.Pronunciation" {
+                self.replyFailure(
+                    requestID: requestID, code: "pronunciation_too_long",
+                    message: error.localizedDescription, retryable: false
+                )
             } catch let failure as NativeKokoroFailure {
                 self.replyFailure(
                     requestID: requestID,
@@ -318,6 +339,10 @@ final class NativeKokoroEngine {
         queue.async { [weak self] in
             guard let self else { return }
             self.waitingPrepareIDs.removeAll { $0 == requestID }
+            if self.waitingPrepareIDs.isEmpty, let downloader = self.downloader {
+                self.downloadCancelled = true
+                downloader.cancel()
+            }
             if self.waitingPrepareIDs.isEmpty, self.state == .waitingForForeground {
                 self.state = .idle
             }
@@ -402,6 +427,15 @@ final class NativeKokoroEngine {
                     guard let self else { return }
                     self.queue.async {
                         self.downloader = nil
+                        if self.downloadCancelled {
+                            self.downloadCancelled = false
+                            self.state = .idle
+                            if !self.waitingPrepareIDs.isEmpty {
+                                self.state = .preparing
+                                self.beginPreparation()
+                            }
+                            return
+                        }
                         switch result {
                         case .success:
                             self.validateDownloadedPartial(partialURL, finalURL: finalURL)
@@ -558,6 +592,9 @@ final class NativeKokoroEngine {
             )
             return
         }
+        // Cancel during CPU verification at the next safe boundary, before MLX.
+        waitingPrepareIDs.removeAll { consumeCancellation($0) }
+        guard !waitingPrepareIDs.isEmpty else { state = .idle; return }
         // NpyzReader creates MLXArray values. Recheck after the CPU-only hash
         // so a scene that resigned active during verification does not begin
         // allocating MLX resources in the background.
@@ -1011,6 +1048,10 @@ private final class NativeKokoroDownloader: NSObject, URLSessionDataDelegate {
         startingBytes = (size > 0 && size < expectedBytes) ? size : 0
         if startingBytes == 0 { try? FileManager.default.removeItem(at: destination) }
         beginTask()
+    }
+
+    func cancel() {
+        session.invalidateAndCancel() // URLSession serializes completion; partial bytes remain resumable.
     }
 
     private func beginTask() {
