@@ -749,6 +749,10 @@
   #rsvp-pre, #rsvp-post { min-width: 0; }
   #rsvp-state { color: var(--text-dim); font-size: calc(.75rem * var(--ui-scale) * var(--ui-system-scale, 1)); }
   body:not(.playing) #content .w.speaking { background: transparent !important; color: inherit !important; box-shadow: none; text-decoration: underline; text-decoration-color: var(--accent-strong); text-underline-offset: 4px; }
+  body:not(.playing) #content.pdf-mode .textlayer .w.speaking {
+    background: transparent !important; color: transparent !important;
+    text-decoration: none; /* the PDF word's existing accent border marks position */
+  }
   .sheet-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; position: sticky; top: -10px; z-index: 3; background: var(--bg-elev); padding: 8px 0; margin-bottom: 10px; }
   .sheet-header h3 { padding-right: 0; grid-column: 1; margin: 0; min-height: 44px; display: flex; align-items: center; }
   .sheet-header .sheet-close { position: static; grid-column: 2; grid-row: 2; }
@@ -1371,6 +1375,7 @@ function routeNotices() {
 function toast(msg, ms = 2600) {
   routeNotices();
   const t = $('toast');
+  t._cleanup?.(); t._cleanup = null;
   t.textContent = msg; t.classList.remove('actionable'); t.classList.add('show');
   t.setAttribute('role', 'status');
   t.removeAttribute('tabindex');
@@ -1378,8 +1383,11 @@ function toast(msg, ms = 2600) {
   clearTimeout(t._h); t._h = setTimeout(dismissToast, ms);
 }
 function dismissToast() {
-  const focused = $('toast').contains(document.activeElement) || document.activeElement === $('toast-dismiss');
-  $('toast').classList.remove('show', 'actionable');
+  const t = $('toast');
+  const focused = t.contains(document.activeElement) || document.activeElement === $('toast-dismiss');
+  t._cleanup?.(); t._cleanup = null;
+  clearTimeout(t._h);
+  t.classList.remove('show', 'actionable');
   if (focused) (document.querySelector('.sheet.open .sheet-close') || $(document.body.classList.contains('document-open') ? 'btn-play' : 'btn-paste-open')).focus({ preventScroll: true });
 }
 function showLoading(msg) { $('loading-msg').textContent = msg; $('loading-overlay').style.display = 'grid'; $('loading-overlay').setAttribute('aria-hidden', 'false'); }
@@ -7128,9 +7136,9 @@ $('coi-switch').addEventListener('click', async e => {
   const t = $('toast');
   toast(S.coiThreads ? '🔁 Tap here to reload — multi-core kicks in on the next load.' : '🔁 Tap here to reload to finish turning multi-core off.', 12000);
   t.classList.add('actionable'); t.setAttribute('role', 'button'); t.setAttribute('tabindex', '0');
-  const onTap = () => { t.removeEventListener('click', onTap); location.reload(); };
+  const onTap = () => { dismissToast(); location.reload(); };
   t.addEventListener('click', onTap);
-  setTimeout(() => { t.removeEventListener('click', onTap); t.classList.remove('actionable'); t.setAttribute('role', 'status'); t.removeAttribute('tabindex'); }, 12000);
+  t._cleanup = () => { t.removeEventListener('click', onTap); t.classList.remove('actionable'); t.setAttribute('role', 'status'); t.removeAttribute('tabindex'); };
 });
 $('timingdebug-switch').addEventListener('click', e => {
   S.timingDebug = !S.timingDebug;
@@ -8010,12 +8018,12 @@ if (!RESETTING && 'serviceWorker' in navigator && location.protocol.startsWith('
     const onTap = e => {
       if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
       e.preventDefault();
-      cleanup();
+      dismissToast();
       location.reload();
     };
     t.addEventListener('click', onTap);
     t.addEventListener('keydown', onTap);
-    setTimeout(cleanup, 12000);
+    t._cleanup = cleanup;
   });
 }
 
