@@ -6698,7 +6698,11 @@ window.addEventListener('resize', () => {
 });
 
 /* RSVP wiring */
-$('btn-rsvp').addEventListener('click', () => { closeSheets(false); setRsvpOpen(!S.rsvp.open); });
+$('btn-rsvp').addEventListener('click', e => {
+  closeSheets(false);
+  setRsvpOpen(!S.rsvp.open);
+  if (e.currentTarget.closest('#more-sheet')) $(S.rsvp.open ? 'rsvp-word' : 'btn-more').focus({ preventScroll: true });
+});
 $('rsvp-close').addEventListener('click', () => setRsvpOpen(false));
 $('rsvp-word').addEventListener('click', togglePlay);
 $('rsvp-mode').addEventListener('click', () => {
@@ -7330,7 +7334,11 @@ document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(ev =>
   window.addEventListener(ev, e => { if (isFullscreen()) chromeActivity(ev, 'win', e.clientX, e.clientY, e.pointerType === 'touch'); }, { passive: true }));
 window.addEventListener('pointermove', e => { if (isFullscreen() && e.pointerType !== 'touch') chromePointerMoved('win', e.clientX, e.clientY); }, { passive: true });
-$('btn-fullscreen').addEventListener('click', () => { closeSheets(false); toggleFullscreen(); });
+$('btn-fullscreen').addEventListener('click', e => {
+  closeSheets(false);
+  if (e.currentTarget.closest('#more-sheet')) $('btn-more').focus({ preventScroll: true });
+  toggleFullscreen();
+});
 
 if ('mediaSession' in navigator) {
   try {
