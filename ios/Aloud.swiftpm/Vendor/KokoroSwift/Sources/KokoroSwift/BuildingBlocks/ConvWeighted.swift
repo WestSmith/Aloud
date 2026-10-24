@@ -98,7 +98,7 @@ class ConvWeighted: Module {
   
   public func callAsFunction(_ x: MLXArray, conv: (MLXArray, MLXArray, Int, Int, Int, Int, StreamOrDevice) -> MLXArray) -> MLXArray {
     let weight = weightNorm(weightV: weightV, weightG: weightG, dim: 0)
-    bias = bias?.reshaped([1, 1, -1])
+    let reshapedBias = bias?.reshaped([1, 1, -1])
 
     func applyConv(x: MLXArray, weightToUse: MLXArray) -> MLXArray {
       let result = conv(
@@ -111,8 +111,8 @@ class ConvWeighted: Module {
         .default
       )
 
-      if let bias = bias {
-        return result + bias
+      if let reshapedBias {
+        return result + reshapedBias
       }
       return result
     }
@@ -126,7 +126,7 @@ class ConvWeighted: Module {
   
   public func callAsFunction(_ x: MLXArray, conv: (MLXArray, MLXArray, Int, Int, Int, Int, Int, StreamOrDevice) -> MLXArray) -> MLXArray {
     let weight = weightNorm(weightV: weightV, weightG: weightG, dim: 0)
-    bias = bias?.reshaped([1, 1, -1])
+    let reshapedBias = bias?.reshaped([1, 1, -1])
 
     func applyConv(x: MLXArray, weightToUse: MLXArray) -> MLXArray {
       let result = conv(
@@ -140,8 +140,8 @@ class ConvWeighted: Module {
         .default
       )
 
-      if let bias = bias {
-        return result + bias
+      if let reshapedBias {
+        return result + reshapedBias
       }
       return result
     }

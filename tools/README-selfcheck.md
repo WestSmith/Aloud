@@ -82,10 +82,30 @@ Setup and the numbers behind v6.31.0 are in the file's header.
     node tools/neural-clock-probe.mjs 2.75 8      # with CPU contention — must still be 0
 
 
+# Focused native memory, Library and audio ownership checks
+
+```sh
+node tools/native-kokoro-memory-selfcheck.mjs
+node tools/library-recovery-selfcheck.mjs
+node tools/neural-audio-ownership-selfcheck.mjs
+```
+
+These model-free checks run in PR CI without a browser or network. The first
+checks both vendored convolution overloads for local bias views (not native heap
+usage). The second extracts the production IndexedDB adapter and exercises open/
+transaction timeouts, one shared reconnect, stale/closed handles and bounded
+failure. The third extracts the production audio handlers and karaoke loop to
+check stale pre-playing terminal events and scheduled callback ownership. It
+retains genuine pre-playing end/error controls; no fallback engine is involved.
+All three accept `ALOUD_ROOT=/path/to/checkout` to test another checkout. They do
+not establish audible timing or physical-device lifecycle behavior; run the
+clock probe and device checks independently when available.
+
 # Release gate and guide compatibility
 
 The PR workflow checks app JavaScript syntax, iOS web sync, coordinated app/cache/
-native versions, scoped offline/reset behavior and the model-free native token mapper. It installs exactly
+native versions, scoped offline/reset behavior, the model-free native token mapper
+and the three focused recovery checks below. It installs exactly
 Playwright 1.56.1 under `tools/guide-check/` and runs a real Chromium engine:
 
 ```sh

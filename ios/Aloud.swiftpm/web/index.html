@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.38.0">
+<meta name="aloud-version" content="v6.39.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -8052,6 +8052,7 @@ function ensureNeuralAudio() {
   NA.addEventListener('playing', () => {
     const P = S.audioPlay;
     if (!P) return;
+    P.hasPlayed = true;
     P.shownAbs = -1;
     P.lastCt = NA.currentTime;
     syncClock();
@@ -8067,7 +8068,10 @@ function ensureNeuralAudio() {
   }));
   NA.addEventListener('ended', () => {
     const P = S.audioPlay;
-    if (!P) return;                                   // prime clip / stale
+    /* Replacing src clears ended. A queued end from the previous clip must
+       not claim a replacement that has not played; a genuine pre-playing end
+       still advances when WebKit omits playing. */
+    if (!P || (!P.hasPlayed && !NA.ended)) return;
     if (P.batchUrl) URL.revokeObjectURL(P.batchUrl);
     S.audioPlay = null;
     if (!S.playing || S.engine !== 'neural') return;
@@ -8083,7 +8087,9 @@ function ensureNeuralAudio() {
   });
   NA.addEventListener('error', () => {
     const P = S.audioPlay;
-    if (!P) return;
+    /* Replacing src also clears error; preserve a new play on a stale task,
+       but handle a real decode failure even before playing. */
+    if (!P || (!P.hasPlayed && !NA.error)) return;
     if (P.batchUrl) URL.revokeObjectURL(P.batchUrl);
     S.audioPlay = null;
     handleNeuralFailure(nativeKokoroError('The generated audio could not be decoded.'), true);
@@ -8193,12 +8199,11 @@ function naTickStart() {
   const P = S.audioPlay;
   if (!P || P.ticking) return;
   P.ticking = true;
-  requestAnimationFrame(naTick);
+  requestAnimationFrame(() => naTick(P));
 }
 
-function naTick() {
-  const P = S.audioPlay;
-  if (!P || !S.playing) { if (P) P.ticking = false; return; }
+function naTick(P) {
+  if (!P || S.audioPlay !== P || !S.playing) { if (P) P.ticking = false; return; }
   /* v6.33.1 — a paused element must never move the highlight or the
      sentence. A frame that lands between a Next-while-playing (the element
      is paused, S.curSent already moved on) and the next clip's play() used
@@ -8218,7 +8223,7 @@ function naTick() {
   /* before the first onset (lead-in, or the gap ahead of a stitched
      sentence): rest on whatever is lit rather than jump to word one */
   if (wi < 0) {
-    if (!NA.paused && !NA.ended) requestAnimationFrame(naTick); else P.ticking = false;
+    if (!NA.paused && !NA.ended) requestAnimationFrame(() => naTick(P)); else P.ticking = false;
     return;
   }
   /* a muted citation shares the onset of the word after it and a trailing
@@ -8230,7 +8235,7 @@ function naTick() {
   if (wIdx < P.shownAbs) wIdx = P.shownAbs;
   P.shownAbs = wIdx;
   if (wIdx !== S.paintedWord) { highlightWord(wIdx); maybeScroll(S.words[wIdx]?.el); }
-  if (!NA.paused && !NA.ended) requestAnimationFrame(naTick);
+  if (!NA.paused && !NA.ended) requestAnimationFrame(() => naTick(P));
   else P.ticking = false;
 }
 
@@ -10103,18 +10108,95 @@ applyFont();
    uploaded anywhere) so the home screen can offer one-tap Continue.
    ==================================================================== */
 const idb = {
-  open() {
-    return this._p ||= new Promise((res, rej) => {
-      const r = indexedDB.open('aloud', 1);
-      r.onupgradeneeded = () => r.result.createObjectStore('files');
-      r.onsuccess = () => res(r.result);
-      r.onerror = () => rej(r.error);
-    });
+  _p: null,
+  _db: null,
+  _generation: 0,
+  invalidate(db = this._db) {
+    /* A late failure from an old suspended transaction must not tear down a
+       newer connection (or an in-flight reconnect whose _db is still null). */
+    if (db && this._db !== db) {
+      try { db.close(); } catch {}
+      return;
+    }
+    this._generation++;
+    if (!db || this._db === db) this._db = null;
+    this._p = null;
+    try { db?.close(); } catch {}
   },
-  async put(key, val) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('files', 'readwrite'); t.objectStore('files').put(val, key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
-  async get(key) { const db = await this.open(); return new Promise((res, rej) => { const q = db.transaction('files').objectStore('files').get(key); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
-  async del(key) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('files', 'readwrite'); t.objectStore('files').delete(key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
-  async keys() { const db = await this.open(); return new Promise((res, rej) => { const q = db.transaction('files').objectStore('files').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
+  open() {
+    if (this._p) return this._p;
+    const generation = this._generation;
+    const promise = new Promise((res, rej) => {
+      const r = indexedDB.open('aloud', 1);
+      const timer = setTimeout(() => {
+        if (this._p === promise) this.invalidate();
+        rej(new Error('The document library took too long to open.'));
+      }, 4000);
+      r.onupgradeneeded = () => r.result.createObjectStore('files');
+      r.onsuccess = () => {
+        clearTimeout(timer);
+        const db = r.result;
+        if (generation !== this._generation || this._p !== promise) {
+          try { db.close(); } catch {}
+          rej(new Error('The document library connection was replaced.'));
+          return;
+        }
+        this._db = db;
+        db.onclose = () => { if (this._db === db) this.invalidate(db); };
+        db.onversionchange = () => this.invalidate(db);
+        res(db);
+      };
+      r.onerror = () => {
+        clearTimeout(timer);
+        if (this._p === promise) this._p = null;
+        rej(r.error || new Error('The document library could not open.'));
+      };
+    });
+    this._p = promise;
+    /* Also release a synchronously rejected open (for example SecurityError).
+       Every caller may observe the same rejected promise, but only that exact
+       cached promise is cleared; none of them may cancel a newer reconnect. */
+    promise.catch(() => { if (this._p === promise) this._p = null; });
+    return promise;
+  },
+  async tx(mode, action, retry = true) {
+    let db;
+    try {
+      db = await this.open();
+      return await new Promise((res, rej) => {
+        let settled = false, result;
+        const transaction = db.transaction('files', mode);
+        const request = action(transaction.objectStore('files'));
+        const finish = (ok, value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          ok ? res(value) : rej(value);
+        };
+        const timer = setTimeout(() => {
+          try { transaction.abort(); } catch {}
+          this.invalidate(db);
+          finish(false, new Error('The document library stopped responding.'));
+        }, 4000);
+        request.onsuccess = () => { result = request.result; };
+        request.onerror = () => finish(false, request.error || transaction.error);
+        transaction.oncomplete = () => finish(true, result);
+        transaction.onabort = () => finish(false, transaction.error || new Error('The document library operation was cancelled.'));
+        transaction.onerror = () => finish(false, transaction.error || new Error('The document library operation failed.'));
+      });
+    } catch (error) {
+      /* open() owns cleanup when no connection was acquired. Concurrent
+         callers share that failed promise, so letting each one invalidate an
+         already-started retry would make recovery livelock. */
+      if (db) this.invalidate(db);
+      if (retry) return this.tx(mode, action, false);
+      throw error;
+    }
+  },
+  put(key, val) { return this.tx('readwrite', store => store.put(val, key)); },
+  get(key) { return this.tx('readonly', store => store.get(key)); },
+  del(key) { return this.tx('readwrite', store => store.delete(key)); },
+  keys() { return this.tx('readonly', store => store.getAllKeys()); },
 };
 /* How many files the Continue list remembers. The list itself is a handful of
    strings per file; the expensive part is the re-openable COPY (see
