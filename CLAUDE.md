@@ -95,8 +95,9 @@ Voice so the user can explicitly choose another engine.
 
 ## Release checks and environment limits
 
-PR CI runs syntax, iOS sync, native token timing, version consistency, scoped
-offline/reset checks and the Chromium synthetic guide gate. See
+PR CI runs syntax, iOS sync, native token timing, convolution bias, Library
+recovery, audio callback ownership, version consistency, scoped offline/reset
+checks and the Chromium synthetic guide gate. See
 `tools/README-selfcheck.md`. Heavy ONNX/model checks stay local: run warm, NOWARM
 and whole-text alignment plus the fusion diagnostic before release. Fusions
 alone are not timing failures; missing measurements, non-zero alignment error

@@ -23,6 +23,9 @@ jobs:
       - run: ./ios/sync-web-assets.sh --check
       - run: node tools/check-versions.mjs
       - run: node tools/native-token-timing-selfcheck.mjs
+      - run: node tools/native-kokoro-memory-selfcheck.mjs
+      - run: node tools/library-recovery-selfcheck.mjs
+      - run: node tools/neural-audio-ownership-selfcheck.mjs
       - run: node tools/offline-selfcheck.mjs
       - name: Install pinned browser tooling
         run: |
