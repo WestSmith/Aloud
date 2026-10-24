@@ -1,0 +1,32 @@
+name: Reader release checks
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.14.0'
+      - name: Check app syntax
+        run: |
+          START=$(grep -n '^<script>$' index.html | tail -1 | cut -d: -f1)
+          END=$(grep -n '^</script>$' index.html | tail -1 | cut -d: -f1)
+          awk -v s=$START -v e=$END 'NR>s && NR<e' index.html > /tmp/app.js
+          node --check /tmp/app.js
+          node --check sw.js
+      - run: ./ios/sync-web-assets.sh --check
+      - run: node tools/check-versions.mjs
+      - run: node tools/native-token-timing-selfcheck.mjs
+      - run: node tools/offline-selfcheck.mjs
+      - name: Install pinned browser tooling
+        run: |
+          npm install --ignore-scripts --prefix tools/guide-check
+          tools/guide-check/node_modules/.bin/playwright install --with-deps chromium
+      - name: Exercise synthetic guide scripts and persistence
+        run: node tools/guide-check/check.mjs

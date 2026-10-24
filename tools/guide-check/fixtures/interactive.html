@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Synthetic guide</title>
+<style>
+body{font:16px/1.6 system-ui;margin:24px;background:#f8f8fc;color:#222}button,input{font:inherit;padding:8px}.sec{border:1px solid #bbb;padding:14px;margin:18px 0}.sechead{cursor:pointer;display:flex;justify-content:space-between}.panel,.reveal,.flip .a{display:none}.sec.open .panel,.reveal.show,.flip.flipped .a{display:block}.flip{border:1px solid #777;padding:16px;cursor:pointer}.flip.flipped .q{display:none}.hidden{display:none!important}.opt-correct{outline:2px solid green}.fixed-mode{position:fixed;top:8px;right:8px;background:white}.compact .reference{display:none}.done.on{background:#aee7b5}.body-copy{font-size:16px}pre{overflow:auto}
+</style>
+<button class="fixed-mode">Mode: OFF</button>
+<h1>Orbital instrument practice</h1><p>Public synthetic content for testing a reader. No private study material.</p>
+<label>Find in guide <input id="q" type="search"></label><button id="qclear">Clear</button><output id="qcnt"></output>
+<div id="progress"></div>
+<section class="sec" id="measurement"><div class="sechead" role="button" tabindex="0">Measurements<button class="done">Mark done</button></div>
+<div class="panel"><p class="body-copy" data-reading>The instrument records a clean pulse. An operator compares two readings before writing the result. A second observer checks the units, the sample number, and the calibration date. This paragraph is deliberately long enough to test multiple sentences and word mapping.</p>
+<div class="flip" role="button" tabindex="0"><span class="q">Which quantity identifies the interval?</span><span class="a" data-reading>Elapsed time identifies the interval.</span></div>
+<div class="quiz" data-correct="B"><p>Choose a stable unit.</p><div class="opts"><label><input type="radio" name="unit">A changing marker</label><label><input type="radio" name="unit">A fixed reference</label></div><button class="chk">Check answer</button><div class="reveal" data-reading>Use a fixed reference so observations can be compared.</div></div>
+<button class="rvb">Reveal model answer</button><div class="reveal" data-reading>Record the unit and repeat the measurement.</div>
+<pre><code>const sample = 7;</code></pre></div></section>
+<section class="sec reference" id="reference"><div class="sechead" role="button" tabindex="0">Reference notes<button class="done">Mark done</button></div><div class="panel" data-reading>A reference remains constant across observations.</div></section>
+<script>window.authorReady=true;</script>
+<script>
+if(!window.authorReady)throw new Error("Author script order changed");
+(function(){
+const secs=[...document.querySelectorAll('.sec')],mode=document.querySelector('.fixed-mode');
+const saved=JSON.parse(localStorage.getItem('progress')||'{}');
+function paint(){secs.forEach(s=>s.querySelector('.done').classList.toggle('on',!!saved[s.id]));document.querySelector('#progress').textContent=Object.values(saved).filter(Boolean).length+' sections done';}
+secs.forEach(s=>{s.querySelector('.sechead').onclick=e=>{if(!e.target.closest('.done'))s.classList.toggle('open')};s.querySelector('.done').onclick=e=>{e.stopPropagation();saved[s.id]=!saved[s.id];localStorage.setItem('progress',JSON.stringify(saved));paint()}});paint();
+document.querySelector('.flip').onclick=e=>e.currentTarget.classList.toggle('flipped');
+document.querySelector('.chk').onclick=()=>{const q=document.querySelector('.quiz'),labels=[...q.querySelectorAll('label')],correct=labels[1].querySelector('input').checked;q.querySelector('.reveal').className='reveal show '+(correct?'right':'wrong');labels[1].classList.add('opt-correct')};
+document.querySelector('.rvb').onclick=e=>e.currentTarget.nextElementSibling.classList.toggle('show');
+function setMode(on){document.body.classList.toggle('compact',on);mode.textContent='Mode: '+(on?'ON':'OFF');localStorage.setItem('compact',on?'1':'0')}
+setMode(localStorage.getItem('compact')==='1');mode.onclick=()=>setMode(!document.body.classList.contains('compact'));
+const search=document.querySelector('#q');function find(){const value=search.value.toLowerCase();secs.forEach(s=>{s.classList.toggle('hidden',!!value&&!s.textContent.toLowerCase().includes(value))});document.querySelector('#qcnt').textContent=secs.filter(s=>!s.classList.contains('hidden')).length+' matching sections'}search.oninput=find;document.querySelector('#qclear').onclick=()=>{search.value='';find()};
+})();
+</script></html>

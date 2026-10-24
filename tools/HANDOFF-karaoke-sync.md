@@ -4,6 +4,12 @@ Written at **v6.15.0**. Everything below is committed; nothing important
 lives only in a chat log. Start by reading this, then
 `tools/README-selfcheck.md`.
 
+Current release gate (v6.38): alignment checks must measure complete comparable
+coverage and reject their negative controls. The fusion diagnostic's known 1-of-4
+result is expected; use whole-text-selfcheck to measure the aligner's actual error.
+The historical investigation below is retained as evidence, not a requirement to
+eliminate fusions or change the measured aligner.
+
 The reader's report that opened all of it: with the Kokoro neural voice at
 **1.75×** and breathers on **Max**, the word highlight ran ahead of the
 audio — worst at the start of a sentence — plus intermittent distortion.

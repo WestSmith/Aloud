@@ -14,3 +14,5 @@ Model source (pinned revision):
 
 The complete source-package license texts for the vendored components are kept
 in `Vendor/KokoroSwift/LICENSE` and `Vendor/MisakiSwift/LICENSE`.
+
+Complete applicable license texts, including resolved dependencies and bundled web assets, ship in `ThirdPartyLicenses.txt` and are readable offline in Help / About → Read complete third-party licences.

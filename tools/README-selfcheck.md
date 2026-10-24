@@ -80,3 +80,61 @@ Setup and the numbers behind v6.31.0 are in the file's header.
     http-server -p 8765 -s . &
     node tools/neural-clock-probe.mjs 2.75 0
     node tools/neural-clock-probe.mjs 2.75 8      # with CPU contention — must still be 0
+
+
+# Release gate and guide compatibility
+
+The PR workflow checks app JavaScript syntax, iOS web sync, coordinated app/cache/
+native versions, scoped offline/reset behavior and the model-free native token mapper. It installs exactly
+Playwright 1.56.1 under `tools/guide-check/` and runs a real Chromium engine:
+
+```sh
+npm install --ignore-scripts --prefix tools/guide-check
+tools/guide-check/node_modules/.bin/playwright install chromium
+node tools/guide-check/check.mjs
+GUIDE_DIR=/absolute/path/to/private/html node tools/guide-check/check.mjs
+```
+
+Synthetic fixtures always run. GUIDE_DIR adds local HTML files, served only on
+127.0.0.1 and uploaded through the real app. The runner uses a separate raw-page
+context to discover authored controls, then requires the Interactive renderer to
+retain their availability and actually respond to clicks. It checks quiz grading,
+collapse, flip/reveal, search, storage-backed progress/mode, a full page reload and
+Library reopen through the storage shim, live Skip code without replacing the
+frame, content-only zoom and the read-only fixed-element boundary. It tests both
+390px and 1280px. A missing feature in a private file is not invented or disabled;
+the strict synthetic fixture always supplies every required capability.
+
+Read-only intentionally removes author scripts. Its assertions require the answer/
+panel text to remain visible after expansion and Aloud controls to remain usable;
+it does not claim author quizzes are interactive there. Interactive assertions
+cannot pass by flattening/removing widgets. Do not copy private guides, captured
+text, or browser artifacts into this public repository. The runner prints only
+filenames and outcomes; it creates no screenshots/traces.
+
+Heavy model checks stay **local**, not in PR CI:
+
+```sh
+node tools/karaoke-selfcheck.mjs
+NOWARM=1 node tools/karaoke-selfcheck.mjs
+node tools/whole-text-selfcheck.mjs
+node tools/whole-text-fusion.mjs
+SELFTEST=1 node tools/karaoke-selfcheck.mjs     # must FAIL (non-zero)
+SELFTEST=1 node tools/whole-text-selfcheck.mjs  # must FAIL (non-zero)
+```
+
+Warm and cold alignment must have worst error at most 1ms (the measured baseline
+prints 0ms). Whole-text alignment has the same requirement and excludes only
+explicitly identified fused/unrecoverable onsets. Every selected fixture needs
+at least 70% comparable tokens, no missing comparable onset and a scorer that
+rejects a one-token shift. Missing measurements, unmatched filters, unreconciled
+blob walks and invalid output fail instead of reporting a false zero. SELFTEST
+is an intentionally wrong alignment and must return a failing exit status.
+
+The fusion tool is a **diagnostic**: its known 1-of-4 result is expected, not a
+release failure. A fusion count cannot measure timing; use whole-text-selfcheck
+for that. It still fails if espeak fails or no actual phonemes were measured.
+The neural clock probe fails on early paints, page errors, inadequate measured
+coverage, missing sentence boundaries and a failed early-paint negative control.
+Run it independently in a browser-capable environment; compilation alone does
+not establish playback timing.

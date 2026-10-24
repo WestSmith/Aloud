@@ -34,7 +34,7 @@
    now default to q8 (see kokoroConfig in index.html). */
 import * as ort from 'onnxruntime-web';
 import fs from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 
 ort.env.wasm.numThreads = +(process.env.THREADS || 1);
 ort.env.wasm.proxy = false;
@@ -43,7 +43,7 @@ const text = process.argv[3] || 'The current version plays on my phone, but ever
 
 const vocab = JSON.parse(fs.readFileSync('tokenizer.json', 'utf8')).model.vocab;
 let ph = text;
-try { ph = execSync(`espeak-ng -q --ipa=3 -v en-us "${text.replace(/"/g, '')}"`).toString().trim().replace(/_/g, ''); }
+try { ph = execFileSync('espeak-ng', ['-q', '--ipa=3', '-v', 'en-us', text]).toString().trim().replace(/_/g, ''); }
 catch { console.warn('espeak-ng not found; using letters as a stand-in for phonemes'); }
 const ids = [0];
 for (const ch of ph) if (vocab[ch] != null) ids.push(vocab[ch]);

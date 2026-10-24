@@ -21,3 +21,9 @@ m/
 # Keep any local validation copy ignored as well as excluded by Package.swift.
 ios/Aloud.swiftpm/NativeKokoroAssets/kokoro-v1_0.safetensors
 tools/kokoro-wasm-bench/
+
+# Browser regression tooling only; the app still has no npm build.
+!tools/guide-check/package.json
+!tools/guide-check/package-lock.json
+
+/_site/

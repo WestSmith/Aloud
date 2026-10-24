@@ -1,6 +1,6 @@
 # Aloud for iPad / iPhone
 
-Aloud v6.22.0 runs the full Kokoro voice model natively with Apple MLX. The
+Aloud v6.38.0 runs the full Kokoro voice model natively with Apple MLX. The
 reader, library, PDF/HTML views and visual design remain the same as the PWA,
 but the large model no longer loads or performs inference inside WebKit.
 
@@ -103,8 +103,9 @@ force-unwraps required tensors and would otherwise terminate on a bad file.
 The model deliberately stays outside the editable `.swiftpm` document. The
 previous 347 MB document put the Playgrounds importer and App Preview under
 avoidable pressure on top of MLX's unsupported native dependency graph. The
-corrected Xcode source package is small, and opening it does not prepare Kokoro
-automatically. A deliberate Play tap starts the setup.
+corrected Xcode source package is small, and opening it does not download Kokoro
+automatically. A deliberate setup/Play/Preview action starts a required download;
+an already-cached model prepares on launch.
 
 The downloader fetches the pinned model revision, resumes a partial file with
 HTTP byte ranges, verifies the same size and hash, then moves it atomically into
@@ -237,5 +238,7 @@ cannot prove real speech output, speed or timestamp behavior.
 ## Licences
 
 KokoroSwift is MIT. MisakiSwift, MLXUtilsLibrary and the Kokoro model/voice
-assets are Apache-2.0. mlx-swift is MIT. The vendored licence files remain next
-to their source, and release packages should retain the third-party notices.
+assets are Apache-2.0. mlx-swift is MIT. Complete native and web dependency
+texts ship in `ThirdPartyLicenses.txt`
+and are readable offline in Help / About → Read complete third-party licences.
+The vendored licence files also remain next to their source.
