@@ -110,7 +110,7 @@ const res = await page.evaluate(async ({ RATE, LOAD }) => {
   const origToast = toast; window.toast = (m, d) => { console.log('toast: ' + m); return origToast(m, d); };
   // count naTick calls per animation frame (every rAF chain calls the global naTick)
   const origTick = naTick; let tickCalls = 0; const perFrame = [];
-  window.naTick = () => { tickCalls++; return origTick(); };
+  window.naTick = (P) => { tickCalls++; return origTick(P); };
   const frameCounter = () => { perFrame.push(tickCalls); tickCalls = 0; requestAnimationFrame(frameCounter); };
   requestAnimationFrame(frameCounter);
   setSentence(0);

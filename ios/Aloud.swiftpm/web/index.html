@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.39.0">
+<meta name="aloud-version" content="v6.39.1">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -3402,11 +3402,28 @@ if (RESETTING) {
   })();
 }
 
-/* ---------------- safe storage (works standalone; silently in-memory elsewhere) ---------------- */
+/* ---------------- safe storage (retain failed writes for this session) ---------------- */
 const _mem = {};
+const unsavedStorage = new Set();
+let storageWarningShown = false;
 const store = {
-  get(k, d) { try { const v = localStorage.getItem('aloud.' + k); return v == null ? (k in _mem ? _mem[k] : d) : JSON.parse(v); } catch { return k in _mem ? _mem[k] : d; } },
-  set(k, v) { _mem[k] = v; try { localStorage.setItem('aloud.' + k, JSON.stringify(v)); } catch {} },
+  get(k, d) {
+    if (unsavedStorage.has(k)) return _mem[k];
+    try { const v = localStorage.getItem('aloud.' + k); return v == null ? (k in _mem ? _mem[k] : d) : JSON.parse(v); }
+    catch { return k in _mem ? _mem[k] : d; }
+  },
+  set(k, v) {
+    _mem[k] = v;
+    try { localStorage.setItem('aloud.' + k, JSON.stringify(v)); unsavedStorage.delete(k); }
+    catch {
+      unsavedStorage.add(k);
+      if (!storageWarningShown) {
+        storageWarningShown = true;
+        // Startup also writes settings; wait until the reader UI is initialized.
+        queueMicrotask(() => toast('Changes are kept for this session, but could not be saved on this device. Keep Aloud open and check available storage.', 10000));
+      }
+    }
+  },
 };
 
 /* The iOS app (ios/Aloud.swiftpm) injects window.__aloudNative before this
@@ -10218,7 +10235,7 @@ async function rememberFile(file, key, title) {
   libraryWork = libraryWork.catch(() => {}).then(async () => {
     const prev = store.get('recent', []), storable = file.size <= MAX_STORE_BYTES;
     const rec = [{ key, name: file.name, title, at: Date.now(), size: file.size,
-      folder: prev.find(r => r.key === key)?.folder || '', noBlob: true },
+      folder: prev.find(r => r.key === key)?.folder || '', noBlob: prev.find(r => r.key === key)?.noBlob ?? true },
       ...prev.filter(r => r.key !== key)].slice(0, LIB_MAX);
     store.set('recent', rec);
     renderRecents();
@@ -10266,7 +10283,14 @@ if (!RESETTING) {
           store.set('recent', store.get('recent', []).map(x => x.key === r.key ? { ...x, noBlob: true } : x));
           continue;
         }
-        if (r.key.startsWith('sha256.')) continue;
+        if (r.key.startsWith('sha256.')) {
+          // Repair flags left by an earlier unavailable connection. A failed
+          // read is not proof of absence; only a successful read can settle it.
+          if (r.noBlob) store.set('recent', store.get('recent', []).map(x => x.key === r.key ? { ...x, noBlob: false } : x));
+          libraryCopyProblems.delete(r.key);
+          if (pendingLibraryRemoval?.record.key === r.key) pendingLibraryRemoval.record.noBlob = false;
+          continue;
+        }
         const key = await documentIdentity(file);
         await idb.put(key, file);
         migrateDocumentState(r.key, key);
@@ -10275,7 +10299,8 @@ if (!RESETTING) {
       } catch (e) {
         unavailable = true; console.warn('Library identity migration will retry', e);
         libraryCopyProblems.add(r.key);
-        store.set('recent', store.get('recent', []).map(x => x.key === r.key ? { ...x, noBlob: true } : x));
+        // Preserve the last known copy status so a later prune cannot delete
+        // a valid file just because this read or migration was unavailable.
       }
     }
     renderRecents();
@@ -10368,7 +10393,7 @@ function showLibraryCopyNotice() {
   const count = libraryCopyProblems.size;
   if (count <= libraryCopyNoticeCount) return;
   libraryCopyNoticeCount = count;
-  toast(`${count} Library ${count === 1 ? 'item needs' : 'items need'} the original file again. Reading places are kept.`, 6000);
+  toast(`${count} Library ${count === 1 ? 'copy could' : 'copies could'} not be confirmed. Retry opening, or choose the original file. Reading places are kept.`, 6000);
   $('toast')._libraryCopyNotice = true;
 }
 function renderRecents() {
