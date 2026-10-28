@@ -38,7 +38,7 @@ let package = Package(
             name: "Aloud",
             targets: ["AppModule"],
             bundleIdentifier: "com.westsmith.aloud",
-            displayVersion: "6.39.0",
+            displayVersion: "6.39.1",
             bundleVersion: "15",
             appIcon: .asset("AppIcon"),
             supportedDeviceFamilies: [.pad, .phone],

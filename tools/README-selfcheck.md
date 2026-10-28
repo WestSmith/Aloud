@@ -87,6 +87,7 @@ Setup and the numbers behind v6.31.0 are in the file's header.
 ```sh
 node tools/native-kokoro-memory-selfcheck.mjs
 node tools/library-recovery-selfcheck.mjs
+node tools/storage-selfcheck.mjs
 node tools/neural-audio-ownership-selfcheck.mjs
 ```
 
@@ -94,18 +95,23 @@ These model-free checks run in PR CI without a browser or network. The first
 checks both vendored convolution overloads for local bias views (not native heap
 usage). The second extracts the production IndexedDB adapter and exercises open/
 transaction timeouts, one shared reconnect, stale/closed handles and bounded
-failure. The third extracts the production audio handlers and karaoke loop to
+failure. The audio-ownership check extracts the production handlers and karaoke loop to
 check stale pre-playing terminal events and scheduled callback ownership. It
 retains genuine pre-playing end/error controls; no fallback engine is involved.
-All three accept `ALOUD_ROOT=/path/to/checkout` to test another checkout. They do
+All four accept `ALOUD_ROOT=/path/to/checkout` to test another checkout. They do
 not establish audible timing or physical-device lifecycle behavior; run the
 clock probe and device checks independently when available.
+
+Library recovery also verifies that temporary read/save failures preserve retained
+copies, stale missing-copy flags recover, and the normal copy budget still prunes.
+The storage check covers failed progress/settings writes, later recovery, external
+updates and one session-only persistence notice.
 
 # Release gate and guide compatibility
 
 The PR workflow checks app JavaScript syntax, iOS web sync, coordinated app/cache/
 native versions, scoped offline/reset behavior, the model-free native token mapper
-and the three focused recovery checks below. It installs exactly
+and the focused storage/recovery checks above. It installs exactly
 Playwright 1.56.1 under `tools/guide-check/` and runs a real Chromium engine:
 
 ```sh

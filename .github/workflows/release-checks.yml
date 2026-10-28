@@ -25,6 +25,7 @@ jobs:
       - run: node tools/native-token-timing-selfcheck.mjs
       - run: node tools/native-kokoro-memory-selfcheck.mjs
       - run: node tools/library-recovery-selfcheck.mjs
+      - run: node tools/storage-selfcheck.mjs
       - run: node tools/neural-audio-ownership-selfcheck.mjs
       - run: node tools/offline-selfcheck.mjs
       - name: Install pinned browser tooling

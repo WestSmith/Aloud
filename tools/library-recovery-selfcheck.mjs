@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import nodeAssert from 'node:assert/strict';
 
 const ROOT = process.env.ALOUD_ROOT
   || path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -55,6 +56,58 @@ async function flushMicrotasks(count = 8) {
 }
 
 async function main() {
+  // Exercise the real startup reconciliation, saves and pruning together.
+  // A transient failure must not turn a retained copy into cleanup's garbage.
+  const libraryStart = source.indexOf('const LIB_MAX =');
+  const libraryEnd = source.indexOf('function removeLibraryRecord(', libraryStart);
+  assert(libraryStart >= 0 && libraryEnd > libraryStart, 'production Library lifecycle not found');
+  function library(records, blobs, { failRead = false, failPut = false } = {}) {
+    let recent = structuredClone(records);
+    const store = {
+      get(key, fallback) { return key === 'recent' ? structuredClone(recent) : fallback; },
+      set(key, value) { if (key === 'recent') recent = structuredClone(value); },
+    };
+    const idb = {
+      async get(key) { if (failRead) throw Error('temporarily unavailable'); return blobs.get(key); },
+      async put(key, value) { if (failPut) throw Error('quota exceeded'); blobs.set(key, value); },
+      async keys() { return [...blobs.keys()]; },
+      async del(key) { blobs.delete(key); },
+    };
+    return new Function('store', 'idb', 'queueMicrotask', 'console', `
+      let libraryWork = Promise.resolve(), pendingLibraryRemoval = null;
+      const libraryCopyProblems = new Set(), RESETTING = false;
+      const renderRecents = () => {}, showLibraryCopyNotice = () => {}, toast = () => {};
+      ${source.slice(libraryStart, libraryEnd)}
+      return { ready: libraryWork, rememberFile, records: () => store.get('recent', []) };
+    `)(store, idb, queueMicrotask, { warn() {} });
+  }
+  const saved = { key: 'sha256.saved', name: 'saved.txt', title: 'Saved', size: 10, noBlob: false };
+  const original = { size: 10, name: 'saved.txt' };
+  const blobs = new Map([[saved.key, original]]);
+  const failed = library([saved], blobs, { failRead: true });
+  await failed.ready;
+  assert(!failed.records()[0].noBlob, 'Transient read failure discarded confirmed-copy status');
+  await failed.rememberFile({ size: 12, name: 'next.txt' }, 'sha256.next', 'Next');
+  assert(blobs.get(saved.key) === original, 'Later import pruned a temporarily unreadable copy');
+  const stale = { ...saved, noBlob: true };
+  const missing = { ...saved, key: 'sha256.missing' };
+  const recoveredLibrary = library([stale, missing], blobs);
+  await recoveredLibrary.ready;
+  nodeAssert.deepEqual(recoveredLibrary.records().map(r => r.noBlob), [false, true],
+    'Successful reads must repair old missing-copy flags; genuinely missing files remain missing');
+  assert(blobs.get(saved.key) === original, 'Reconciliation pruned a recovered copy');
+  const failedSave = library([saved], blobs, { failPut: true });
+  await failedSave.ready;
+  await failedSave.rememberFile(original, saved.key, saved.title);
+  assert(!failedSave.records()[0].noBlob && blobs.get(saved.key) === original,
+    'Failed replacement save deleted an existing retained copy');
+  // The safety fix must retain the existing storage budget, not disable pruning.
+  const many = Array.from({ length: 13 }, (_, i) => ({ ...saved, key: 'sha256.' + i }));
+  const budgetBlobs = new Map(many.map(r => [r.key, original]));
+  const budget = library(many, budgetBlobs);
+  await budget.ready;
+  assert(budgetBlobs.size === 12 && !budgetBlobs.has('sha256.12'), 'Normal copy-budget pruning stopped working');
+
   const timers = fakeTimers();
   const opens = [];
   const indexedDB = {
