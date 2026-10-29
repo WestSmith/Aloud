@@ -145,6 +145,7 @@ async function runSentence(tokens) {
 /* ---- real sentences from the Week 10 guide, incl. every spot reported ---- */
 const DETAIL = process.argv[2];
 const CASES = [
+  ['title: Ms Smith', 'Ms. Smith answered no about file No. 12.'],
   ['context: No answer and labels', 'A: No. 12 witnesses testified about document No. 12 and exhibit No.105.'],
   ['reported: money', 'Referral fee cap: 15% of the first $50,000 + 5% of the excess, max $25,000 — and it must never increase the client\'s total fee.'],
   ['reported: rule nums', 'Division of fees (5.01(11)) with client consent, proportional, between licensees = legal.'],

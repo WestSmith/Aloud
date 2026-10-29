@@ -157,8 +157,9 @@ filenames and outcomes; it creates no screenshots/traces.
 
 Heavy model checks stay **local**, not in PR CI:
 
-`node tools/pronunciation-selfcheck.mjs` checks the contextual “No.” rule, old
-No→Number entries, block/mute boundaries, pauses and native chunk mapping. The
+`node tools/pronunciation-selfcheck.mjs` checks “Ms.” honorifics without changing
+MS acronyms or ms units, the contextual “No.” rule, old No→Number entries,
+block/mute boundaries, pauses and native chunk mapping. The
 browser gate also checks saving/reloading that rule and forces a Kokoro chunk
 split between “No.” and its number. Resolved spoken forms are shared by synthesis
 and timing so chunking cannot reinterpret the same abbreviation.

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.44.1">
+<meta name="aloud-version" content="v6.44.2">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -1145,7 +1145,7 @@
     <div class="chips" id="nq-chips" style="margin-top:10px"></div>
   </div>  <div class="set-row" style="display:block">
     <div class="lbl">Pronunciations<small>Long-press any word while reading to teach Aloud how to say it. In PDF and Reading view, double-tap works too. Your fixes are saved and applied to every voice engine.</small></div>
-    <p class="voice-note" id="pronunciation-context">Number labels such as “No. 12” or “No.12” are read as “number”. Ordinary “No.” answers stay “no”. Saved No → Number entries follow this rule too; other pronunciation fixes stay unchanged.</p>
+    <p class="voice-note" id="pronunciation-context">“Ms. Smith” is read as “miz Smith”. Number labels such as “No. 12” or “No.12” are read as “number”. Ordinary “No.” answers stay “no”. Saved No → Number entries follow this rule too; other pronunciation fixes stay unchanged.</p>
     <div id="dict-list"></div>
   </div></div><div id="settings-appearance" hidden>  <div class="set-row">
     <div class="lbl">Theme</div>
@@ -3930,6 +3930,10 @@ function spokenFor(tok, next = '', previous = '') {
   if (typeof rep === 'string' && rep && !legacyNumberPronunciation(core, rep)) return pre + rep + post;
   const full = Object.hasOwn(S.dict, lower) ? S.dict[lower] : null;
   if (typeof full === 'string' && full && !legacyNumberPronunciation(lower, full)) return full;
+  /* The honorific is case-sensitive: MS can be an acronym, and ms a unit.
+     Keep surrounding quotes/brackets, but drop the abbreviation's own dot. */
+  const msTitle = tok.match(/^([^\p{L}\p{N}]*)Ms\.([^\p{L}\p{N}]*)$/u);
+  if (msTitle) return msTitle[1] + 'miz' + msTitle[2];
   if (numberLabelContinues(tok, next, previous)) return pre + 'number';
   /* An attached label is unambiguous, and expands before chunking so every
      timing path receives the same spoken words, even at a chunk boundary. */

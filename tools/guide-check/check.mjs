@@ -310,10 +310,10 @@ async function checkPronunciation(page) {
   assert.match(await page.locator('#app-edit-note').textContent(),/only to numbered labels/);
   await page.locator('#app-edit-input').fill('Number');
   await page.locator('#app-edit-save').click();
-  await page.locator('#file-input').setInputFiles({name:'Public pronunciation.txt',mimeType:'text/plain',buffer:Buffer.from('A: No.\n\n12 people testified.\n\nFile No. 12\n\nExhibit No.105.\n\nAloud said no.')});
+  await page.locator('#file-input').setInputFiles({name:'Public pronunciation.txt',mimeType:'text/plain',buffer:Buffer.from('A: No.\n\n12 people testified.\n\nFile No. 12\n\nExhibit No.105.\n\nAloud said no.\n\nMs. Smith has MS.')});
   await page.waitForFunction(() => S.mode==='flow' && S.words.length>0);
   assert.deepEqual(await page.evaluate(() => S.words.map(w=>spokenOfWord(w))),
-    ['A:','No.','12','people','testified.','File','number','12','Exhibit','number one hundred five.','uh loud','said','no.']);
+    ['A:','No.','12','people','testified.','File','number','12','Exhibit','number one hundred five.','uh loud','said','no.','miz','Smith','has','MS.']);
   assert(await page.evaluate(() => S.words.some(w=>w.text==='No.105.')), 'Pronunciation changed visible text');
   const requests=await page.evaluate(async () => {
     const warm=ensurePhonemes,worker=S.kokoro.workerGenerate,calls=[];
