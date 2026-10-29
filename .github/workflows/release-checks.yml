@@ -22,6 +22,7 @@ jobs:
           node --check sw.js
       - run: ./ios/sync-web-assets.sh --check
       - run: node tools/check-versions.mjs
+      - run: node tools/pronunciation-selfcheck.mjs
       - run: node tools/native-token-timing-selfcheck.mjs
       - run: node tools/native-kokoro-memory-selfcheck.mjs
       - run: node tools/library-recovery-selfcheck.mjs

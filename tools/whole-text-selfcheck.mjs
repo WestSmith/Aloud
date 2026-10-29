@@ -119,8 +119,8 @@ for (const ch of Object.keys(vocab)) idChar[vocab[ch]] = ch;
 /* mirror ensurePhonemes: production warms this cache before generating, and
    alignExactStarts reads it to learn which tokens espeak voices at all */
 function warmCache(tokens) {
-  for (const t of tokens) {
-    const spoken = aloud.spokenFor(t).toLowerCase();
+  for (const [i, t] of tokens.entries()) {
+    const spoken = aloud.spokenFor(t, tokens[i + 1] || '', tokens[i - 1] || '').toLowerCase();
     if (!spoken || phonemeCache.has(spoken)) continue;
     const ph = phonemize(spoken);
     const e = aloud.countPhones(ph);
@@ -134,7 +134,7 @@ async function runSentence(tokens) {
 
   /* ---- the production path, verbatim: normalise per token, JOIN, phonemise
      the whole string in one espeak call ---- */
-  const wholeText = tokens.map(t => aloud.spokenFor(t)).join(' ').trim();
+  const wholeText = tokens.map((t, i) => aloud.spokenFor(t, tokens[i + 1] || '', tokens[i - 1] || '')).join(' ').trim();
   if (!wholeText || !/[\p{L}\p{N}]/u.test(wholeText)) return null;
   const wholePh = phonemize(wholeText);
   const wholeBlobs = wholePh.split(' ').filter(Boolean);
@@ -174,7 +174,7 @@ async function runSentence(tokens) {
      it against the whole-text blobs shows where espeak merged two into one. ---- */
   const perBlobs = [];
   tokens.forEach((t, ti) => {
-    const spoken = aloud.spokenFor(t).trim();
+    const spoken = aloud.spokenFor(t, tokens[ti + 1] || '', tokens[ti - 1] || '').trim();
     if (!spoken) return;
     for (const b of phonemize(spoken).split(' ').filter(Boolean)) perBlobs.push({ blob: b, tok: ti });
   });
@@ -223,6 +223,7 @@ async function runSentence(tokens) {
 }
 
 const CASES = [
+  ['context: No answer and labels', 'A: No. 12 witnesses testified about document No. 12 and exhibit No.105.'],
   ['reported: withdrawal', 'Slide 7, verbatim: "If you have outstanding client matters that will not be completed before the closure of your practice, you are effectively withdrawing from representation " and must comply with the withdrawal rule.'],
   ['reported: the standard', 'The standard (Slide 7): "A paralegal may only withdraw service if there is good cause and on reasonable notice to the client."'],
   ['reported: money', 'Referral fee cap: 15% of the first $50,000 + 5% of the excess, max $25,000 — and it must never increase the client\'s total fee.'],
