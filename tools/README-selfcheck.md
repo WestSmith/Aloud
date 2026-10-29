@@ -137,8 +137,16 @@ frame, content-only zoom and the read-only fixed-element boundary. It tests both
 the strict synthetic fixture always supplies every required capability.
 The synthetic gate also requires Spritz's warmed word updates to avoid layout/font
 reads and verifies fitting after font changes and desktop/phone resizing.
-It also checks the compact landscape dock with Atkinson, fractional speed labels,
-enlarged UI text, Silent WPM controls and rotation back to the portrait controls.
+It also checks the wide desktop/landscape dock with Atkinson, fractional speed
+labels, enlarged UI text, Silent WPM controls and rotation back to portrait.
+Panel checks cover centered desktop dialogs, even phone Settings categories,
+short/full handle drags, keyboard focus restoration and notices that do not move
+the player. Library checks preserve the original drop box above saved documents.
+
+The shared app mark is `assets/aloud-mark.svg`; regenerate its web and native PNG
+variants with `node tools/render-icons.mjs`, then sync the iOS web assets. Maskable,
+Apple-touch and iOS icons have opaque backgrounds; the mark stays inside the
+maskable safe area. The header embeds the same vector for offline use.
 
 Read-only intentionally removes author scripts. Its assertions require the answer/
 panel text to remain visible after expansion and Aloud controls to remain usable;

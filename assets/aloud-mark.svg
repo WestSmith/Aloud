@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs><linearGradient id="aloud-mark-gradient" x2="1" y2="1"><stop stop-color="#8d7dff"/><stop offset="1" stop-color="#5f8bff"/></linearGradient></defs>
+  <rect width="64" height="64" rx="14" fill="url(#aloud-mark-gradient)"/>
+  <g fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M35 15H22a4 4 0 0 0-4 4v26a4 4 0 0 0 4 4h13a4 4 0 0 0 4-4V19a4 4 0 0 0-4-4Z"/>
+    <path d="M24 24h9M24 31h9M24 38h5M46 25q6 7 0 14"/>
+  </g>
+</svg>
