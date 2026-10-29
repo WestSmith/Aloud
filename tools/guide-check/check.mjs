@@ -69,16 +69,39 @@ async function exercise(scope, expected) {
 }
 async function restoredSignature(scope, expected){return JSON.stringify({done:expected.done?await signature(scope.locator('.done').first()):null,mode:expected.mode?await mode(scope).textContent():null,collapse:!expected.done&&!expected.mode&&expected.collapse?await signature(scope.locator(collapseSelector).first()):null});}
 async function open(page,file,interactive){await page.locator('#file-input').setInputFiles(file);await page.waitForFunction(flag=>S.words.length>0&&S.mode==='html'&&(flag?S.frame?.ready:!S.frame),interactive);}
+async function checkControlLabels(page) {
+  const saved = await page.evaluate(() => ({ rate: S.rate, scale: store.get('uiScale', 1) }));
+  try {
+    for (const scale of [1, 1.3]) for (const rate of [2.5, 3.95]) {
+      await page.evaluate(({ scale, rate }) => { store.set('uiScale', scale); refreshInterfaceText(); setRate(rate); }, { scale, rate });
+      const layout = await page.evaluate(() => {
+        const speed = $('btn-speed'), css = getComputedStyle(speed), range = document.createRange();
+        range.selectNodeContents(speed);
+        const fits = range.getBoundingClientRect().width <= speed.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight) + .5;
+        const centered = [...document.querySelectorAll('#topbar-actions .named-action')].filter(el => el.checkVisibility()).every(el => {
+          if (getComputedStyle(el.querySelector('.action-label')).display !== 'none') return true;
+          const b = el.getBoundingClientRect(), icon = el.querySelector('svg').getBoundingClientRect();
+          return Math.abs(icon.left + icon.width / 2 - b.left - b.width / 2) < 1 && Math.abs(icon.top + icon.height / 2 - b.top - b.height / 2) < 1;
+        });
+        const player = $('player').getBoundingClientRect(), play = $('btn-play').getBoundingClientRect();
+        return { fits, centered, playCentered: Math.abs(play.left + play.width / 2 - player.left - player.width / 2) < 1 };
+      });
+      assert.deepEqual(layout, { fits: true, centered: true, playCentered: true }, `Control layout at ${rate}× / interface ${scale}`);
+    }
+  } finally { await page.evaluate(({ rate, scale }) => { store.set('uiScale', scale); refreshInterfaceText(); setRate(rate); }, saved); }
+}
 async function checkPlayer(page, viewport) {
   const centered = async () => assert(await page.evaluate(() => {
     const p = $('player').getBoundingClientRect(), b = $('btn-play').getBoundingClientRect();
     return Math.abs(b.left + b.width / 2 - p.left - p.width / 2) < 1;
   }), 'Play/Pause is off center');
   await centered();
+  if (viewport.width > 560) await checkControlLabels(page);
   if (viewport.width <= 560) {
     assert(!await page.locator('#btn-speed').isVisible(), 'Phone player should start compact');
     await page.locator('#btn-player-details').click();
     assert(await page.locator('#btn-speed').isVisible());
+    await checkControlLabels(page);
     await centered();
     await page.locator('#btn-speed').click();
     assert.equal(await page.locator('#speed-sheet').getAttribute('aria-hidden'), 'false');
@@ -95,16 +118,76 @@ async function checkPlayer(page, viewport) {
 }
 async function checkLibraryLayout(page) {
   await page.locator('#btn-library').click();
-  await page.waitForFunction(() => document.activeElement === $('recent-list').querySelector('.rr-open'));
+  await page.waitForFunction(() => document.activeElement === $('dropzone'));
   await page.locator('#lib-newfolder').focus();
   await page.evaluate(() => renderRecents());
   assert.equal(await page.evaluate(() => document.activeElement.id), 'lib-newfolder', 'Library refresh lost toolbar focus');
-  assert.equal(await page.locator('#home h1').textContent(), 'Continue reading');
-  assert(await page.evaluate(() => !!($('library').compareDocumentPosition($('dropzone')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'Import area still precedes Library');
+  assert.equal(await page.locator('#home h1').textContent(), 'Listen to anything.');
+  assert(await page.evaluate(() => !!($('dropzone').compareDocumentPosition($('library')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'Library displaced the drop box');
+  assert(await page.locator('#dropzone .fmt-chips').isVisible(), 'Full import area was hidden after saving a document');
   const title = page.locator('#recent-list .rr-name').first();
   assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace), 'normal');
   await page.locator('.rr-open').first().click();
   await page.waitForFunction(() => S.frame?.ready);
+}
+async function checkPanels(page, viewport) {
+  const settings = async () => {
+    if (viewport.width <= 1100) await page.locator('#btn-more').click();
+    await page.locator('#btn-settings').click();
+  };
+  const snapshot = await page.evaluate(() => JSON.stringify(S.words.map(w => [w.text, !!w.mute])));
+  await settings();
+  assert.match(await page.locator('#settings-view-context').textContent(), /Original HTML/);
+  assert(await page.locator('#bold-switch').isDisabled(), 'Original layout offered ineffective Bold control');
+  assert(!await page.locator('#font-select').isDisabled(), 'Original layout lost Speed reader font selection');
+  assert(!await page.locator('#smallprint-row').isVisible(), 'Non-PDF view shows PDF-only controls');
+  await page.locator('#skipcit-switch').click();
+  assert.match(await page.locator('#speech-summary').textContent(), /Source citations: read/);
+  await page.locator('#skipcit-switch').click();
+  assert.match(await page.locator('#speech-summary').textContent(), /Source citations: skipped/);
+  assert.equal(await page.evaluate(() => JSON.stringify(S.words.map(w => [w.text, !!w.mute]))), snapshot, 'Panel interactions changed speech exclusions');
+  await page.locator('#settings-sheet .sheet-close').click();
+  if (viewport.width <= 560) await page.locator('#btn-player-details').click();
+  await page.locator('#btn-speed').click();
+  // Let the modal's scheduled initial focus finish before exercising its Tab cycle.
+  await page.waitForFunction(() => document.activeElement === document.querySelector('#speed-sheet .sheet-close'));
+  assert(!await page.locator('#lag-chips').isVisible(), 'Timing controls should start folded');
+  const summary = page.locator('#highlight-timing summary');
+  await page.locator('#breather-chips button').last().focus();
+  await page.keyboard.press('Tab');
+  assert(await summary.evaluate(el => el === document.activeElement), 'Tab loop skipped the timing disclosure');
+  await page.keyboard.press('Tab');
+  assert(await page.locator('#speed-sheet .sheet-close').evaluate(el => el === document.activeElement), 'Timing disclosure escaped the modal Tab loop');
+  await page.keyboard.press('Shift+Tab');
+  assert(await summary.evaluate(el => el === document.activeElement), 'Reverse Tab skipped the timing disclosure');
+  await summary.press('Enter');
+  await summary.press('Space');
+  assert(!await page.locator('#lag-chips').isVisible());
+  await summary.press('Space');
+  assert(await page.locator('#lag-chips').isVisible(), 'Timing disclosure is not keyboard operable');
+  await page.locator('#lag-chips button').filter({hasText: /^160 ms$/}).click();
+  assert.equal(await page.locator('#lag-summary').textContent(), '160 ms');
+  for (const rate of [2, 3]) {
+    await page.locator('#speed-chips button').filter({hasText: new RegExp('^' + rate + '×$')}).click();
+    assert.equal(await page.evaluate(() => S.rate), rate);
+    assert(await page.locator('#highlight-timing').getAttribute('open') !== null, 'Changing speed closed timing controls');
+  }
+  await page.locator('#lag-chip-auto').click();
+  await page.locator('#speed-sheet .sheet-close').click();
+  await page.locator('#btn-view').click(); await page.locator('#view-reading').click();
+  await page.waitForFunction(() => S.mode === 'flow' && S.words.length > 0);
+  await settings();
+  assert.equal(await page.locator('#settings-view-context').textContent(), 'Reading view');
+  assert(!await page.locator('#bold-switch').isDisabled());
+  await page.locator('#bold-switch').click();
+  assert(await page.locator('#content').evaluate(el => el.classList.contains('bold-all')));
+  await page.locator('#settings-sheet .sheet-close').click();
+  await page.locator('#btn-view').click(); await page.locator('#view-original').click();
+  await page.waitForFunction(() => S.frame?.ready);
+  await settings();
+  assert(await page.locator('#bold-switch').isDisabled());
+  assert.equal(await page.locator('#bold-switch').getAttribute('aria-checked'), 'true', 'View changes discarded Bold preference');
+  await page.locator('#settings-sheet .sheet-close').click();
 }
 async function checkSpritz(page, viewport) {
   await page.evaluate(() => setRsvpOpen(true));
@@ -178,7 +261,7 @@ try {
           assert(await active.locator('.examline .aloud-w').first().evaluate(el => getComputedStyle(el).borderTopWidth === '0px'), 'A word became a bordered badge');
           assert(await active.locator('svg .aloud-w').evaluateAll(els => els.length > 0 && els.every(el => el.namespaceURI === 'http://www.w3.org/2000/svg')), 'SVG label namespace changed');
           const font=await active.locator('.body-copy').evaluate(el=>parseFloat(getComputedStyle(el).fontSize));const player=await page.locator('#player').boundingBox();if(viewport.width <= 699)await page.locator('#btn-view').click();await page.locator('#zoom-in').click();if(viewport.width <= 699)await page.locator('#view-sheet .sheet-close').click();await active.waitForFunction(before=>parseFloat(getComputedStyle(document.querySelector('.body-copy')).fontSize)>before,font);assert.equal((await page.locator('#player').boundingBox()).width,player.width,'Text zoom enlarged player chrome');}
-        if(strict) { await checkSpritz(page, viewport); await checkLibraryLayout(page); }
+        if(strict) { await checkSpritz(page, viewport); await checkLibraryLayout(page); await checkPanels(page, viewport); }
       }else{
         assert.equal(await page.locator('#content iframe').count(),0);
         for(const text of panels)assert(await page.locator('.html-host').evaluate((host,text)=>[...host.shadowRoot.querySelectorAll('[data-reading],.answer,.reveal,.a')].some(el=>el.textContent.replace(/\s+/g,' ').trim()===text&&el.checkVisibility()),text),'Read-only lost or hid panel text');
