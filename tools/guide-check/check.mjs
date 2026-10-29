@@ -95,6 +95,10 @@ async function checkPlayer(page, viewport) {
 }
 async function checkLibraryLayout(page) {
   await page.locator('#btn-library').click();
+  await page.waitForFunction(() => document.activeElement === $('recent-list').querySelector('.rr-open'));
+  await page.locator('#lib-newfolder').focus();
+  await page.evaluate(() => renderRecents());
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'lib-newfolder', 'Library refresh lost toolbar focus');
   assert.equal(await page.locator('#home h1').textContent(), 'Continue reading');
   assert(await page.evaluate(() => !!($('library').compareDocumentPosition($('dropzone')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'Import area still precedes Library');
   const title = page.locator('#recent-list .rr-name').first();

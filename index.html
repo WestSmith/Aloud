@@ -6206,7 +6206,7 @@ function leaveDocument({ announce = true, focusLibrary = true } = {}) {
   window.scrollTo({ top: 0, behavior: 'auto' });
 
   if (hadDocument && announce) toast('Library ready — choose another document whenever you like.');
-  if (focusLibrary) requestAnimationFrame(() => $('dropzone').focus({ preventScroll: true }));
+  if (focusLibrary) requestAnimationFrame(() => ($('recent-list').querySelector('.rr-open') || $('dropzone')).focus({ preventScroll: true }));
 }
 
 /* TOC dot leaders ("OVERVIEW ......... 26", spaced or not) are layout, not
