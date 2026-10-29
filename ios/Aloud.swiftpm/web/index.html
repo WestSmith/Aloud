@@ -214,13 +214,6 @@
     margin-bottom: 12px;
   }
   #library { margin-top: 28px; width: 100%; max-width: 500px; display: block; }
-  #home.has-library { justify-content: flex-start; }
-  #home.has-library p.sub { margin-bottom: 20px; }
-  #home.has-library #library { max-width: 680px; margin: 0 0 22px; }
-  #home.has-library #dropzone { max-width: 680px; padding: 16px 20px; }
-  #home.has-library #dropzone .big, #home.has-library #dropzone .t2,
-  #home.has-library #dropzone .fmt-chips, #home.has-library #home-voice-hint { display: none; }
-  #home.has-library #dropzone .t1 { margin: 0; }
   #recent-list .rr-name { white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
   #lib-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
   #lib-head .lib-h { flex: 1; text-align: left; font-size: calc(0.71875rem * var(--ui-scale) * var(--ui-system-scale, 1)); font-weight: 700;
@@ -6230,7 +6223,7 @@ function leaveDocument({ announce = true, focusLibrary = true } = {}) {
   window.scrollTo({ top: 0, behavior: 'auto' });
 
   if (hadDocument && announce) toast('Library ready — choose another document whenever you like.');
-  if (focusLibrary) requestAnimationFrame(() => ($('recent-list').querySelector('.rr-open') || $('dropzone')).focus({ preventScroll: true }));
+  if (focusLibrary) requestAnimationFrame(() => $('dropzone').focus({ preventScroll: true }));
 }
 
 /* TOC dot leaders ("OVERVIEW ......... 26", spaced or not) are layout, not
@@ -10538,15 +10531,6 @@ function renderRecents() {
   const box = $('recent-list');
   box.innerHTML = '';
   $('library').style.display = 'block';
-  const hasLibrary = all.length > 0;
-  $('home').classList.toggle('has-library', hasLibrary);
-  const libraryAnchor = hasLibrary ? $('dropzone') : $('home-voice-hint');
-  if ($('library').nextElementSibling !== libraryAnchor) $('home').insertBefore($('library'), libraryAnchor);
-  $('home').querySelector('h1').innerHTML = hasLibrary ? 'Continue reading' : 'Listen to <span class="grad">anything</span>.';
-  $('home').querySelector('.sub').textContent = hasLibrary
-    ? 'Pick up where you left off, or open another document.'
-    : 'Open a book or document and Aloud reads it to you with word-by-word karaoke highlighting — like Speechify, but yours.';
-  $('dropzone').querySelector('.t1').textContent = hasLibrary ? 'Open another file' : 'Drop a file here, or tap to browse';
   if (!all.length) {
     $('lib-folders').replaceChildren();
     $('lib-folder-tools').style.display = 'none';

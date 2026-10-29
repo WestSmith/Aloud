@@ -118,12 +118,13 @@ async function checkPlayer(page, viewport) {
 }
 async function checkLibraryLayout(page) {
   await page.locator('#btn-library').click();
-  await page.waitForFunction(() => document.activeElement === $('recent-list').querySelector('.rr-open'));
+  await page.waitForFunction(() => document.activeElement === $('dropzone'));
   await page.locator('#lib-newfolder').focus();
   await page.evaluate(() => renderRecents());
   assert.equal(await page.evaluate(() => document.activeElement.id), 'lib-newfolder', 'Library refresh lost toolbar focus');
-  assert.equal(await page.locator('#home h1').textContent(), 'Continue reading');
-  assert(await page.evaluate(() => !!($('library').compareDocumentPosition($('dropzone')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'Import area still precedes Library');
+  assert.equal(await page.locator('#home h1').textContent(), 'Listen to anything.');
+  assert(await page.evaluate(() => !!($('dropzone').compareDocumentPosition($('library')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'Library displaced the drop box');
+  assert(await page.locator('#dropzone .fmt-chips').isVisible(), 'Full import area was hidden after saving a document');
   const title = page.locator('#recent-list .rr-name').first();
   assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace), 'normal');
   await page.locator('.rr-open').first().click();
