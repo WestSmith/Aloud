@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.39.1">
+<meta name="aloud-version" content="v6.40.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -7779,17 +7779,25 @@ function generateNeural(sentIdx, lookahead = false) {
    deeper at higher speeds; pause stops further speculative inference */
 async function neuralPump() {
   if (!S.playing || S.pumpBusy || S.kokoro.state !== 'ready' || S.engine !== 'neural' || rsvpSilentActive()) return;
+  const doc = S.docGeneration, speech = S.speechGeneration, voice = S.neuralVoice;
   S.pumpBusy = true;
   try {
     const depth = Math.min(10, 2 + Math.ceil(S.rate * 2));
     for (let k = 1; k <= depth; k++) {
-      const idx = S.curSent + k;
-      if (idx < 0 || idx >= S.sentences.length) break;
-      if (!S.playing || S.engine !== 'neural') break;
+      if (!S.playing || S.engine !== 'neural' || rsvpSilentActive()
+          || doc !== S.docGeneration || speech !== S.speechGeneration || voice !== S.neuralVoice) break;
+      // Playback and seeks can move while inference is pending. Re-scan from
+      // the live position; adding k to that moving position skips needed clips.
+      let idx = seekPlayable(S.curSent + 1, 1), ahead = 0;
+      while (idx !== -1 && ahead < depth && S.neuralCache.has(neuralCacheKey(idx))) {
+        idx = seekPlayable(idx + 1, 1);
+        ahead++;
+      }
+      if (idx === -1 || ahead === depth) break;
       await generateNeural(idx, true);
     }
   } catch {}
-  S.pumpBusy = false;
+  finally { S.pumpBusy = false; }
 }
 
 /* Kokoro's context window is 510 phoneme tokens and kokoro-js silently
@@ -8498,24 +8506,46 @@ function rsvpFlash(token) {
   S.rsvp.lastFlip = now;
   /* voice-synced: the measured pace rides on the mode chip (silent mode shows
      its setting on the slider instead) */
-  if (S.rsvp.mode !== 'silent') {
+  if (S.rsvp.mode !== 'silent' && (!S.rsvp.paceAt || now - S.rsvp.paceAt >= 500)) {
+    S.rsvp.paceAt = now;
     const wpm = S.rsvp.avg ? Math.round(60000 / S.rsvp.avg / 5) * 5 : null;
-    $('rsvp-mode').textContent = '🔊 Voice-synced' + (wpm ? ` · ${wpm} wpm` : '');
+    const label = '🔊 Voice-synced' + (wpm ? ` · ${wpm} wpm` : '');
+    if ($('rsvp-mode').textContent !== label) $('rsvp-mode').textContent = label;
   }
 }
 
 function fitRsvpWord() {
-  // Measure only the display; ORP centering and all word timing stay unchanged.
+  // Read layout/font only when the display changes, not after every word's
+  // text writes. Canvas measurements do not force the guide's layout to flush.
   const ctx = fitRsvpWord.measure || (fitRsvpWord.measure = document.createElement('canvas').getContext('2d'));
   const el = $('rsvp-word');
+  let metrics = fitRsvpWord.metrics;
+  if (!metrics) {
+    const font = getComputedStyle(el), base = window.innerWidth <= 560 ? 32 : 38;
+    const width = el.clientWidth;
+    if (width <= 12) return; // Opening/hidden display: retry once it has a width.
+    metrics = fitRsvpWord.metrics = { width, base, font: `${font.fontWeight} ${base}px ${font.fontFamily}` };
+  }
   const token = $('rsvp-pre').textContent + $('rsvp-orp').textContent + $('rsvp-post').textContent;
-  const font = getComputedStyle(el), base = window.innerWidth <= 560 ? 32 : 38;
-  ctx.font = `${font.fontWeight} ${base}px ${font.fontFamily}`;
+  ctx.font = metrics.font;
   const side = Math.max(ctx.measureText($('rsvp-pre').textContent).width, ctx.measureText($('rsvp-post').textContent).width);
   const required = 2 * side + ctx.measureText($('rsvp-orp').textContent).width + token.length * .6;
-  el.style.fontSize = Math.min(base, base * (el.clientWidth - 12) / Math.max(1, required)) + 'px';
+  const size = Math.min(metrics.base, metrics.base * (metrics.width - 12) / Math.max(1, required)) + 'px';
+  if (el.style.fontSize !== size) el.style.fontSize = size;
 }
-window.addEventListener('resize', () => { if (S.rsvp.open) fitRsvpWord(); });
+function refreshRsvpFit() {
+  fitRsvpWord.metrics = null;
+  if (S.rsvp.open) fitRsvpWord();
+}
+window.addEventListener('resize', refreshRsvpFit);
+try {
+  new ResizeObserver(entries => {
+    const width = entries[0].contentRect.width;
+    if (width === fitRsvpWord.observedWidth) return;
+    fitRsvpWord.observedWidth = width;
+    refreshRsvpFit();
+  }).observe($('rsvp-word'));
+} catch {}
 
 function rsvpPlay(fromWord) {
   NATIVE?.audioSession?.(false);
@@ -8584,7 +8614,8 @@ function setRsvpOpen(open) {
   setTimeout(() => { invalidateReadingViewportBounds(); if (S.curWord >= 0) maybeScroll(S.words[S.curWord]?.el); }, 380);
   $('btn-rsvp').classList.toggle('rsvp-active', open);
   if (open) {
-    S.rsvp.lastFlip = 0; S.rsvp.avg = 0;
+    S.rsvp.lastFlip = 0; S.rsvp.avg = 0; S.rsvp.paceAt = 0;
+    fitRsvpWord.metrics = null;
     renderRsvpMode();
     const w = S.words[Math.max(0, S.curWord)];
     if (w) rsvpFlash(w.text);
@@ -9462,6 +9493,7 @@ function applyFont() {
   if (!FONT_STACKS[contentFont]) contentFont = 'serif';
   document.documentElement.style.setProperty('--content-size', contentSize + 'px');
   document.documentElement.style.setProperty('--content-font', FONT_STACKS[contentFont]);
+  refreshRsvpFit();
   $('font-select').value = contentFont;
   store.set('fontSize', contentSize);
   store.set('contentFont', contentFont);

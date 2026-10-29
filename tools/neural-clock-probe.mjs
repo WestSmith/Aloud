@@ -31,6 +31,7 @@
            NEXT=1 presses Next mid-sentence while playing and reports how
            long the new sentence's first word took to paint (must be a few
            ms, and the run must play on — "final" shows where it ended).
+           RSVP=1 opens the voice-synced Spritz display during the probe.
 
    Measured 2026-09-21 (cause 11 in HANDOFF-karaoke-sync.md):
      v6.30.0  2.75× load 0: lit-before-audio 18   (2 per sentence start)
@@ -62,7 +63,7 @@ const text = Array.from({ length: +(process.env.N || 12) }, (_, i) =>
   `Sentence number ${i + 1} carries eight plain words here . Another short line follows it quickly now.`).join(' ');
 await page.evaluate(async t => { if (!await openFile(new File([t], 'clock-probe.txt', { type: 'text/plain' }))) throw new Error('Probe document did not open'); }, text);
 await page.waitForFunction(() => S.sentences.length > 10);
-await page.evaluate(([ms, pause, next]) => { window.__RUN_MS = ms; window.__PAUSE = pause; window.__NEXT = next; }, [+(process.env.RUN_MS || 9000), !!process.env.PAUSE, !!process.env.NEXT]);
+await page.evaluate(([ms, pause, next, rsvp]) => { window.__RUN_MS = ms; window.__PAUSE = pause; window.__NEXT = next; if(rsvp)setRsvpOpen(true); }, [+(process.env.RUN_MS || 9000), !!process.env.PAUSE, !!process.env.NEXT, !!process.env.RSVP]);
 const res = await page.evaluate(async ({ RATE, LOAD }) => {
   const log = [], ev = [];
   const T0 = performance.now();
@@ -73,6 +74,8 @@ const res = await page.evaluate(async ({ RATE, LOAD }) => {
   // synthetic clip: 0.40 s lead silence, then per word 0.22 s tone + 0.06 s gap
   const sr = 24000, LEAD = 0.40, W = 0.28;
   window.generateNeural = async (si) => {
+    const key = neuralCacheKey(si), cached = S.neuralCache.get(key);
+    if (cached) return cached;
     const sent = S.sentences[si];
     const n = sent.end - sent.start;
     const spoken = []; for (let k = 0; k < n; k++) spoken.push(/[\p{L}\p{N}]/u.test(S.words[sent.start + k].text));
@@ -89,7 +92,9 @@ const res = await page.evaluate(async ({ RATE, LOAD }) => {
     }
     window.__starts = window.__starts || {}; window.__starts[si] = starts;
     await new Promise(r => setTimeout(r, 5));
-    return { url: audioBlobParts({ audio, sampling_rate: sr }), starts, durationSec: total / sr, timing: 'model', leadSec: LEAD };
+    const entry = { url: audioBlobParts({ audio, sampling_rate: sr }), starts, durationSec: total / sr, timing: 'model', leadSec: LEAD };
+    S.neuralCache.set(key, entry); // Mirror production so lookahead sees its completed work.
+    return entry;
   };
   window.loadKokoro = async () => {}; S.kokoro.state = 'ready'; setEngine('neural'); S.kokoro.state = 'ready'; S.breather = 0;
   setRate(RATE);
@@ -100,10 +105,14 @@ const res = await page.evaluate(async ({ RATE, LOAD }) => {
   window.highlightWord = (w, f) => {
     const P = S.audioPlay;
     const ws = S.words[w]; const sIdx = ws?.sent ?? S.curSent; const st = window.__starts?.[sIdx];
-    log.push({ t: now(), w, sent: S.curSent, wsent: sIdx, text: ws?.text, onset: st ? st[w - S.sentences[sIdx].start] : null,
+    // Observe real paints: Next may request the same word again after play().
+    if (w !== S.paintedWord || f) log.push({ t: now(), w, sent: S.curSent, wsent: sIdx, text: ws?.text, onset: st ? st[w - S.sentences[sIdx].start] : null,
       first: !!(st && w === S.sentences[sIdx].start), ct: +na.currentTime.toFixed(3), rolling: !!P?.rolling, paused: na.paused, rs: na.readyState,
       playingFired: !!P?._playingFired, ended: na.ended });
-    return origHl(w, f);
+    const result = origHl(w, f);
+    if (S.rsvp.open && ws && $('rsvp-pre').textContent + $('rsvp-orp').textContent + $('rsvp-post').textContent !== ws.text)
+      throw new Error('Spritz display differs from the selected spoken word');
+    return result;
   };
   na.addEventListener('playing', () => { if (S.audioPlay) S.audioPlay._playingFired = true; });
   const origPause = pauseAll; window.pauseAll = () => { console.log('PAUSE from ' + new Error().stack.split('\n').slice(2,6).join(' | ')); return origPause(); };
@@ -121,7 +130,7 @@ const res = await page.evaluate(async ({ RATE, LOAD }) => {
      skip must paint the new sentence's first word at once (Codex, #24) */
   if (window.__NEXT) {
     await new Promise(r => setTimeout(r, 1200));
-    $('btn-next').click(); ev.push({ t: now(), e: 'USER-NEXT', ct: +na.currentTime.toFixed(3), rs: na.readyState, rolling: !!S.audioPlay?.rolling });
+    ev.push({ t: now(), e: 'USER-NEXT', ct: +na.currentTime.toFixed(3), rs: na.readyState, rolling: !!S.audioPlay?.rolling }); $('btn-next').click();
   }
   if (window.__PAUSE) {
     await new Promise(r => setTimeout(r, 1200));

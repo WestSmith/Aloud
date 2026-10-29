@@ -27,6 +27,7 @@ jobs:
       - run: node tools/library-recovery-selfcheck.mjs
       - run: node tools/storage-selfcheck.mjs
       - run: node tools/neural-audio-ownership-selfcheck.mjs
+      - run: node tools/neural-preload-selfcheck.mjs
       - run: node tools/offline-selfcheck.mjs
       - name: Install pinned browser tooling
         run: |
