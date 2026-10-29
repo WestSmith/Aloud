@@ -106,6 +106,53 @@ async function checkLibraryLayout(page) {
   await page.locator('.rr-open').first().click();
   await page.waitForFunction(() => S.frame?.ready);
 }
+async function checkPanels(page, viewport) {
+  const settings = async () => {
+    if (viewport.width <= 1100) await page.locator('#btn-more').click();
+    await page.locator('#btn-settings').click();
+  };
+  const snapshot = await page.evaluate(() => JSON.stringify(S.words.map(w => [w.text, !!w.mute])));
+  await settings();
+  assert.match(await page.locator('#settings-view-context').textContent(), /Original HTML/);
+  assert(await page.locator('#bold-switch').isDisabled(), 'Original layout offered ineffective Bold control');
+  assert(!await page.locator('#font-select').isDisabled(), 'Original layout lost Speed reader font selection');
+  assert(!await page.locator('#smallprint-row').isVisible(), 'Non-PDF view shows PDF-only controls');
+  await page.locator('#skipcit-switch').click();
+  assert.match(await page.locator('#speech-summary').textContent(), /Source citations: read/);
+  await page.locator('#skipcit-switch').click();
+  assert.match(await page.locator('#speech-summary').textContent(), /Source citations: skipped/);
+  assert.equal(await page.evaluate(() => JSON.stringify(S.words.map(w => [w.text, !!w.mute]))), snapshot, 'Panel interactions changed speech exclusions');
+  await page.locator('#settings-sheet .sheet-close').click();
+  if (viewport.width <= 560) await page.locator('#btn-player-details').click();
+  await page.locator('#btn-speed').click();
+  assert(!await page.locator('#lag-chips').isVisible(), 'Timing controls should start folded');
+  const summary = page.locator('#highlight-timing summary');
+  await summary.focus(); await summary.press('Enter');
+  assert(await page.locator('#lag-chips').isVisible(), 'Timing disclosure is not keyboard operable');
+  await page.locator('#lag-chips button').filter({hasText: /^160 ms$/}).click();
+  assert.equal(await page.locator('#lag-summary').textContent(), '160 ms');
+  for (const rate of [2, 3]) {
+    await page.locator('#speed-chips button').filter({hasText: new RegExp('^' + rate + '×$')}).click();
+    assert.equal(await page.evaluate(() => S.rate), rate);
+    assert(await page.locator('#highlight-timing').getAttribute('open') !== null, 'Changing speed closed timing controls');
+  }
+  await page.locator('#lag-chip-auto').click();
+  await page.locator('#speed-sheet .sheet-close').click();
+  await page.locator('#btn-view').click(); await page.locator('#view-reading').click();
+  await page.waitForFunction(() => S.mode === 'flow' && S.words.length > 0);
+  await settings();
+  assert.equal(await page.locator('#settings-view-context').textContent(), 'Reading view');
+  assert(!await page.locator('#bold-switch').isDisabled());
+  await page.locator('#bold-switch').click();
+  assert(await page.locator('#content').evaluate(el => el.classList.contains('bold-all')));
+  await page.locator('#settings-sheet .sheet-close').click();
+  await page.locator('#btn-view').click(); await page.locator('#view-original').click();
+  await page.waitForFunction(() => S.frame?.ready);
+  await settings();
+  assert(await page.locator('#bold-switch').isDisabled());
+  assert.equal(await page.locator('#bold-switch').getAttribute('aria-checked'), 'true', 'View changes discarded Bold preference');
+  await page.locator('#settings-sheet .sheet-close').click();
+}
 async function checkSpritz(page, viewport) {
   await page.evaluate(() => setRsvpOpen(true));
   await page.waitForFunction(() => fitRsvpWord.metrics?.width === $('rsvp-word').clientWidth);
@@ -178,7 +225,7 @@ try {
           assert(await active.locator('.examline .aloud-w').first().evaluate(el => getComputedStyle(el).borderTopWidth === '0px'), 'A word became a bordered badge');
           assert(await active.locator('svg .aloud-w').evaluateAll(els => els.length > 0 && els.every(el => el.namespaceURI === 'http://www.w3.org/2000/svg')), 'SVG label namespace changed');
           const font=await active.locator('.body-copy').evaluate(el=>parseFloat(getComputedStyle(el).fontSize));const player=await page.locator('#player').boundingBox();if(viewport.width <= 699)await page.locator('#btn-view').click();await page.locator('#zoom-in').click();if(viewport.width <= 699)await page.locator('#view-sheet .sheet-close').click();await active.waitForFunction(before=>parseFloat(getComputedStyle(document.querySelector('.body-copy')).fontSize)>before,font);assert.equal((await page.locator('#player').boundingBox()).width,player.width,'Text zoom enlarged player chrome');}
-        if(strict) { await checkSpritz(page, viewport); await checkLibraryLayout(page); }
+        if(strict) { await checkSpritz(page, viewport); await checkLibraryLayout(page); await checkPanels(page, viewport); }
       }else{
         assert.equal(await page.locator('#content iframe').count(),0);
         for(const text of panels)assert(await page.locator('.html-host').evaluate((host,text)=>[...host.shadowRoot.querySelectorAll('[data-reading],.answer,.reveal,.a')].some(el=>el.textContent.replace(/\s+/g,' ').trim()===text&&el.checkVisibility()),text),'Read-only lost or hid panel text');

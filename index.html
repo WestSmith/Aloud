@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.41.0">
+<meta name="aloud-version" content="v6.42.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -475,6 +475,16 @@
   }
   .switch.on { background: var(--accent); }
   .switch.on::after { left: 22px; }
+
+  .settings-context { padding: 10px 12px; border-radius: 11px; background: var(--accent-soft); color: var(--accent-strong); font-size: calc(.8125rem * var(--ui-scale) * var(--ui-system-scale, 1)); font-weight: 650; margin: 12px 0; }
+  .settings-group { border: 1px solid var(--border); border-radius: 14px; padding: 12px; margin: 14px 0; }
+  .settings-group h4, .settings-heading { font-size: calc(.875rem * var(--ui-scale) * var(--ui-system-scale, 1)); margin: 8px 0; }
+  .settings-group .set-row:last-child { padding-bottom: 0; }
+  .settings-group .set-row .lbl { flex-basis: 120px; }
+  .switch:disabled { opacity: .45; cursor: default; }
+  #highlight-timing summary { min-height: 44px; cursor: pointer; font-size: calc(.84375rem * var(--ui-scale) * var(--ui-system-scale, 1)); font-weight: 650; line-height: 1.5; padding: 10px 0; }
+  #lag-summary { color: var(--text-dim); font-size: calc(.75rem * var(--ui-scale) * var(--ui-system-scale, 1)); font-weight: 400; }
+  #highlight-timing .voice-note:last-child { margin-bottom: 0; }
 
   /* chapter select */
   #chapter-row { display: none; align-items: center; gap: 8px; }
@@ -956,25 +966,35 @@
   <div class="speed-big" id="speed-val">1×</div>
   <input type="range" id="speed-range" min="0.5" max="4" step="0.05" value="1" aria-label="Playback speed">
   <div class="chips" id="speed-chips"></div>
-  <div class="voice-note">Kokoro changes speed instantly with closely synchronized highlighting. Built-in voices restart the sentence when speed changes, and some have a lower speed limit.</div>
-  <h3 style="margin-top:18px">Breathers</h3>
+  <div class="voice-note" id="speed-note"></div>
+  <h3 style="margin-top:18px">Extra pauses</h3>
   <div class="chips" id="breather-chips"></div>
-  <div class="voice-note">How long the reader rests at commas, sentence ends, and new paragraphs — in the speed-reader panel and between spoken paragraphs. Speed itself is unchanged.</div>
-  <h3 style="margin-top:18px">Karaoke sync</h3>
-  <div class="chips" id="lag-chips"></div>
-  <div class="voice-note" id="lag-note"></div>
+  <div class="voice-note">Adds pauses between spoken paragraphs. In silent Speed reader, also pauses at punctuation. The voice’s natural pauses remain.</div>
+  <details id="highlight-timing" class="settings-group">
+    <summary>Adjust highlight timing <span id="lag-summary"></span></summary>
+    <p class="voice-note">Hold the highlight back if it appears before you hear the word. Audio speed stays the same.</p>
+    <div class="chips" id="lag-chips"></div>
+    <div class="voice-note" id="lag-note"></div>
+  </details>
 </div>
 
 <div class="sheet" id="settings-sheet">
   <div class="grab"></div>
   <h3>Settings</h3>
-<nav id="settings-nav" aria-label="Settings categories"><button class="chip on" data-settings="reading" aria-pressed="true">Reading</button><button class="chip" data-settings="voice" aria-pressed="false">Voice</button><button class="chip" data-settings="appearance" aria-pressed="false">Appearance</button><button class="chip" data-settings="advanced" aria-pressed="false">Advanced</button></nav><div id="settings-reading">  <div class="set-row">
-    <div class="lbl">Text size<small id="text-size-note">Applies to the Reading view</small></div>
+<nav id="settings-nav" aria-label="Settings categories"><button class="chip on" data-settings="reading" aria-pressed="true">Reading</button><button class="chip" data-settings="voice" aria-pressed="false">Voice</button><button class="chip" data-settings="appearance" aria-pressed="false">Appearance</button><button class="chip" data-settings="advanced" aria-pressed="false">Advanced</button></nav><div id="settings-reading">
+  <p id="settings-view-context" class="settings-context"></p>
+  <p class="voice-note" id="speech-summary" role="status" aria-live="polite" aria-atomic="true"></p>
+  <div class="set-row">
+    <div class="lbl"><span id="text-size-title">Text size</span><small id="text-size-note">Applies to the Reading view</small></div>
     <div class="stepper">
       <button id="font-minus">−</button><span id="font-size-label">19</span><button id="font-plus">+</button>
     </div>
-  </div>  <div class="set-row">
-    <div class="lbl">Font<small>Applies to the Reading view</small></div>
+  </div>
+  <div class="settings-group" role="group" aria-labelledby="reading-style-heading">
+  <h4 id="reading-style-heading">Reading view &amp; Speed reader</h4>
+  <p class="voice-note" id="reading-style-note"></p>
+  <div class="set-row">
+    <div class="lbl">Font<small>Reading view and Speed reader</small></div>
     <select id="font-select" aria-label="Reading font">
       <option value="serif">Georgia (serif)</option>
       <option value="sans">Sans-serif</option>
@@ -983,9 +1003,10 @@
       <option value="dyslexic">OpenDyslexic</option>
     </select>
   </div>  <div class="set-row">
-    <div class="lbl">Bold text<small>Make all text bold in the Reading view</small></div>
+    <div class="lbl">Bold text<small id="bold-scope-note">Reading view only</small></div>
     <button class="switch" id="bold-switch" role="switch" aria-checked="false" aria-label="Bold text"></button>
-  </div>  <div class="set-row">
+  </div></div>
+  <div class="set-row">
     <div class="lbl">Auto-scroll<small>Keep the spoken sentence in view</small></div>
     <button class="switch on" id="autoscroll-switch" role="switch" aria-checked="true" aria-label="Auto-scroll"></button>
   </div>  <div class="set-row">
@@ -994,13 +1015,15 @@
   </div>  <div class="set-row">
     <div class="lbl">Skim mode<small>Read only the first sentence of each paragraph</small></div>
     <button class="switch" id="skim-switch" role="switch" aria-checked="false" aria-label="Skim mode"></button>
-  </div>  <div class="set-row">
+  </div>
+  <h4 class="settings-heading">Speech exclusions</h4>
+  <div class="set-row">
     <div class="lbl">Skip URLs &amp; code blocks<small>Don't read web addresses or code out loud</small></div>
     <button class="switch on" id="skipcode-switch" role="switch" aria-checked="true" aria-label="Skip URLs and code blocks"></button>
   </div>  <div class="set-row">
     <div class="lbl">Skip source citations<small>Don't read the reference pointers a study guide cites itself with — “(Tr P1 [~0:03])”, “Slide 14 · Tr P1 [0:17]”, “Source: Week 11 Slides”, “(pp. 2–3)”. Skipped words stay visible on the page. Rule and by-law numbers are always read.</small></div>
     <button class="switch on" id="skipcit-switch" role="switch" aria-checked="true" aria-label="Skip source citations"></button>
-  </div>  <div class="set-row">
+  </div>  <div class="set-row" id="smallprint-row">
     <div class="lbl">Read small print (PDF)<small>Footnotes, margin notes, superscript markers</small></div>
     <button class="switch" id="smallprint-switch" role="switch" aria-checked="false" aria-label="Read small print in PDFs"></button>
   </div></div><div id="settings-voice" hidden><button class="chip" id="settings-choose-voice">Choose voice</button><p class="voice-note">Kokoro voices read English. Built-in voices depend on your device and installed languages.</p>  <div class="set-row" id="nq-row" style="display:block">
@@ -8915,6 +8938,7 @@ function setModalBackgroundInert(inert) {
 }
 function openSheet(id) {
   if (id === 'help-sheet' || id === 'settings-sheet') refreshDeliveryStatus();
+  if (id === 'settings-sheet') refreshSettingsContext();
   stopVoicePreview(true);
   const sheet = $(id);
   if (!document.querySelector('.sheet.open')) sheetReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -9267,6 +9291,10 @@ $('btn-next').addEventListener('click', () => advanceSentence(1, S.playing));
 /* speed sheet: slider + presets up to 4× */
 const SPEED_PRESETS = [1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4];
 function renderSpeedSheet() {
+  $('speed-note').textContent = rsvpSilentActive()
+    ? 'Voice playback speed. Set the silent reading pace in Speed reader.'
+    : S.engine === 'neural' ? 'Changes take effect immediately.'
+    : 'Changes restart the sentence. Some voices have a lower speed limit.';
   $('speed-val').textContent = $('btn-speed').textContent;
   $('speed-range').value = S.rate;
   const box = $('speed-chips');
@@ -9289,7 +9317,7 @@ function renderSpeedSheet() {
     b.addEventListener('click', () => {
       S.breather = v; store.set('breather', v);
       renderSpeedSheet();
-      toast(v === 0 ? 'Breathers off — every word gets equal time.' : `Breathers: ${label.toLowerCase()}.`);
+      toast(v === 0 ? 'Extra pauses off.' : `Extra pauses: ${label.toLowerCase()}.`);
     });
     bbox.appendChild(b);
   });
@@ -9302,17 +9330,21 @@ const LAG_PRESETS = [['auto', 'Auto'], [0, 'None'], [80, '80 ms'], [160, '160 ms
 let lagRefreshT = 0, lagShownDet;
 function lagAutoLabel(det) { return det ? `Auto · ${det} ms` : 'Auto · none reported'; }
 function lagNoteText(det) {
-  return 'If the highlighted word runs ahead of what you hear — most noticeable on the first words after a pause — hold it back here. ' +
-    'The lag is your audio output, not the timing: Bluetooth headphones buffer 150–250 ms, wired almost nothing. ' +
-    (det ? `Auto uses what this browser reports for your output device (${det} ms) — browsers often report far less than AirPods and other Bluetooth headphones really add, so if Auto still runs ahead, 160 or 240 ms is the usual fix.`
-         : 'This browser does not report a figure for your output device, so Auto is no offset — pick one by ear.');
+  return (det ? `Auto uses the browser’s reported ${det} ms delay.` : 'Auto uses no offset when the browser reports no delay.') +
+    ' Bluetooth delay can be underreported; try 160 or 240 ms if the highlight still runs ahead.';
 }
+function refreshLagSummary(det) {
+  $('lag-summary').textContent = S.karaokeLag === 'auto' ? lagAutoLabel(det)
+    : S.karaokeLag === 0 ? 'No offset' : S.karaokeLag + ' ms';
+}
+
 function renderLagChips() {
   const box = $('lag-chips');
   if (!box) return;
   box.innerHTML = '';
   const det = detectOutputLatency();
   lagShownDet = det;
+  refreshLagSummary(det);
   LAG_PRESETS.forEach(([v, label]) => {
     const b = document.createElement('button');
     b.className = 'chip' + (v === S.karaokeLag ? ' on' : '');
@@ -9342,6 +9374,7 @@ function renderLagChips() {
     const now = detectOutputLatency();
     if (now === lagShownDet) return;
     lagShownDet = now;
+    refreshLagSummary(now);
     const auto = $('lag-chip-auto');
     if (auto) auto.textContent = lagAutoLabel(now);
     if (note) note.textContent = lagNoteText(now);
@@ -9513,11 +9546,11 @@ const FONT_STACKS = {
   dyslexic: "'OpenDyslexic', 'Trebuchet MS', Verdana, sans-serif",
 };
 $('font-plus').addEventListener('click', () => {
-  if (S.mode === 'html') zoomTo(S.zoom.applied * ZOOM_STEP);
+  if (zoomable()) zoomTo(S.zoom.applied * ZOOM_STEP);
   else { contentSize = Math.min(40, contentSize + 1); applyFont(); }
 });
 $('font-minus').addEventListener('click', () => {
-  if (S.mode === 'html') zoomTo(S.zoom.applied / ZOOM_STEP);
+  if (zoomable()) zoomTo(S.zoom.applied / ZOOM_STEP);
   else { contentSize = Math.max(12, contentSize - 1); applyFont(); }
 });
 $('font-select').addEventListener('change', e => { contentFont = e.target.value; applyFont(); });
@@ -9554,14 +9587,41 @@ function applyColumnWidth() {
   content.style.maxWidth = px;
 }
 function refreshTextSizeControl() {
-  const html = S.mode === 'html';
-  $('font-size-label').textContent = html ? Math.round((S.zoom?.applied || 1) * 100) + '%' : contentSize;
+  const html = S.mode === 'html', pdf = S.mode === 'pdf';
+  $('text-size-title').textContent = pdf ? 'Page zoom' : 'Text size';
+  $('font-size-label').textContent = html || pdf ? Math.round((S.zoom?.applied || 1) * 100) + '%' : contentSize;
   $('text-size-note').textContent = html
-    ? 'Reflows the original HTML without enlarging Aloud’s controls or diagrams'
-    : 'Applies to the Reading view';
-  $('font-plus').setAttribute('aria-label', html ? 'Increase document text size' : 'Increase Reading view text size');
-  $('font-minus').setAttribute('aria-label', html ? 'Decrease document text size' : 'Decrease Reading view text size');
+    ? 'Reflows the guide’s text; controls and diagrams keep their size'
+    : pdf ? 'Enlarges the original PDF pages' : 'Applies to the Reading view';
+  const target = pdf ? 'PDF page zoom' : html ? 'document text size' : 'Reading view text size';
+  $('font-plus').setAttribute('aria-label', 'Increase ' + target);
+  $('font-minus').setAttribute('aria-label', 'Decrease ' + target);
 }
+/* Presentation only: never remask or reopen the document to describe its settings. */
+function refreshSettingsContext() {
+  const original = S.mode === 'html' || S.mode === 'pdf';
+  const pdf = !!S.lastFile && (/\.pdf$/i.test(S.lastFile.name) || S.lastFile.type === 'application/pdf');
+  refreshTextSizeControl();
+  $('settings-view-context').textContent = S.mode === 'html'
+    ? 'Original HTML layout' + (S.htmlInteractive ? ' · interactive guide' : ' · scripts off')
+    : S.mode === 'pdf' ? 'Original PDF pages'
+    : S.lastFile ? 'Reading view' : 'Reading defaults · no document open';
+  $('reading-style-note').textContent = original
+    ? 'Original layout keeps the document’s own font and weight. Font below still applies to Speed reader.'
+    : 'Font applies to Reading view and Speed reader. Bold text applies to Reading view only.';
+  $('bold-switch').disabled = original;
+  $('bold-scope-note').textContent = original ? 'Available in Reading view; your preference is kept' : 'Reading view only';
+  $('smallprint-row').hidden = !pdf;
+  const rules = ['URLs & code: ' + (S.skipCode ? 'skipped' : 'read'),
+    'Source citations: ' + (S.skipCitations ? 'skipped' : 'read')];
+  if (pdf) rules.push('PDF small print: ' + (store.get('pdfSmallPrint', false) ? 'read' : 'skipped'));
+  if (S.skim) rules.push('Skim: first sentence of each paragraph');
+  $('speech-summary').textContent = rules.join(' · ');
+}
+$('settings-reading').addEventListener('click', e => {
+  if (e.target.closest('#skipcode-switch, #skipcit-switch, #smallprint-switch, #skim-switch')) refreshSettingsContext();
+});
+
 function applyAppearance() {
   const choice = store.get('theme', 'system');
   const light = choice === 'light' || (choice === 'system' && matchMedia('(prefers-color-scheme: light)').matches);
