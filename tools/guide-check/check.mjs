@@ -258,6 +258,10 @@ async function checkSpritzDock(page, viewport) {
   await page.waitForFunction(() => document.activeElement === $('btn-player-details'));
   await page.locator('#btn-player-details').click();
   await geometry();
+  await page.locator('#rsvp-mode').click();
+  assert(await page.locator('#rsvp-wpm-range').evaluate(el => el.clientWidth >= 120 && el.clientHeight >= 44), 'Portrait Silent WPM slider was squeezed');
+  await geometry();
+  await page.locator('#rsvp-mode').click();
   await page.setViewportSize({width:844,height:390});
   await page.locator('#rsvp-close').click();
   assert.equal(await page.locator('#btn-engine').evaluate(el => el.parentElement.id),'controls');
