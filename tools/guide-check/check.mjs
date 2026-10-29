@@ -33,6 +33,18 @@ const mode = scope => scope.locator('button').filter({hasText:/\bmode\s*:/i}).fi
 const signature = locator => locator.evaluate(el => JSON.stringify([el.className,el.textContent,el.dataset.closed,el.parentElement.className,el.parentElement.dataset.done]));
 async function click(locator) {
   await locator.evaluate(el=>el.scrollIntoView({block:'center'}));
+  // A fixed guide control is visible in its tall iframe even when the outer
+  // reader is scrolled away. Bring that frame's top below Aloud's toolbar;
+  // keep a real pointer click so an actually obstructed control still fails.
+  if (await locator.evaluate(el => getComputedStyle(el).position === 'fixed')) {
+    const handle = await locator.elementHandle(), frame = await handle.ownerFrame();
+    await handle.dispose();
+    if (frame.parentFrame()) {
+      const host = await frame.frameElement();
+      await host.evaluate(el => window.scrollBy({ top: el.getBoundingClientRect().top - (document.getElementById('topbar')?.getBoundingClientRect().bottom || 0) - 16, behavior: 'instant' }));
+      await host.dispose();
+    }
+  }
   await locator.click({position:{x:8,y:8}});
 }
 async function revealAncestors(scope, locator) {
@@ -57,6 +69,41 @@ async function exercise(scope, expected) {
 }
 async function restoredSignature(scope, expected){return JSON.stringify({done:expected.done?await signature(scope.locator('.done').first()):null,mode:expected.mode?await mode(scope).textContent():null,collapse:!expected.done&&!expected.mode&&expected.collapse?await signature(scope.locator(collapseSelector).first()):null});}
 async function open(page,file,interactive){await page.locator('#file-input').setInputFiles(file);await page.waitForFunction(flag=>S.words.length>0&&S.mode==='html'&&(flag?S.frame?.ready:!S.frame),interactive);}
+async function checkSpritz(page, viewport) {
+  await page.evaluate(() => setRsvpOpen(true));
+  await page.waitForFunction(() => fitRsvpWord.metrics?.width === $('rsvp-word').clientWidth);
+  const reads = await page.evaluate(() => {
+    rsvpFlash('Ready');
+    const computed = window.getComputedStyle, width = Object.getOwnPropertyDescriptor(Element.prototype, 'clientWidth');
+    let fonts = 0, widths = 0;
+    window.getComputedStyle = (el, ...args) => { if (el.id === 'rsvp-word') fonts++; return computed(el, ...args); };
+    Object.defineProperty(Element.prototype, 'clientWidth', { configurable: true, get() { if (this.id === 'rsvp-word') widths++; return width.get.call(this); } });
+    try {
+      for (let i = 0; i < 100; i++) rsvpFlash(i % 2 ? 'short' : 'a-much-longer-token');
+      return { fonts, widths };
+    } finally {
+      window.getComputedStyle = computed;
+      Object.defineProperty(Element.prototype, 'clientWidth', width);
+    }
+  });
+  assert.deepEqual(reads, { fonts: 0, widths: 0 }, 'Spritz reads layout/font on each word');
+  await page.selectOption('#font-select', 'mono');
+  assert(await page.evaluate(() => fitRsvpWord.metrics.font.includes('monospace')), 'Spritz ignored a font change');
+  const width = viewport.width === 390 ? 1280 : 390;
+  await page.setViewportSize({ width, height: viewport.height });
+  await page.waitForFunction(() => fitRsvpWord.metrics?.width === $('rsvp-word').clientWidth);
+  await page.evaluate(() => rsvpFlash('pneumonoultramicroscopicsilicovolcanoconiosis'));
+  assert(await page.evaluate(() => {
+    const box = $('rsvp-word').getBoundingClientRect();
+    return ['rsvp-pre','rsvp-orp','rsvp-post'].every(id => {
+      const r = $(id).getBoundingClientRect();
+      return r.left >= box.left - 1 && r.right <= box.right + 1;
+    });
+  }), 'Long Spritz word escaped the resized display');
+  await page.setViewportSize(viewport);
+  await page.selectOption('#font-select', 'serif');
+  await page.evaluate(() => setRsvpOpen(false));
+}
 try {
   browser=await chromium.launch();
   for(const viewport of [{width:1280,height:900},{width:390,height:844}])for(let index=0;index<files.length;index++){
@@ -88,6 +135,7 @@ try {
         if(strict)assert(code>0,'Synthetic fixture must exercise Skip code');
         if(code){await page.evaluate(()=>{if(!S.skipCode)document.getElementById('skipcode-switch').click();document.getElementById('skipcode-switch').click();});assert(await page.evaluate(()=>S.words.some(w=>w.code&&!w.mute)));assert(await page.evaluate(el=>el===S.frame.el,iframe),'Skip code replaced the live frame');await page.evaluate(()=>document.getElementById('skipcode-switch').click());assert(await page.evaluate(()=>S.words.filter(w=>w.code).every(w=>w.mute)));}
         if(strict){const active=await iframe.contentFrame();const font=await active.locator('.body-copy').evaluate(el=>parseFloat(getComputedStyle(el).fontSize));const player=await page.locator('#player').boundingBox();await page.locator('#zoom-in').click();await active.waitForFunction(before=>parseFloat(getComputedStyle(document.querySelector('.body-copy')).fontSize)>before,font);assert.equal((await page.locator('#player').boundingBox()).width,player.width,'Text zoom enlarged player chrome');}
+        if(strict) await checkSpritz(page, viewport);
       }else{
         assert.equal(await page.locator('#content iframe').count(),0);
         for(const text of panels)assert(await page.locator('.html-host').evaluate((host,text)=>[...host.shadowRoot.querySelectorAll('[data-reading],.answer,.reveal,.a')].some(el=>el.textContent.replace(/\s+/g,' ').trim()===text&&el.checkVisibility()),text),'Read-only lost or hid panel text');

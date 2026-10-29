@@ -89,6 +89,7 @@ node tools/native-kokoro-memory-selfcheck.mjs
 node tools/library-recovery-selfcheck.mjs
 node tools/storage-selfcheck.mjs
 node tools/neural-audio-ownership-selfcheck.mjs
+node tools/neural-preload-selfcheck.mjs
 ```
 
 These model-free checks run in PR CI without a browser or network. The first
@@ -98,7 +99,7 @@ transaction timeouts, one shared reconnect, stale/closed handles and bounded
 failure. The audio-ownership check extracts the production handlers and karaoke loop to
 check stale pre-playing terminal events and scheduled callback ownership. It
 retains genuine pre-playing end/error controls; no fallback engine is involved.
-All four accept `ALOUD_ROOT=/path/to/checkout` to test another checkout. They do
+All five accept `ALOUD_ROOT=/path/to/checkout` to test another checkout. They do
 not establish audible timing or physical-device lifecycle behavior; run the
 clock probe and device checks independently when available.
 
@@ -106,6 +107,10 @@ Library recovery also verifies that temporary read/save failures preserve retain
 copies, stale missing-copy flags recover, and the normal copy budget still prunes.
 The storage check covers failed progress/settings writes, later recovery, external
 updates and one session-only persistence notice.
+The preload check verifies nearest-needed scheduling during playback/seek,
+speech-skipped sentences, pause, speech changes and the bounded cache runway.
+Use `RSVP=1 node tools/neural-clock-probe.mjs 3 8` to exercise the Spritz display
+alongside the audio clock. `CHROME` can point at the installed Chrome executable.
 
 # Release gate and guide compatibility
 
@@ -130,6 +135,8 @@ Library reopen through the storage shim, live Skip code without replacing the
 frame, content-only zoom and the read-only fixed-element boundary. It tests both
 390px and 1280px. A missing feature in a private file is not invented or disabled;
 the strict synthetic fixture always supplies every required capability.
+The synthetic gate also requires Spritz's warmed word updates to avoid layout/font
+reads and verifies fitting after font changes and desktop/phone resizing.
 
 Read-only intentionally removes author scripts. Its assertions require the answer/
 panel text to remain visible after expansion and Aloud controls to remain usable;
