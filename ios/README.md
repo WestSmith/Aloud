@@ -1,6 +1,6 @@
 # Aloud for iPad / iPhone
 
-Aloud v6.40.0 runs the full Kokoro voice model natively with Apple MLX. The
+Aloud v6.41.0 runs the full Kokoro voice model natively with Apple MLX. The
 reader, library, PDF/HTML views and visual design remain the same as the PWA,
 but the large model no longer loads or performs inference inside WebKit.
 
