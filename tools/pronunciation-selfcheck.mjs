@@ -1,4 +1,4 @@
-/* Contextual No. reading, using the production normalizer and native mapper. */
+/* Contextual pronunciation, using the production normalizer and native mapper. */
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 const source = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
@@ -14,6 +14,11 @@ const helpers = new Function('S',
 )(S);
 
 const cases = [
+  [['Ms.','Smith'],['miz','Smith']],
+  [['“Ms.','Smith,”'],['“miz','Smith,”']],
+  [['(Ms.)'],['(miz)']],
+  [['MS','MS.','ms','ms.'],['MS','MS.','ms','ms.']],
+  [['10','ms.'],['10','ms.']],
   [['No.'],['No.']],
   [['No.','I','did','not.'],['No.','I','did','not.']],
   [['No','thanks.'],['No','thanks.']],
@@ -38,6 +43,8 @@ assert.equal(helpers.spokenFor('No.'),'nah.','Explicit alternative override was 
 assert.equal(helpers.spokenFor('Aloud,'),'uh loud,');
 assert.equal(helpers.spokenFor('e.g.'),'for example,');
 assert.equal(helpers.spokenFor('https://example.test'),'');
+S.dict={ms:'miss'};
+assert.equal(helpers.spokenFor('Ms.'),'miss.','Saved title pronunciation was overridden');
 S.dict={no:'Number'};
 assert.deepEqual(helpers.splitSentences('No. I did not.'),['No.','I did not.']);
 assert.deepEqual(helpers.splitSentences('A: No. 12 witnesses testified.'),['A: No.','12 witnesses testified.']);
@@ -62,4 +69,4 @@ assert.equal(helpers.spokenOfWord(S.words[1]),'');
 const no = {text:'number',whitespace:' ',phonemes:'n',startSec:.2};
 assert.deepEqual(helpers.alignNativeTokenStarts(['No.'],[no],1,['number']),[.2]);
 assert.equal(helpers.alignNativeTokenStarts(['No.'],[no],1),null);
-console.log('pronunciation self-check: PASS (answers, labels, legacy rules, blocks, mutes, pauses and chunk alignment)');
+console.log('pronunciation self-check: PASS (titles, acronyms/units, answers, labels, saved rules, blocks, mutes, pauses and chunk alignment)');

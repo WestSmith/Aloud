@@ -138,6 +138,13 @@ const CASES = [
       tok('.', '', '.', 1.86, 2.00),
     ],
   },
+  {
+    label: 'Ms honorific expansion',
+    displayTokens: ['Ms.', 'Smith'],
+    groupCounts: [1, 1],
+    durationSec: 1.5,
+    nativeTokens: [tok('miz', ' ', 'mɪz', .2, .55), tok('Smith', '', 'smɪθ', .65, 1.1)],
+  },
 ];
 
 function voiced(token) {
