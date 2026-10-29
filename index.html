@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.40.0">
+<meta name="aloud-version" content="v6.41.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -214,6 +214,14 @@
     margin-bottom: 12px;
   }
   #library { margin-top: 28px; width: 100%; max-width: 500px; display: block; }
+  #home.has-library { justify-content: flex-start; }
+  #home.has-library p.sub { margin-bottom: 20px; }
+  #home.has-library #library { max-width: 680px; margin: 0 0 22px; }
+  #home.has-library #dropzone { max-width: 680px; padding: 16px 20px; }
+  #home.has-library #dropzone .big, #home.has-library #dropzone .t2,
+  #home.has-library #dropzone .fmt-chips, #home.has-library #home-voice-hint { display: none; }
+  #home.has-library #dropzone .t1 { margin: 0; }
+  #recent-list .rr-name { white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
   #lib-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
   #lib-head .lib-h { flex: 1; text-align: left; font-size: calc(0.71875rem * var(--ui-scale) * var(--ui-system-scale, 1)); font-weight: 700;
     letter-spacing: .7px; text-transform: uppercase; color: var(--text-dim); }
@@ -330,7 +338,19 @@
     box-shadow: 0 1px 5px rgba(0,0,0,.4);
   }
   #progress-label { font-size: calc(0.71875rem * var(--ui-scale) * var(--ui-system-scale, 1)); color: var(--text-dim); font-variant-numeric: tabular-nums; flex: none; }
-  #controls { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  #controls {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-areas: "engine transport options"; align-items: center; gap: 6px;
+  }
+  #btn-engine { grid-area: engine; justify-self: start; }
+  #controls .transport { grid-area: transport; justify-content: center; }
+  #player-options { grid-area: options; display: flex; justify-content: flex-end; gap: 6px; min-width: 0; }
+  #player-options .pill { min-width: 44px; }
+  #btn-player-rsvp, #btn-player-details { display: none; }
+  #btn-player-rsvp[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); }
+  #btn-player-details { align-content: center; justify-items: center; font-size: calc(.6875rem * var(--ui-scale) * var(--ui-system-scale, 1)); font-weight: 650; line-height: 1.2; }
+  #btn-player-details svg { width: 14px; height: 14px; transition: transform .2s ease; }
+  #btn-player-details[aria-expanded="true"] svg { transform: rotate(180deg); }
   .pill {
     font-size: calc(0.78125rem * var(--ui-scale) * var(--ui-system-scale, 1)); font-weight: 650;
     padding: 8px 12px; border-radius: 999px;
@@ -602,31 +622,15 @@
     padding: 5px; box-shadow: var(--shadow);
   }
   body.zoomable #zoom-bar { display: flex; }
-  /* Phones get a compact document-text control above the player. The old
-     rule hid zoom completely below 700px, leaving pinch zoom as the only
-     option — which also enlarged the player and could push it off-screen. */
-  @media (max-width: 699px) {
-    #zoom-bar { display: none !important; }
-    body.zoomable #zoom-bar {
-      display: flex !important; flex-direction: row; right: 8px;
-      bottom: calc(var(--player-h, 96px) + 26px + env(safe-area-inset-bottom));
-    }
-    body.html-zoomable #zoom-bar .zsep,
-    body.html-zoomable #zoom-fitw,
-    body.html-zoomable #zoom-fitp { display: none !important; }
-    #zoom-bar button { width: 44px; height: 44px; }
+  /* Compact screens put these same controls inside View, keeping the page clear. */
+  #view-sheet #zoom-bar {
+    position: static; flex-direction: row; flex-wrap: wrap; width: fit-content;
+    margin: 16px 0; box-shadow: none; backdrop-filter: none;
   }
-  /* A landscape phone is often wider than 699px but too short for the
-     vertical stack. Keep both HTML text size and PDF zoom reachable there. */
-  @media (min-width: 700px) and (max-height: 500px) {
-    body.zoomable #zoom-bar {
-      display: flex !important; flex-direction: row; right: 8px;
-      bottom: calc(var(--player-h, 96px) + 26px + env(safe-area-inset-bottom));
-    }
-    body.zoomable #zoom-bar .zsep { display: none !important; }
-    body.html-zoomable #zoom-fitw,
-    body.html-zoomable #zoom-fitp { display: none !important; }
-  }
+  #view-sheet #zoom-bar .zsep { display: none; }
+  body.html-zoomable #view-sheet #zoom-fitw,
+  body.html-zoomable #view-sheet #zoom-fitp { display: none; }
+
   #zoom-bar button {
     width: 44px; height: 44px; border-radius: 10px; display: grid; place-items: center;
     color: var(--text-dim); font-size: calc(1.125rem * var(--ui-scale) * var(--ui-system-scale, 1)); font-weight: 650; line-height: 1;
@@ -708,15 +712,13 @@
     #dropzone { padding: 30px 18px; }
     #btn-library { padding-right: 10px; min-width: 0; }
     #btn-library span { overflow: hidden; text-overflow: ellipsis; max-width: 36vw; white-space: nowrap; }
-    #controls {
-      display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-      grid-template-areas: "transport transport transport" "engine speed voice";
-      gap: 7px 6px;
-    }
-    #controls .transport { grid-area: transport; justify-content: center; }
-    #btn-engine { grid-area: engine; justify-self: stretch; max-width: none; }
-    #btn-speed { grid-area: speed; }
-    #btn-voice { grid-area: voice; justify-self: stretch; max-width: none; }
+    #controls { grid-template-areas: "spritz transport details" "engine options options"; gap: 7px 6px; }
+    #btn-player-rsvp { display: grid; grid-area: spritz; justify-self: start; }
+    #btn-player-details { display: grid; grid-area: details; justify-self: end; }
+    #player.controls-collapsed #controls { grid-template-areas: "spritz transport details"; }
+    #player.controls-collapsed #btn-engine, #player.controls-collapsed #player-options { display: none; }
+    #btn-engine { max-width: 100%; }
+    #player-options .pill { max-width: 150px; }
     #player { padding: 10px 12px 11px; border-radius: 21px; }
     #rsvp-word { font-size: 32px; height: 62px; }
     .sheet { padding-left: 16px; padding-right: 16px; }
@@ -869,7 +871,7 @@
 
 <input type="file" id="file-input" accept=".epub,.pdf,.html,.htm,.xhtml,.txt,.md,.markdown,application/epub+zip,application/pdf,text/html,text/plain" hidden>
 
-<div id="player">
+<div id="player" class="controls-collapsed">
   <div id="player-notices"></div>
   <!-- speed reader (v6.26.0): a section of the player card that unfolds from
        its top edge, so it is one surface with the transport, not a second card -->
@@ -909,8 +911,12 @@
         <svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM4 6l10 6-10 6V6z"/></svg>
       </button>
     </div>
-    <button class="pill" id="btn-speed" title="Playback speed">1×</button>
-    <button class="pill" id="btn-voice" title="Choose voice">Voice</button>
+    <div id="player-options">
+      <button class="pill" id="btn-speed" title="Playback speed">1×</button>
+      <button class="pill" id="btn-voice" title="Choose voice">Voice</button>
+    </div>
+    <button class="iconbtn" id="btn-player-rsvp" title="Speed reader" aria-label="Speed reader" aria-pressed="false" aria-controls="rsvp"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 2-8 12h6l-1 8 9-13h-7z"/></svg></button>
+    <button class="iconbtn" id="btn-player-details" title="Show voice and speed controls" aria-label="Show voice and speed controls" aria-expanded="false" aria-controls="btn-engine player-options"><span id="player-rate" aria-hidden="true">1×</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg></button>
   </div>
 </div>
 
@@ -1071,7 +1077,7 @@
   <h4>Start reading</h4>
   <p>Open an EPUB, PDF, HTML, TXT or Markdown file, or paste text and choose Read it aloud. Tap Play to listen; tap a word to start there. The filled word follows speech; an underline marks your position while paused.</p>
   <p>Long-press a word to fix pronunciation. PDF and Reading view also support double-tap. In Original HTML layout, double-tap changes only document text size. View switches between Original layout and Reading view.</p>
-  <p>Find searches the document. Bookmarks saves sentences. Sleep timer pauses later. Speed reader shows one word at a time, with speech or silently. On smaller screens these controls are in More.</p>
+  <p>Find searches the document. Bookmarks saves sentences. Sleep timer pauses later. Speed reader shows one word at a time, with speech or silently. On smaller screens, Speed reader is beside Play; other tools are in More. Expand the player for voice and speed controls. Document size controls are in View.</p>
   <h4>Keyboard</h4>
   <p>Space: play / pause · ← / →: sentence · R: speed reader · B: bookmark · /: Find · F: full screen · Esc: close panel · Alt + ←: Library. In Original layout, + / −: size, 0: reset, W: fit width; P fits a PDF page.</p>
   <h4>Privacy, languages and offline use</h4>
@@ -5037,7 +5043,8 @@ function ALOUD_FRAME_AGENT(cfg) {
       var part = parts[j];
       if (!part) continue;
       if (/^\s+$/.test(part) || /^[.·…]{2,}$/.test(part)) { frag.appendChild(document.createTextNode(part)); continue; }
-      var w = svg ? document.createElementNS(SVGNS, 'tspan') : document.createElement('span');
+      /* A dedicated inline element avoids the guide's authored span selectors. */
+      var w = svg ? document.createElementNS(SVGNS, 'tspan') : document.createElement('aloud-word');
       w.setAttribute('class', CLS);   /* SVG className is a read-only SVGAnimatedString */
       w.textContent = part;
       w.setAttribute('data-w', String(toks.length));
@@ -6046,9 +6053,8 @@ function renderHtmlNative(htmlText, opts = {}) {
       if (!part) continue;
       /* dot leaders stay visible but are not reading tokens */
       if (/^\s+$/.test(part) || /^[.·…]{2,}$/.test(part)) { frag.appendChild(document.createTextNode(part)); continue; }
-      const w = inSvg ? document.createElementNS(SVGNS, 'tspan') : document.createElement('span');
-      /* Namespace injected spans so a document's own generic `.w` rules
-         cannot restyle or resize every karaoke token. */
+      const w = inSvg ? document.createElementNS(SVGNS, 'tspan') : document.createElement('aloud-word');
+      /* Keep authored span selectors and generic `.w` styles off karaoke words. */
       w.setAttribute('class', 'aloud-w');   /* SVG className is read-only */
       w.textContent = part;
       w.setAttribute('data-word', tokens.length);
@@ -6200,7 +6206,7 @@ function leaveDocument({ announce = true, focusLibrary = true } = {}) {
   window.scrollTo({ top: 0, behavior: 'auto' });
 
   if (hadDocument && announce) toast('Library ready — choose another document whenever you like.');
-  if (focusLibrary) requestAnimationFrame(() => $('dropzone').focus({ preventScroll: true }));
+  if (focusLibrary) requestAnimationFrame(() => ($('recent-list').querySelector('.rr-open') || $('dropzone')).focus({ preventScroll: true }));
 }
 
 /* TOC dot leaders ("OVERVIEW ......... 26", spaced or not) are layout, not
@@ -8607,7 +8613,8 @@ function setRsvpOpen(open) {
   $('rsvp').inert = !open;
   $('rsvp').setAttribute('aria-hidden', String(!open));
   $('btn-rsvp').setAttribute('aria-pressed', String(open));
-  if (!open && $('rsvp').contains(document.activeElement)) ($('btn-rsvp').closest('.sheet') ? $('btn-more') : $('btn-rsvp')).focus({ preventScroll: true });
+  $('btn-player-rsvp').setAttribute('aria-pressed', String(open));
+  if (!open && $('rsvp').contains(document.activeElement)) (matchMedia('(max-width: 560px)').matches ? $('btn-player-rsvp') : $('btn-rsvp').closest('.sheet') ? $('btn-more') : $('btn-rsvp')).focus({ preventScroll: true });
   document.body.classList.toggle('rsvp-on', open);
   invalidateReadingViewportBounds();
   /* the card is still unfolding; re-centre the current word once it settles */
@@ -8857,6 +8864,7 @@ function setRate(rate) {
   S.rate = rate;
   store.set('rate', rate);
   $('btn-speed').textContent = (Number.isInteger(rate) ? rate : rate.toFixed(2).replace(/0$/, '')) + '×';
+  $('player-rate').textContent = $('btn-speed').textContent;
   updateProgress();
   if (!changed) return;
   if (S.engine === 'neural') {
@@ -8903,7 +8911,7 @@ document.querySelectorAll('.sheet').forEach((sheet, i) => {
 });
 const modalBackground = ['topbar', 'home', 'rsvp', 'reader', 'player', 'zoom-bar'];
 function setModalBackgroundInert(inert) {
-  modalBackground.forEach(id => { const el = $(id); if (el) el.inert = inert || (id === 'rsvp' && !S.rsvp.open); });
+  modalBackground.forEach(id => { const el = $(id); if (el && !el.closest('.sheet')) el.inert = inert || (id === 'rsvp' && !S.rsvp.open); });
 }
 function openSheet(id) {
   if (id === 'help-sheet' || id === 'settings-sheet') refreshDeliveryStatus();
@@ -8978,6 +8986,16 @@ function arrangeToolbar() {
   if (restoreFocus) $(compactToolbar.matches ? 'btn-more' : 'btn-settings').focus({ preventScroll: true });
   syncChromeMetrics();
 }
+const compactZoom = matchMedia('(max-width: 699px), (max-height: 500px)');
+function arrangeZoomControls() {
+  const bar = $('zoom-bar'), focused = bar.contains(document.activeElement);
+  if (compactZoom.matches) $('view-sheet').appendChild(bar);
+  else document.body.insertBefore(bar, $('file-input'));
+  bar.inert = !compactZoom.matches && !!document.querySelector('.sheet.open');
+  if (focused) (document.querySelector('.sheet.open .sheet-close') || (compactZoom.matches ? $('btn-view') : $('zoom-in'))).focus({ preventScroll: true });
+}
+compactZoom.addEventListener('change', arrangeZoomControls);
+arrangeZoomControls();
 compactToolbar.addEventListener('change', arrangeToolbar);
 arrangeToolbar();
 routeNotices();
@@ -9199,6 +9217,26 @@ window.addEventListener('resize', () => {
   clearTimeout(zoomResizeT);
   zoomResizeT = setTimeout(() => applyZoom(false, S.mode === 'html'), 180);
 });
+
+const compactPlayer = matchMedia('(max-width: 560px)');
+compactPlayer.addEventListener('change', () => {
+  const active = document.activeElement;
+  if (!$('player').contains(active)) return;
+  if (compactPlayer.matches && $('player').classList.contains('controls-collapsed')
+      && (active === $('btn-engine') || $('player-options').contains(active)))
+    $('btn-player-details').focus({ preventScroll: true });
+  else if (!compactPlayer.matches && (active === $('btn-player-details') || active === $('btn-player-rsvp')))
+    $('btn-play').focus({ preventScroll: true });
+});
+/* Player disclosure changes only the controls, never playback or document state. */
+$('btn-player-details').addEventListener('click', () => {
+  const expanded = !$('player').classList.toggle('controls-collapsed');
+  const button = $('btn-player-details');
+  button.setAttribute('aria-expanded', String(expanded));
+  button.title = expanded ? 'Hide voice and speed controls' : 'Show voice and speed controls';
+  button.setAttribute('aria-label', button.title);
+});
+$('btn-player-rsvp').addEventListener('click', () => setRsvpOpen(!S.rsvp.open));
 
 /* RSVP wiring */
 $('btn-rsvp').addEventListener('click', e => {
@@ -10143,6 +10181,7 @@ if (store.get('pdfSmallPrint', false)) $('smallprint-switch').classList.add('on'
 if (store.get('boldText', false)) { $('bold-switch').classList.add('on'); content.classList.add('bold-all'); }
 document.querySelectorAll('.switch').forEach(sw => setSwitchState(sw, sw.classList.contains('on')));
 $('btn-speed').textContent = S.rate + '×';
+$('player-rate').textContent = $('btn-speed').textContent;
 initNativeEngine();     // no-op outside the iOS app
 /* a stored 'native' engine is only honoured when the bridge is actually there —
    otherwise an app user who later opens the web build would land on a dead engine */
@@ -10437,6 +10476,15 @@ function renderRecents() {
   const box = $('recent-list');
   box.innerHTML = '';
   $('library').style.display = 'block';
+  const hasLibrary = all.length > 0;
+  $('home').classList.toggle('has-library', hasLibrary);
+  const libraryAnchor = hasLibrary ? $('dropzone') : $('home-voice-hint');
+  if ($('library').nextElementSibling !== libraryAnchor) $('home').insertBefore($('library'), libraryAnchor);
+  $('home').querySelector('h1').innerHTML = hasLibrary ? 'Continue reading' : 'Listen to <span class="grad">anything</span>.';
+  $('home').querySelector('.sub').textContent = hasLibrary
+    ? 'Pick up where you left off, or open another document.'
+    : 'Open a book or document and Aloud reads it to you with word-by-word karaoke highlighting — like Speechify, but yours.';
+  $('dropzone').querySelector('.t1').textContent = hasLibrary ? 'Open another file' : 'Drop a file here, or tap to browse';
   if (!all.length) {
     $('lib-folders').replaceChildren();
     $('lib-folder-tools').style.display = 'none';
@@ -10495,6 +10543,7 @@ function renderRecents() {
     play.textContent = r.noBlob ? '📂' : '▶';
     if (r.noBlob) play.title = 'Opens the file picker — your place is saved';
     row.querySelector('.rr-name').textContent = libName(r);
+    row.querySelector('.rr-name').title = libName(r);
     const status = r.noBlob ? 'Needs original file · place saved' : 'Saved on this device';
     row.querySelector('.rr-status').textContent = status;
     row.querySelector('.rr-open').dataset.key = r.key;

@@ -69,6 +69,43 @@ async function exercise(scope, expected) {
 }
 async function restoredSignature(scope, expected){return JSON.stringify({done:expected.done?await signature(scope.locator('.done').first()):null,mode:expected.mode?await mode(scope).textContent():null,collapse:!expected.done&&!expected.mode&&expected.collapse?await signature(scope.locator(collapseSelector).first()):null});}
 async function open(page,file,interactive){await page.locator('#file-input').setInputFiles(file);await page.waitForFunction(flag=>S.words.length>0&&S.mode==='html'&&(flag?S.frame?.ready:!S.frame),interactive);}
+async function checkPlayer(page, viewport) {
+  const centered = async () => assert(await page.evaluate(() => {
+    const p = $('player').getBoundingClientRect(), b = $('btn-play').getBoundingClientRect();
+    return Math.abs(b.left + b.width / 2 - p.left - p.width / 2) < 1;
+  }), 'Play/Pause is off center');
+  await centered();
+  if (viewport.width <= 560) {
+    assert(!await page.locator('#btn-speed').isVisible(), 'Phone player should start compact');
+    await page.locator('#btn-player-details').click();
+    assert(await page.locator('#btn-speed').isVisible());
+    await centered();
+    await page.locator('#btn-speed').click();
+    assert.equal(await page.locator('#speed-sheet').getAttribute('aria-hidden'), 'false');
+    await page.locator('#speed-chips button').filter({hasText: /^2×$/}).click();
+    assert.equal(await page.locator('#player-rate').textContent(), '2×');
+    await page.locator('#speed-sheet .sheet-close').click();
+    await page.locator('#btn-player-details').click();
+    await page.locator('#btn-player-rsvp').click();
+    assert.equal(await page.locator('#btn-player-rsvp').getAttribute('aria-pressed'), 'true');
+    await page.locator('#rsvp-close').click();
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'btn-player-rsvp');
+    await centered();
+  }
+}
+async function checkLibraryLayout(page) {
+  await page.locator('#btn-library').click();
+  await page.waitForFunction(() => document.activeElement === $('recent-list').querySelector('.rr-open'));
+  await page.locator('#lib-newfolder').focus();
+  await page.evaluate(() => renderRecents());
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'lib-newfolder', 'Library refresh lost toolbar focus');
+  assert.equal(await page.locator('#home h1').textContent(), 'Continue reading');
+  assert(await page.evaluate(() => !!($('library').compareDocumentPosition($('dropzone')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'Import area still precedes Library');
+  const title = page.locator('#recent-list .rr-name').first();
+  assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace), 'normal');
+  await page.locator('.rr-open').first().click();
+  await page.waitForFunction(() => S.frame?.ready);
+}
 async function checkSpritz(page, viewport) {
   await page.evaluate(() => setRsvpOpen(true));
   await page.waitForFunction(() => fitRsvpWord.metrics?.width === $('rsvp-word').clientWidth);
@@ -134,14 +171,21 @@ try {
         const iframe=await page.locator('#content iframe').elementHandle();const code=await page.evaluate(()=>S.words.filter(w=>w.code).length);
         if(strict)assert(code>0,'Synthetic fixture must exercise Skip code');
         if(code){await page.evaluate(()=>{if(!S.skipCode)document.getElementById('skipcode-switch').click();document.getElementById('skipcode-switch').click();});assert(await page.evaluate(()=>S.words.some(w=>w.code&&!w.mute)));assert(await page.evaluate(el=>el===S.frame.el,iframe),'Skip code replaced the live frame');await page.evaluate(()=>document.getElementById('skipcode-switch').click());assert(await page.evaluate(()=>S.words.filter(w=>w.code).every(w=>w.mute)));}
-        if(strict){const active=await iframe.contentFrame();const font=await active.locator('.body-copy').evaluate(el=>parseFloat(getComputedStyle(el).fontSize));const player=await page.locator('#player').boundingBox();await page.locator('#zoom-in').click();await active.waitForFunction(before=>parseFloat(getComputedStyle(document.querySelector('.body-copy')).fontSize)>before,font);assert.equal((await page.locator('#player').boundingBox()).width,player.width,'Text zoom enlarged player chrome');}
-        if(strict) await checkSpritz(page, viewport);
+        if(strict){
+          await checkPlayer(page, viewport);
+          const active=await iframe.contentFrame();
+          assert.equal(await active.locator('.examline span').count(), 1, 'Word wrappers matched authored span selectors');
+          assert(await active.locator('.examline .aloud-w').first().evaluate(el => getComputedStyle(el).borderTopWidth === '0px'), 'A word became a bordered badge');
+          assert(await active.locator('svg .aloud-w').evaluateAll(els => els.length > 0 && els.every(el => el.namespaceURI === 'http://www.w3.org/2000/svg')), 'SVG label namespace changed');
+          const font=await active.locator('.body-copy').evaluate(el=>parseFloat(getComputedStyle(el).fontSize));const player=await page.locator('#player').boundingBox();if(viewport.width <= 699)await page.locator('#btn-view').click();await page.locator('#zoom-in').click();if(viewport.width <= 699)await page.locator('#view-sheet .sheet-close').click();await active.waitForFunction(before=>parseFloat(getComputedStyle(document.querySelector('.body-copy')).fontSize)>before,font);assert.equal((await page.locator('#player').boundingBox()).width,player.width,'Text zoom enlarged player chrome');}
+        if(strict) { await checkSpritz(page, viewport); await checkLibraryLayout(page); }
       }else{
         assert.equal(await page.locator('#content iframe').count(),0);
         for(const text of panels)assert(await page.locator('.html-host').evaluate((host,text)=>[...host.shadowRoot.querySelectorAll('[data-reading],.answer,.reveal,.a')].some(el=>el.textContent.replace(/\s+/g,' ').trim()===text&&el.checkVisibility()),text),'Read-only lost or hid panel text');
         const fixed=await page.locator('.html-host').evaluate(host=>{const el=[...host.shadowRoot.querySelectorAll('*')].find(e=>getComputedStyle(e).position==='fixed');if(!el)return null;const f=el.getBoundingClientRect(),h=host.getBoundingClientRect();return{top:f.top,bottom:f.bottom,left:f.left,right:f.right,hostTop:h.top,hostRight:h.right};});
         if(fixed){assert(fixed.top>=fixed.hostTop-1&&fixed.right<=fixed.hostRight+1,'Read-only fixed control escaped document surface');}
         if(strict)assert(fixed,'Read-only fixture must check fixed containment');
+        if(strict){assert.equal(await page.locator('.html-host').evaluate(host=>host.shadowRoot.querySelectorAll('.examline span').length),1,'Read-only wrappers matched authored span selectors');}
         // Scripts intentionally do not run here: assert expanded content and usable Aloud controls instead.
         await page.locator('#btn-library').click();assert(await page.locator('.rr-open').count());
       }
