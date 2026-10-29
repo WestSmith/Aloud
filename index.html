@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.42.0">
+<meta name="aloud-version" content="v6.43.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -365,7 +365,7 @@
     width: 56px; height: 56px; border-radius: 50%;
     background: linear-gradient(135deg, #8d7dff, #5f8bff);
     color: #fff; display: grid; place-items: center;
-    box-shadow: 0 6px 20px rgba(110,100,255,.45);
+    box-shadow: 0 2px 8px rgba(110,100,255,.18);
   }
   #btn-play svg { width: 24px; height: 24px; fill: #fff; }
   #btn-play.loading { animation: pulse 1.1s ease-in-out infinite; }
@@ -696,7 +696,39 @@
   #rsvp-wpm-row { display: none; flex: 1; align-items: center; gap: 8px; min-width: 0; }
   #rsvp-wpm-range { flex: 1; min-width: 0; accent-color: var(--accent); height: 22px; }
   #rsvp-wpm-label { font-size: calc(0.71875rem * var(--ui-scale) * var(--ui-system-scale, 1)); color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  #rsvp-close { margin-left: auto; }
+  #rsvp-context, #rsvp-status { display: contents; }
+  #rsvp-engine-slot:empty { display: none; }
+  #rsvp-close { margin-left: auto; width: 44px; height: 44px; flex: none; padding: 0; border: 0; border-radius: 12px; background: transparent; }
+  #rsvp-close:hover { background: var(--bg-elev2); }
+  body.rsvp-on #player { box-shadow: 0 4px 18px rgba(0,0,0,.22); }
+
+  /* Use the width of a landscape window while keeping the recognition point
+     and transport on the same centre line. Portrait keeps its stacked player. */
+  @media (min-width: 620px) and (max-height: 500px) {
+    body.document-open.rsvp-on #player {
+      width: min(1000px, calc(100% - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+      display: grid !important; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
+      grid-template-areas: "notices notices notices" "context word close" "progress transport options";
+      align-items: center; gap: 4px 12px; padding: 10px 14px;
+    }
+    body.rsvp-on #player-notices { grid-area: notices; }
+    body.rsvp-on #player-notices:empty { display: none; }
+    body.rsvp-on :is(#rsvp, #rsvp-inner, #rsvp-body, #rsvp-meta, #controls) { display: contents; }
+    body.rsvp-on #rsvp-context { grid-area: context; display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-width: 0; }
+    body.rsvp-on #rsvp-mode { order: -1; white-space: normal; padding: 5px 8px; }
+    body.rsvp-on #rsvp-status { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    body.rsvp-on #rsvp-state { flex: none; }
+    body.rsvp-on #rsvp-engine-slot { min-width: 0; display: flex; }
+    body.rsvp-on #btn-engine { min-width: 0; max-width: 100%; }
+    body.rsvp-on #rsvp-word { grid-area: word; height: 86px; }
+    body.rsvp-on #rsvp-close { grid-area: close; justify-self: end; align-self: start; }
+    body.rsvp-on #rsvp-wpm-row { flex-wrap: wrap; gap: 0 6px; }
+    body.rsvp-on #rsvp-wpm-range { flex-basis: 80px; height: 44px; }
+    body.rsvp-on #progress-row { grid-area: progress; margin: 0; flex-direction: column; align-items: stretch; gap: 0; }
+    body.rsvp-on #progress-label { order: -1; }
+    body.rsvp-on #progress-wrap { min-width: 0; flex: none; }
+    body.rsvp-on #player-options { grid-area: options; }
+  }
 
   ::selection { background: var(--accent-soft); }
   #btn-more { display: none; }
@@ -721,10 +753,14 @@
     #btn-player-details { display: grid; grid-area: details; justify-self: end; }
     #player.controls-collapsed #controls { grid-template-areas: "spritz transport details"; }
     #player.controls-collapsed #btn-engine, #player.controls-collapsed #player-options { display: none; }
-    #btn-engine { max-width: 100%; }
+    #controls #btn-engine { grid-column: 1 / -1; max-width: calc(34% - 6px); }
+    #controls #player-options { grid-column: 1 / -1; justify-self: end; width: 66%; }
     #player-options .pill { max-width: 150px; }
     #player { padding: 10px 12px 11px; border-radius: 21px; }
     #rsvp-word { font-size: 32px; height: 62px; }
+    #rsvp-meta { flex-wrap: wrap; }
+    #rsvp-wpm-row { order: 1; flex-basis: 100%; }
+    #rsvp-wpm-range { height: 44px; }
     .sheet { padding-left: 16px; padding-right: 16px; }
     .rr-tag { display: none; }
   }
@@ -886,11 +922,16 @@
           <span id="rsvp-pre"></span><span id="rsvp-orp"></span><span id="rsvp-post"></span>
         </button>
         <div id="rsvp-meta">
-          <span id="rsvp-state">Paused</span>
-          <button class="rsvp-chip" id="rsvp-mode">🔊 Voice-synced</button>
-          <div id="rsvp-wpm-row">
-            <input type="range" id="rsvp-wpm-range" min="150" max="1200" step="25" value="450" aria-label="Words per minute">
-            <span id="rsvp-wpm-label">450 wpm</span>
+          <div id="rsvp-context">
+            <div id="rsvp-status">
+              <span id="rsvp-state">Paused</span>
+              <span id="rsvp-engine-slot"></span>
+            </div>
+            <button class="rsvp-chip" id="rsvp-mode">🔊 Voice-synced</button>
+            <div id="rsvp-wpm-row">
+              <input type="range" id="rsvp-wpm-range" min="150" max="1200" step="25" value="450" aria-label="Words per minute">
+              <span id="rsvp-wpm-label">450 wpm</span>
+            </div>
           </div>
           <button class="rsvp-chip" id="rsvp-close" title="Close speed reader (R)" aria-label="Close speed reader">✕</button>
         </div>
@@ -8633,6 +8674,7 @@ function setRsvpOpen(open) {
   $('btn-player-rsvp').setAttribute('aria-pressed', String(open));
   if (!open && $('rsvp').contains(document.activeElement)) (matchMedia('(max-width: 560px)').matches ? $('btn-player-rsvp') : $('btn-rsvp').closest('.sheet') ? $('btn-more') : $('btn-rsvp')).focus({ preventScroll: true });
   document.body.classList.toggle('rsvp-on', open);
+  arrangeSpritzControls();
   invalidateReadingViewportBounds();
   /* the card is still unfolding; re-centre the current word once it settles */
   setTimeout(() => { invalidateReadingViewportBounds(); if (S.curWord >= 0) maybeScroll(S.words[S.curWord]?.el); }, 380);
@@ -9237,6 +9279,17 @@ window.addEventListener('resize', () => {
 });
 
 const compactPlayer = matchMedia('(max-width: 560px)');
+/* Reuse the same engine button, listeners and state in both arrangements. */
+function arrangeSpritzControls() {
+  const engine = $('btn-engine');
+  const landscape = S.rsvp.open && matchMedia('(min-width: 620px) and (max-height: 500px)').matches;
+  const parent = landscape ? $('rsvp-engine-slot') : $('controls');
+  if (engine.parentElement === parent) return;
+  const focused = document.activeElement === engine;
+  parent.prepend(engine);
+  if (focused) (engine.checkVisibility() ? engine : $('btn-player-details')).focus({ preventScroll: true });
+}
+matchMedia('(min-width: 620px) and (max-height: 500px)').addEventListener('change', arrangeSpritzControls);
 compactPlayer.addEventListener('change', () => {
   const active = document.activeElement;
   if (!$('player').contains(active)) return;

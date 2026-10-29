@@ -137,6 +137,8 @@ frame, content-only zoom and the read-only fixed-element boundary. It tests both
 the strict synthetic fixture always supplies every required capability.
 The synthetic gate also requires Spritz's warmed word updates to avoid layout/font
 reads and verifies fitting after font changes and desktop/phone resizing.
+It also checks the compact landscape dock with Atkinson, fractional speed labels,
+enlarged UI text, Silent WPM controls and rotation back to the portrait controls.
 
 Read-only intentionally removes author scripts. Its assertions require the answer/
 panel text to remain visible after expansion and Aloud controls to remain usable;

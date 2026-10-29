@@ -224,6 +224,54 @@ async function checkSpritz(page, viewport) {
   await page.selectOption('#font-select', 'serif');
   await page.evaluate(() => setRsvpOpen(false));
 }
+async function checkSpritzDock(page, viewport) {
+  await page.selectOption('#font-select', 'atkinson');
+  await page.setViewportSize({width:844,height:390});
+  await page.evaluate(() => { dismissToast(); setRate(2.5); setRsvpOpen(true); rsvpFlash('reading'); });
+  const geometry = async () => {
+    await page.waitForFunction(() => fitRsvpWord.metrics?.width === $('rsvp-word').clientWidth);
+    assert(await page.evaluate(() => {
+      const rect = id => $(id).getBoundingClientRect(), p = rect('player'), play = rect('btn-play'), orp = rect('rsvp-orp');
+      const controls = ['btn-engine','btn-speed','btn-voice','rsvp-mode','rsvp-close','rsvp-word','progress-wrap','progress-label'].map(rect).filter(r => r.width && r.height);
+      return Math.abs(play.x + play.width / 2 - innerWidth / 2) < 1
+        && Math.abs(orp.x + orp.width / 2 - innerWidth / 2) < 1
+        && getComputedStyle($('rsvp-word')).fontFamily.includes('Atkinson Hyperlegible')
+        && document.documentElement.scrollWidth <= innerWidth
+        && controls.every(r => r.x >= p.x - 1 && r.right <= p.right + 1 && r.y >= p.y - 1 && r.bottom <= p.bottom + 1)
+        && controls.every((a,i) => controls.slice(i+1).every(b => Math.min(a.right,b.right)-Math.max(a.x,b.x) < 1 || Math.min(a.bottom,b.bottom)-Math.max(a.y,b.y) < 1));
+    }), 'Spritz dock clipped, overlapped, lost Atkinson or moved off centre');
+  };
+  for (const width of [620,844]) for (const scale of [1,1.3]) {
+    await page.setViewportSize({width,height:390});
+    await page.evaluate(scale => { store.set('uiScale',scale); refreshInterfaceText(); $('rsvp-mode').textContent='🔊 Voice-synced · 780 wpm'; }, scale);
+    await geometry();
+    assert((await page.locator('#player').boundingBox()).height < 220, 'Landscape Spritz remained tall');
+    assert.equal(await page.locator('#rsvp-word').evaluate(el => parseFloat(getComputedStyle(el).fontSize)),38, 'Landscape word size changed');
+  }
+  await page.locator('#rsvp-mode').click();
+  await page.locator('#rsvp-wpm-range').fill('900');
+  assert.equal(await page.evaluate(() => S.rsvp.wpm),900);
+  await geometry();
+  await page.locator('#rsvp-mode').click();
+  await page.locator('#btn-engine').focus();
+  await page.setViewportSize({width:320,height:700});
+  await page.waitForFunction(() => document.activeElement === $('btn-player-details'));
+  await page.locator('#btn-player-details').click();
+  await geometry();
+  await page.locator('#rsvp-mode').click();
+  assert(await page.locator('#rsvp-wpm-range').evaluate(el => el.clientWidth >= 120 && el.clientHeight >= 44), 'Portrait Silent WPM slider was squeezed');
+  await geometry();
+  await page.locator('#rsvp-mode').click();
+  await page.setViewportSize({width:844,height:390});
+  await page.locator('#rsvp-close').click();
+  assert.equal(await page.locator('#btn-engine').evaluate(el => el.parentElement.id),'controls');
+  await page.evaluate(() => setRsvpOpen(true));
+  assert.equal(await page.locator('#btn-engine').evaluate(el => el.parentElement.id),'rsvp-engine-slot');
+  assert.equal(await page.locator('#btn-engine').count(),1);
+  await page.evaluate(() => { setRsvpOpen(false); store.set('uiScale',1); refreshInterfaceText(); });
+  await page.setViewportSize(viewport);
+  await page.selectOption('#font-select','serif');
+}
 try {
   browser=await chromium.launch();
   for(const viewport of [{width:1280,height:900},{width:390,height:844}])for(let index=0;index<files.length;index++){
@@ -261,7 +309,7 @@ try {
           assert(await active.locator('.examline .aloud-w').first().evaluate(el => getComputedStyle(el).borderTopWidth === '0px'), 'A word became a bordered badge');
           assert(await active.locator('svg .aloud-w').evaluateAll(els => els.length > 0 && els.every(el => el.namespaceURI === 'http://www.w3.org/2000/svg')), 'SVG label namespace changed');
           const font=await active.locator('.body-copy').evaluate(el=>parseFloat(getComputedStyle(el).fontSize));const player=await page.locator('#player').boundingBox();if(viewport.width <= 699)await page.locator('#btn-view').click();await page.locator('#zoom-in').click();if(viewport.width <= 699)await page.locator('#view-sheet .sheet-close').click();await active.waitForFunction(before=>parseFloat(getComputedStyle(document.querySelector('.body-copy')).fontSize)>before,font);assert.equal((await page.locator('#player').boundingBox()).width,player.width,'Text zoom enlarged player chrome');}
-        if(strict) { await checkSpritz(page, viewport); await checkLibraryLayout(page); await checkPanels(page, viewport); }
+        if(strict) { await checkSpritz(page, viewport); if(viewport.width===1280)await checkSpritzDock(page, viewport); await checkLibraryLayout(page); await checkPanels(page, viewport); }
       }else{
         assert.equal(await page.locator('#content iframe').count(),0);
         for(const text of panels)assert(await page.locator('.html-host').evaluate((host,text)=>[...host.shadowRoot.querySelectorAll('[data-reading],.answer,.reveal,.a')].some(el=>el.textContent.replace(/\s+/g,' ').trim()===text&&el.checkVisibility()),text),'Read-only lost or hid panel text');
