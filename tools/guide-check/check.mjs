@@ -69,16 +69,39 @@ async function exercise(scope, expected) {
 }
 async function restoredSignature(scope, expected){return JSON.stringify({done:expected.done?await signature(scope.locator('.done').first()):null,mode:expected.mode?await mode(scope).textContent():null,collapse:!expected.done&&!expected.mode&&expected.collapse?await signature(scope.locator(collapseSelector).first()):null});}
 async function open(page,file,interactive){await page.locator('#file-input').setInputFiles(file);await page.waitForFunction(flag=>S.words.length>0&&S.mode==='html'&&(flag?S.frame?.ready:!S.frame),interactive);}
+async function checkControlLabels(page) {
+  const saved = await page.evaluate(() => ({ rate: S.rate, scale: store.get('uiScale', 1) }));
+  try {
+    for (const scale of [1, 1.3]) for (const rate of [2.5, 3.95]) {
+      await page.evaluate(({ scale, rate }) => { store.set('uiScale', scale); refreshInterfaceText(); setRate(rate); }, { scale, rate });
+      const layout = await page.evaluate(() => {
+        const speed = $('btn-speed'), css = getComputedStyle(speed), range = document.createRange();
+        range.selectNodeContents(speed);
+        const fits = range.getBoundingClientRect().width <= speed.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight) + .5;
+        const centered = [...document.querySelectorAll('#topbar-actions .named-action')].filter(el => el.checkVisibility()).every(el => {
+          if (getComputedStyle(el.querySelector('.action-label')).display !== 'none') return true;
+          const b = el.getBoundingClientRect(), icon = el.querySelector('svg').getBoundingClientRect();
+          return Math.abs(icon.left + icon.width / 2 - b.left - b.width / 2) < 1 && Math.abs(icon.top + icon.height / 2 - b.top - b.height / 2) < 1;
+        });
+        const player = $('player').getBoundingClientRect(), play = $('btn-play').getBoundingClientRect();
+        return { fits, centered, playCentered: Math.abs(play.left + play.width / 2 - player.left - player.width / 2) < 1 };
+      });
+      assert.deepEqual(layout, { fits: true, centered: true, playCentered: true }, `Control layout at ${rate}× / interface ${scale}`);
+    }
+  } finally { await page.evaluate(({ rate, scale }) => { store.set('uiScale', scale); refreshInterfaceText(); setRate(rate); }, saved); }
+}
 async function checkPlayer(page, viewport) {
   const centered = async () => assert(await page.evaluate(() => {
     const p = $('player').getBoundingClientRect(), b = $('btn-play').getBoundingClientRect();
     return Math.abs(b.left + b.width / 2 - p.left - p.width / 2) < 1;
   }), 'Play/Pause is off center');
   await centered();
+  if (viewport.width > 560) await checkControlLabels(page);
   if (viewport.width <= 560) {
     assert(!await page.locator('#btn-speed').isVisible(), 'Phone player should start compact');
     await page.locator('#btn-player-details').click();
     assert(await page.locator('#btn-speed').isVisible());
+    await checkControlLabels(page);
     await centered();
     await page.locator('#btn-speed').click();
     assert.equal(await page.locator('#speed-sheet').getAttribute('aria-hidden'), 'false');

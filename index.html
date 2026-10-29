@@ -346,6 +346,7 @@
   #controls .transport { grid-area: transport; justify-content: center; }
   #player-options { grid-area: options; display: flex; justify-content: flex-end; gap: 6px; min-width: 0; }
   #player-options .pill { min-width: 44px; }
+  #btn-speed { flex: 0 0 auto; max-width: none; }
   #btn-player-rsvp, #btn-player-details { display: none; }
   #btn-player-rsvp[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); }
   #btn-player-details { align-content: center; justify-items: center; font-size: calc(.6875rem * var(--ui-scale) * var(--ui-system-scale, 1)); font-weight: 650; line-height: 1.2; }
@@ -709,7 +710,7 @@
   /* Preserve title space before the secondary actions move into More. */
   @media (max-width: 1280px) {
     #topbar-actions .action-label { display: none; }
-    #topbar-actions .named-action { width: 44px; padding: 0; }
+    #topbar-actions .named-action { width: 44px; padding: 0; justify-content: center; }
   }
   /* Compact chrome stays on one row; secondary actions live in More. */
   @media (max-width: 1100px) {
