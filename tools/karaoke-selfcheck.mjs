@@ -91,8 +91,8 @@ for (const ch of Object.keys(vocab)) idChar[vocab[ch]] = ch;
 /* mirror ensurePhonemes: the running app warms this cache before generating,
    and alignExactStarts reads it to learn which tokens espeak voices at all */
 function warmCache(tokens) {
-  for (const t of tokens) {
-    const spoken = aloud.spokenFor(t).toLowerCase();
+  for (const [i, t] of tokens.entries()) {
+    const spoken = aloud.spokenFor(t, tokens[i + 1] || '', tokens[i - 1] || '').toLowerCase();
     if (!spoken || phonemeCache.has(spoken)) continue;
     const ph = phonemize(spoken);
     const e = aloud.countPhones(ph);
@@ -106,8 +106,8 @@ async function runSentence(tokens) {
   /* build the phoneme string word by word, recording each token's id range */
   const ids = [0];
   const spans = [];                       // [tokenIndex] -> {a,b} into ids, or null
-  for (const t of tokens) {
-    const spoken = aloud.spokenFor(t).trim();
+  for (const [i, t] of tokens.entries()) {
+    const spoken = aloud.spokenFor(t, tokens[i + 1] || '', tokens[i - 1] || '').trim();
     if (!spoken) { spans.push(null); continue; }
     const ph = phonemize(spoken);
     if (!ph) { spans.push(null); continue; }
@@ -145,6 +145,7 @@ async function runSentence(tokens) {
 /* ---- real sentences from the Week 10 guide, incl. every spot reported ---- */
 const DETAIL = process.argv[2];
 const CASES = [
+  ['context: No answer and labels', 'A: No. 12 witnesses testified about document No. 12 and exhibit No.105.'],
   ['reported: money', 'Referral fee cap: 15% of the first $50,000 + 5% of the excess, max $25,000 — and it must never increase the client\'s total fee.'],
   ['reported: rule nums', 'Division of fees (5.01(11)) with client consent, proportional, between licensees = legal.'],
   ['reported: 5.01(16)', 'And under 5.01(16), the referee must note the referral fee on the client\'s account and obtain the client\'s acknowledgement.'],

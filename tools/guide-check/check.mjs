@@ -305,6 +305,36 @@ async function checkSpritzDock(page, viewport) {
   await page.setViewportSize(viewport);
   await page.evaluate(() => { $('font-select').value='serif'; $('font-select').dispatchEvent(new Event('change')); });
 }
+async function checkPronunciation(page) {
+  await page.evaluate(() => { S.dict.aloud='uh loud'; setPronunciation('No.'); });
+  assert.match(await page.locator('#app-edit-note').textContent(),/only to numbered labels/);
+  await page.locator('#app-edit-input').fill('Number');
+  await page.locator('#app-edit-save').click();
+  await page.locator('#file-input').setInputFiles({name:'Public pronunciation.txt',mimeType:'text/plain',buffer:Buffer.from('A: No.\n\n12 people testified.\n\nFile No. 12\n\nExhibit No.105.\n\nAloud said no.')});
+  await page.waitForFunction(() => S.mode==='flow' && S.words.length>0);
+  assert.deepEqual(await page.evaluate(() => S.words.map(w=>spokenOfWord(w))),
+    ['A:','No.','12','people','testified.','File','number','12','Exhibit','number one hundred five.','uh loud','said','no.']);
+  assert(await page.evaluate(() => S.words.some(w=>w.text==='No.105.')), 'Pronunciation changed visible text');
+  const requests=await page.evaluate(async () => {
+    const warm=ensurePhonemes,worker=S.kokoro.workerGenerate,calls=[];
+    ensurePhonemes=async()=>{};
+    let first=true;
+    S.kokoro.workerGenerate=async text=>{
+      calls.push(text);
+      if(first){first=false;throw Object.assign(new Error('split'),{code:'too_many_tokens'});}
+      const audio=new Float32Array(24000);
+      for(let i=1200;i<22000;i++)audio[i]=.2*Math.sin(i/10);
+      return {audio,sampling_rate:24000};
+    };
+    try {await generateNeuralNow(S.sentences.findIndex(s=>s.text==='File No. 12'),'pronunciation-probe');return calls;}
+    finally {ensurePhonemes=warm;S.kokoro.workerGenerate=worker;}
+  });
+  assert.deepEqual(requests,['File number 12','File number','12'],'Kokoro lost context at a chunk split');
+  await page.reload();
+  assert.equal(await page.evaluate(() => S.dict.no),'Number');
+  assert.equal(await page.evaluate(() => S.dict.aloud),'uh loud');
+  assert.deepEqual(await page.evaluate(() => spokenTokens(['No.','I','agree.'])),['No.','I','agree.']);
+}
 try {
   browser=await chromium.launch();
   for(const viewport of [{width:1280,height:900},{width:390,height:844}])for(let index=0;index<files.length;index++){
@@ -342,7 +372,7 @@ try {
           assert(await active.locator('.examline .aloud-w').first().evaluate(el => getComputedStyle(el).borderTopWidth === '0px'), 'A word became a bordered badge');
           assert(await active.locator('svg .aloud-w').evaluateAll(els => els.length > 0 && els.every(el => el.namespaceURI === 'http://www.w3.org/2000/svg')), 'SVG label namespace changed');
           const font=await active.locator('.body-copy').evaluate(el=>parseFloat(getComputedStyle(el).fontSize));const player=await page.locator('#player').boundingBox();if(viewport.width <= 699)await page.locator('#btn-view').click();await page.locator('#zoom-in').click();if(viewport.width <= 699)await page.locator('#view-sheet .sheet-close').click();await active.waitForFunction(before=>parseFloat(getComputedStyle(document.querySelector('.body-copy')).fontSize)>before,font);assert.equal((await page.locator('#player').boundingBox()).width,player.width,'Text zoom enlarged player chrome');}
-        if(strict) { await checkSpritz(page, viewport); if(viewport.width===1280)await checkSpritzDock(page, viewport); await checkLibraryLayout(page); await checkPanels(page, viewport); }
+        if(strict) { await checkSpritz(page, viewport); if(viewport.width===1280)await checkSpritzDock(page, viewport); await checkLibraryLayout(page); await checkPanels(page, viewport); if(viewport.width===1280)await checkPronunciation(page); }
       }else{
         assert.equal(await page.locator('#content iframe').count(),0);
         for(const text of panels)assert(await page.locator('.html-host').evaluate((host,text)=>[...host.shadowRoot.querySelectorAll('[data-reading],.answer,.reveal,.a')].some(el=>el.textContent.replace(/\s+/g,' ').trim()===text&&el.checkVisibility()),text),'Read-only lost or hid panel text');

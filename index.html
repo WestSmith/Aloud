@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.44.0">
+<meta name="aloud-version" content="v6.44.1">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -1145,6 +1145,7 @@
     <div class="chips" id="nq-chips" style="margin-top:10px"></div>
   </div>  <div class="set-row" style="display:block">
     <div class="lbl">Pronunciations<small>Long-press any word while reading to teach Aloud how to say it. In PDF and Reading view, double-tap works too. Your fixes are saved and applied to every voice engine.</small></div>
+    <p class="voice-note" id="pronunciation-context">Number labels such as “No. 12” or “No.12” are read as “number”. Ordinary “No.” answers stay “no”. Saved No → Number entries follow this rule too; other pronunciation fixes stay unchanged.</p>
     <div id="dict-list"></div>
   </div></div><div id="settings-appearance" hidden>  <div class="set-row">
     <div class="lbl">Theme</div>
@@ -3812,7 +3813,7 @@ function esc(s) { return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':
 const BUILTIN_SPOKEN = {
   'e.g.': 'for example,', 'i.e.': 'that is,', 'etc.': 'et cetera', 'etc': 'et cetera',
   'vs.': 'versus', 'vs': 'versus', 'approx.': 'approximately', 'dept.': 'department',
-  'no.': 'number', 'nos.': 'numbers', 'fig.': 'figure', 'figs.': 'figures',
+  'nos.': 'numbers', 'fig.': 'figure', 'figs.': 'figures',
   'et al.': 'et al', 'ca.': 'circa', 'cf.': 'compare',
 };
 
@@ -3893,11 +3894,32 @@ function verbalizeNumeric(tok) {
    A muted word (a source citation) says nothing at all — the timing layers
    already understand a token with no spoken form, so it costs no audio and
    simply shares the next word's onset. */
-function spokenOfWord(w) { return w && w.mute ? '' : spokenFor(w ? w.text : ''); }
+function spokenOfWord(w) {
+  if (!w || w.mute) return '';
+  return spokenFor(w.text, neighborSpokenToken(w), neighborSpokenToken(w, -1));
+}
+function neighborSpokenToken(w, direction = 1) {
+  const next = S.words?.[w.index + direction];
+  return next && next.sent === w.sent && !next.mute ? next.text : '';
+}
+
+/* A number label needs digits immediately after the abbreviation. Closing
+   quotation marks ("No.") and block/sentence boundaries are not lookahead.
+   Roman numerals and word-number guesses are deliberately left alone. */
+function numberLabelContinues(tok, next = '', previous = '') {
+  if (/^(?:a[.:]|ans[.:]|answer:)$/i.test(previous)) return false; // transcript answer label
+  return /^[^\p{L}\p{N}]*no\.$/iu.test(tok) && /^[([{“"'‘]*\d/u.test(next);
+}
+function legacyNumberPronunciation(key, value) {
+  return /^no\.?$/i.test(key) && typeof value === 'string' && /^number\.?$/i.test(value.trim());
+}
+function spokenTokens(tokens) {
+  return tokens.map((tok, i) => spokenFor(tok, tokens[i + 1] || '', tokens[i - 1] || ''));
+}
 
 /* what the TTS engine should actually say for a display token */
 const URL_TOKEN_RE = /(?:https?:\/\/|www\.)\S/i;
-function spokenFor(tok) {
+function spokenFor(tok, next = '', previous = '') {
   if (S.skipCode && URL_TOKEN_RE.test(tok)) return '';   // don't read web addresses aloud
   if (/^[.·…]{2,}$/.test(tok)) return '';                // dot leaders are layout, not speech
   const lower = tok.toLowerCase();
@@ -3905,9 +3927,17 @@ function spokenFor(tok) {
   const { pre, core, post } = coreOf(tok);
   if (!core) return tok;
   const rep = Object.hasOwn(S.dict, core.toLowerCase()) ? S.dict[core.toLowerCase()] : null;
-  if (typeof rep === 'string' && rep) return pre + rep + post;
+  if (typeof rep === 'string' && rep && !legacyNumberPronunciation(core, rep)) return pre + rep + post;
   const full = Object.hasOwn(S.dict, lower) ? S.dict[lower] : null;
-  if (typeof full === 'string' && full) return full;
+  if (typeof full === 'string' && full && !legacyNumberPronunciation(lower, full)) return full;
+  if (numberLabelContinues(tok, next, previous)) return pre + 'number';
+  /* An attached label is unambiguous, and expands before chunking so every
+     timing path receives the same spoken words, even at a chunk boundary. */
+  const attached = tok.match(/^([^\p{L}\p{N}]*)no\.(\d(?:[\d,]*\d)?)([^\p{L}\p{N}]*)$/iu);
+  if (attached) {
+    const digits = attached[2].replace(/,/g, '');
+    return attached[1] + 'number ' + (digits.length <= 9 ? intToWords(Number(digits)) : attached[2]) + attached[3];
+  }
   /* after the user's own pronunciations, so a custom reading always wins */
   const num = verbalizeNumeric(tok);
   if (num !== null) return num;
@@ -4131,7 +4161,7 @@ function setPronunciation(word) {
     renderDictList();
     toast(rep.trim() ? `Pronunciation saved for “${core || word}”.` : `Removed pronunciation for “${core || word}”.`);
     if (wasPlaying) playCurrent(S.curWord);
-  }, `How should “${core || word}” sound? Type it as it sounds; leave empty to remove. Saved on this device.`, true);
+  }, `How should “${core || word}” sound? Type it as it sounds; leave empty to remove. Saved on this device.${/^no\.?$/i.test(key) ? ' “Number” applies only to numbered labels such as No. 12; ordinary answers stay “no”.' : ''}`, true);
   $('app-edit-preview').onclick = () => previewVoice(S.engine, currentVoice(), $('app-edit-input').value.trim() || core || word, $('app-edit-preview'));
 }
 
@@ -4159,6 +4189,9 @@ function renderDictList() {
     const row = document.createElement('div');
     row.className = 'dict-row';
     row.innerHTML = `<span class="dw">${esc(k)}</span><span class="da">→</span><span class="dr">${esc(S.dict[k])}</span><button class="dx" title="Remove">✕</button>`;
+    if (legacyNumberPronunciation(k, S.dict[k])) row.querySelector('.dr').textContent = 'number (before digits only)';
+    row.querySelector('.dr').title = row.querySelector('.dr').textContent;
+    row.querySelector('.dx').setAttribute('aria-label', `Remove pronunciation for ${k}`);
     row.querySelector('.dx').addEventListener('click', () => {
       delete S.dict[k]; store.set('dict', S.dict); S.dictVersion++; invalidateNeuralSpeech(); renderDictList();
       if (S.playing) playCurrent(S.curWord);
@@ -4208,14 +4241,14 @@ function countPhones(ph) {
   return { v: Math.max(0.5, v), c };
 }
 
-async function ensurePhonemes(displayTokens, maxWaitMs = 1500) {
+async function ensurePhonemes(displayTokens, maxWaitMs = 1500, spoken = spokenTokens(displayTokens)) {
   if (NATIVE?.nativeKokoro) return;
   await Promise.race([loadPhonemizer(), new Promise(r => setTimeout(r, maxWaitMs))]);
   if (phonemizerState !== 'ready') return;
   const jobs = [];
   const reserved = [];
-  for (const tok of displayTokens) {
-    const spoken = spokenFor(tok).toLowerCase();
+  for (const form of spoken) {
+    const spoken = form.toLowerCase();
     if (!spoken) continue;                       // muted/skipped token: nothing to phonemize
     if (phonemeCache.has(spoken)) continue;
     phonemeCache.set(spoken, null);   // reserve so parallel calls don't duplicate
@@ -4254,12 +4287,12 @@ async function ensurePhonemes(displayTokens, maxWaitMs = 1500) {
 
 /* fire-and-forget: keep the next few sentences' phonemes hot */
 function warmPhonemes(fromSent, n = 4) {
-  const toks = [];
+  const toks = [], forms = [];
   for (let s = Math.max(0, fromSent); s < Math.min(fromSent + n, S.sentences.length); s++) {
     const sent = S.sentences[s];
-    for (let i = sent.start; i < sent.end; i++) toks.push(S.words[i].text);
+    for (let i = sent.start; i < sent.end; i++) { toks.push(S.words[i].text); forms.push(spokenOfWord(S.words[i])); }
   }
-  if (toks.length) ensurePhonemes(toks).catch(() => {});
+  if (toks.length) ensurePhonemes(toks, 1500, forms).catch(() => {});
 }
 
 /* ====================================================================
@@ -4306,27 +4339,27 @@ function wordCostMs(spokenTok) {
    and TOC dot leaders ("........"). The voice does not pause at these, so
    predicting a pause here used to hand the aligner a phantom anchor that
    warped the whole sentence's karaoke map on legal documents. */
-function falseStop(tok) {
+function falseStop(tok, next = '', previous = '') {
   const bare = tok.replace(/["”'’)\]]+$/, '');
-  return ABBREV.test(bare)
+  return (/(?:^|[^\p{L}\p{N}])no\.["”'’)\]]*$/iu.test(tok) ? numberLabelContinues(tok, next, previous) : ABBREV.test(bare))
     || /(^|[([“"'‘])\p{Lu}\.$/u.test(bare)     // initial: "S." "(S."
     || /^(?:\p{Lu}\.){2,}$/u.test(bare)        // dotted acronym: "U.S.C."
     || /^[.·…]+$/.test(bare);                  // dots only
 }
-function pauseAfterMs(tok, isLast) {
+function pauseAfterMs(tok, isLast, next = '', previous = '') {
   if (isLast) return 180;
   if (/^[.·…]{2,}$/.test(tok)) return 0;                              // dot leader
-  if (/[.!?…]["”'’)\]]*$/.test(tok)) return falseStop(tok) ? 40 : 330; // 40 stays below the pin threshold
+  if (/[.!?…]["”'’)\]]*$/.test(tok)) return falseStop(tok, next, previous) ? 40 : 330; // 40 stays below the pin threshold
   if (/[:;—–]["”'’)\]]*$/.test(tok)) return 230;
   if (/,["”'’)\]]*$/.test(tok)) return 165;
   return 0;
 }
 /* relative timeline (ms at rate 1): [{t0,t1,pause}] + total */
-function buildTimeline(displayTokens) {
+function buildTimeline(displayTokens, spoken = spokenTokens(displayTokens)) {
   let t = 0; const spans = [];
   for (let i = 0; i < displayTokens.length; i++) {
-    const dur = wordCostMs(spokenFor(displayTokens[i]));
-    const pause = pauseAfterMs(displayTokens[i], i === displayTokens.length - 1);
+    const dur = wordCostMs(spoken[i]);
+    const pause = pauseAfterMs(displayTokens[i], i === displayTokens.length - 1, displayTokens[i + 1] || '', displayTokens[i - 1] || '');
     spans.push({ t0: t, t1: t + dur, pause });
     t += dur + pause;
   }
@@ -4688,7 +4721,7 @@ async function parsePdfText(file, openToken = openGeneration) {
          EVERY line clears the gap test and a mid-citation line ending used
          to get flushed into its own paragraph (and thus a fake sentence). */
       const lastTok = para.trim().split(/\s+/).pop() || '';
-      if (para && /[.!?:”"']$/.test(para.trim()) && !falseStop(lastTok) && /^[A-Z0-9“"']/.test(line) && i > 0 && (lines[i - 1].y - lines[i].y) > lines[i].h * 1.7) flush();
+      if (para && /[.!?:”"']$/.test(para.trim()) && !falseStop(lastTok, line.trim().split(/\s+/)[0] || '', para.trim().split(/\s+/).at(-2) || '') && /^[A-Z0-9“"']/.test(line) && i > 0 && (lines[i - 1].y - lines[i].y) > lines[i].h * 1.7) flush();
       if (/-$/.test(para) && /^[a-z]/.test(line)) para = para.replace(/-$/, '') + line;
       else para += (para ? ' ' : '') + line;
     }
@@ -4835,7 +4868,7 @@ async function openPdfNative(file, opts = {}, openToken = opts.openToken ?? open
    O. Reg., "Ahmed v. King"…) — factums and judgments are dense with dotted
    tokens that are NOT sentence ends, and every miss both fragments the
    audio and fabricates a pause anchor for the karaoke aligner. */
-const ABBREV = /\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|v|etc|e\.g|i\.e|Fig|No|Nos|Vol|Ch|pp?|para|paras|approx|Inc|Ltd|Co|Corp|U\.S|U\.K|s|ss|sub|subs|cl|art|arts|Sch|Sched|Reg|Regs|Sec|Secs|Div|Dept|Hon|Ont|Alta|Sask|Que|R\.S\.[A-Z]|S\.[A-Z]|O\.\s?Reg|aff'?d|rev'?d|cert|a\.m|p\.m|Ave|Rd|Blvd|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\.$/i;
+const ABBREV = /\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|v|etc|e\.g|i\.e|Fig|Nos|Vol|Ch|pp?|para|paras|approx|Inc|Ltd|Co|Corp|U\.S|U\.K|s|ss|sub|subs|cl|art|arts|Sch|Sched|Reg|Regs|Sec|Secs|Div|Dept|Hon|Ont|Alta|Sask|Que|R\.S\.[A-Z]|S\.[A-Z]|O\.\s?Reg|aff'?d|rev'?d|cert|a\.m|p\.m|Ave|Rd|Blvd|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\.$/i;
 /* `blocks` (interactive HTML only) gives each token its block index, so a
    paragraph, a callout label and a heading stay separate utterances. PDF
    token streams pass nothing and keep block: null. */
@@ -4863,7 +4896,7 @@ function buildFromTokenStream(tokens, wordEls, blocks = null, codes = null, targ
     const after = Math.max(0, depth + (tok.match(/[([]/g) || []).length - (tok.match(/[)\]]/g) || []).length);
     if (/[.!?…]["”'’)\]]*$/.test(tok)) {
       const tail = tokens.slice(Math.max(start, i - 2), i + 1).join(' ');
-      if (ABBREV.test(tail) || /(^|\s)[A-Z]\.$/.test(tail)) { depth = after; continue; }
+      if (numberLabelContinues(tok, blocks && blocks[i + 1] !== blocks[i] ? '' : tokens[i + 1] || '', blocks && blocks[i - 1] !== blocks[i] ? '' : tokens[i - 1] || '') || ABBREV.test(tail) || /(^|\s)[A-Z]\.$/.test(tail)) { depth = after; continue; }
       pushSent(i + 1);
       depth = 0;
       continue;
@@ -4902,7 +4935,7 @@ function buildFromTokenStream(tokens, wordEls, blocks = null, codes = null, targ
   for (const end of ends) {
     if (end <= prev) continue;
     const idx = target.sentences.length;
-    for (let i = prev; i < end; i++) target.words.push({ el: wordEls[i], text: tokens[i], sent: idx, code: !!codes?.[i] });
+    for (let i = prev; i < end; i++) target.words.push({ el: wordEls[i], text: tokens[i], sent: idx, index: target.words.length, code: !!codes?.[i] });
     target.sentences.push({
       start: prev, end, text: tokens.slice(prev, end).join(' '),
       span: null, block: blocks ? blocks[prev] : null,
@@ -6232,10 +6265,10 @@ function splitSentences(text) {
   const out = [];
   let buf = '';
   const parts = text.split(/(?<=[.!?…]["”'’)\]]?)\s+/);
-  for (const part of parts) {
+  for (const [i, part] of parts.entries()) {
     buf += (buf ? ' ' : '') + part;
     const trimmed = buf.trim();
-    if (ABBREV.test(trimmed) || /\b[A-Z]\.$/.test(trimmed)) continue;
+    if (numberLabelContinues(trimmed.split(/\s+/).pop(), parts[i + 1]?.trim().split(/\s+/)[0] || '', trimmed.split(/\s+/).at(-2) || '') || ABBREV.test(trimmed) || /\b[A-Z]\.$/.test(trimmed)) continue;
     if (trimmed) out.push(trimmed);
     buf = '';
   }
@@ -6395,7 +6428,7 @@ async function renderFlow(blocks, chapters, opts = {}) {
         w.dataset.word = S.words.length;
         sentSpan.appendChild(w);
         if (ti < tokens.length - 1) sentSpan.appendChild(document.createTextNode(' '));
-        S.words.push({ el: w, text: tok, sent: sentIdx });
+        S.words.push({ el: w, text: tok, sent: sentIdx, index: S.words.length });
       }
       S.sentences.push({ start, end: S.words.length, text: sentText, span: sentSpan, block: bi, code: !!block.code });
       el.appendChild(sentSpan);
@@ -6620,7 +6653,7 @@ function buildCostIndex() {
     while (si < S.sentences.length && performance.now() < deadline) {
       const s = S.sentences[si];
       for (let wi = s.start; wi < s.end; wi++)
-        t += wordCostMs(spokenOfWord(S.words[wi])) + pauseAfterMs(S.words[wi].text, false);
+        t += wordCostMs(spokenOfWord(S.words[wi])) + pauseAfterMs(S.words[wi].text, false, neighborSpokenToken(S.words[wi]), neighborSpokenToken(S.words[wi], -1));
       cum[++si] = t;
     }
     if (si < S.sentences.length) setTimeout(chunk, 30);
@@ -6857,7 +6890,7 @@ function speakDevice(sentIdx, fromWord) {
      The ticker does NOT advance until the engine reports it actually
      started speaking — cloud voices can take 500ms+ to begin, and
      re-anchoring after a guess is what made the highlight jump back. */
-  const tl = buildTimeline(idxs.map(i => S.words[i].mute ? '' : S.words[i].text));
+  const tl = buildTimeline(idxs.map(i => S.words[i].mute ? '' : S.words[i].text), idxs.map(i => spokenOfWord(S.words[i])));
   const factor = calibFactor(voiceKey) / S.rate;
   const queuedAt = performance.now();
   let anchorT = -1;                    // set by onstart (or late fallback)
@@ -7086,7 +7119,7 @@ const KOKORO_WORKER_URL = './kokoro-worker.js';
    pronunciations, so the match is deterministic rather than phoneme-heuristic.
    If a future Misaki version stops round-tripping that surface text, return
    null and let the caller use the honest waveform fallback. */
-function alignNativeTokenStarts(displayTokens, nativeTokens, durationSec) {
+function alignNativeTokenStarts(displayTokens, nativeTokens, durationSec, spoken = spokenTokens(displayTokens)) {
   const groups = [];
   let group = null;
   for (const token of (nativeTokens || [])) {
@@ -7104,8 +7137,8 @@ function alignNativeTokenStarts(displayTokens, nativeTokens, durationSec) {
   const starts = new Array(displayTokens.length).fill(null);
   let at = 0;
   for (let i = 0; i < displayTokens.length; i++) {
-    const spoken = String(spokenFor(displayTokens[i]) || '').trim();
-    const pieces = spoken ? spoken.split(/\s+/).filter(Boolean) : [];
+    const form = String(spoken[i] || '').trim();
+    const pieces = form ? form.split(/\s+/).filter(Boolean) : [];
     if (!pieces.length) continue;
     let first = null;
     for (const piece of pieces) {
@@ -7635,8 +7668,8 @@ function leadTrimSec(entry) {
   return Math.max(0, Math.min(bound - LEAD_TRIM_MARGIN, LEAD_TRIM_MAX));
 }
 
-function alignTimeline(displayTokens, wave, durationSec) {
-  const tl = buildTimeline(displayTokens);
+function alignTimeline(displayTokens, wave, durationSec, spoken = spokenTokens(displayTokens)) {
+  const tl = buildTimeline(displayTokens, spoken);
   const speechStart = Math.min(wave.lead, durationSec * 0.4);
   const speechEnd = Math.max(wave.tailEnd, speechStart + 0.2);
   const segStartsMs = [0];
@@ -7741,7 +7774,7 @@ function alignTimeline(displayTokens, wave, durationSec) {
    word — sample-accurate even when a citation expands to many words.
    Returns null when no confident alignment exists (caller falls back to
    the silence-pinned aligner). */
-function alignExactStarts(displayTokens, pwords, durationSec) {
+function alignExactStarts(displayTokens, pwords, durationSec, spoken = spokenTokens(displayTokens)) {
   const n = displayTokens.length, m = pwords ? pwords.length : 0;
   if (!n || !m) return null;
   const PUNCT = ',.;:!?…';
@@ -7757,8 +7790,7 @@ function alignExactStarts(displayTokens, pwords, durationSec) {
      mergeable = a short bare function word: espeak sometimes fuses these
      into a neighbour ("of the" → one spoken blob "ʌvðə"), so the DP may
      let them consume nothing and ride their host. */
-  const exp = displayTokens.map(t => {
-    const spoken = spokenFor(t);
+  const exp = spoken.map(spoken => {
     const parts = spoken.trim().split(/\s+/).filter(Boolean);
     /* A glyph the voice cannot say is SILENT, not a word. Study guides label
        every callout with one — "⭐ The three exam flags", "⚠ Watch out" — and
@@ -7782,7 +7814,7 @@ function alignExactStarts(displayTokens, pwords, durationSec) {
     const count = (flex && ph && ph.w > 0) ? ph.w : parts.length;
     return { count, flex, mergeable };
   });
-  const dTail = displayTokens.map(t => tailOf(spokenFor(t)));
+  const dTail = spoken.map(tailOf);
   const pTail = pwords.map(w => tailOf(w.ph));
   const pOnly = pwords.map(w => !/[\p{L}\p{N}]/u.test(w.ph));
   const pLen = pwords.map(w => { const r = countPhones(w.ph); return r.v + r.c; });
@@ -7790,8 +7822,8 @@ function alignExactStarts(displayTokens, pwords, durationSec) {
      ran before generation) — a plain word can't plausibly claim a spoken
      stretch three times its size, which is what distinguishes "of"
      grabbing "percent" from "of" hosting a fused "of-the" */
-  const expLen = displayTokens.map(t => {
-    const e = phonemeCache.get(spokenFor(t).toLowerCase());
+  const expLen = spoken.map(t => {
+    const e = phonemeCache.get(t.toLowerCase());
     return e ? e.v + e.c : null;
   });
   const FLEX_CAP = 40, BIG = 1e9;
@@ -7957,17 +7989,17 @@ async function neuralPump() {
    far past the limit (a factum backsheet measures 800+ phonemes). Split
    such sentences into ranges that each fit comfortably, preferring cuts
    after trailing punctuation. Returns [start, end) index pairs. */
-function kokoroChunkRanges(tokens, cap = 300) {
-  const estOf = t => {
-    const e = phonemeCache.get(spokenFor(t).toLowerCase());
-    return (e ? e.v + e.c : Math.max(2, spokenFor(t).length)) + 1;
+function kokoroChunkRanges(tokens, cap = 300, spoken = spokenTokens(tokens)) {
+  const estOf = i => {
+    const e = phonemeCache.get(spoken[i].toLowerCase());
+    return (e ? e.v + e.c : Math.max(2, spoken[i].length)) + 1;
   };
   const ranges = [];
   let i = 0;
   while (i < tokens.length) {
     let est = 0, cut = -1, j = i;
     for (; j < tokens.length; j++) {
-      est += estOf(tokens[j]);
+      est += estOf(j);
       if (est > cap && j > i) break;
       if (/[,.;:!?…]["”'’)\]]*$/.test(tokens[j])) cut = j + 1;
     }
@@ -8001,6 +8033,7 @@ async function generateNeuralNow(
      S.words, so the returned `starts` still lines up with the display. */
   const tokens = [];
   for (let i = sent.start; i < sent.end; i++) tokens.push(S.words[i].mute ? '' : S.words[i].text);
+  const forms = S.words.slice(sent.start, sent.end).map(spokenOfWord);
   /* Real G2P runs alongside generation, not in front of it. It used to be
      awaited here for up to 4s (plus up to 4s more when espeak jobs never
      settle, which the iOS phonemizer wasm can do), and that wait sat INSIDE
@@ -8011,21 +8044,21 @@ async function generateNeuralNow(
      silent-token check and the chunk-size estimate read it. Chunking gets a
      short grace so a hot cache still informs it; the aligner waits for the
      full result below, by which time generation has usually taken longer. */
-  const phonemesReady = ensurePhonemes(tokens, 4000).catch(() => {});
+  const phonemesReady = ensurePhonemes(tokens, 4000, forms).catch(() => {});
   await Promise.race([phonemesReady, new Promise(r => setTimeout(r, 250))]);
   if (docGeneration !== S.docGeneration || speechGeneration !== S.speechGeneration)
     throw Object.assign(new Error('speech changed'), { name: 'EngineReset' });
   /* generate in context-window-sized chunks (usually exactly one). If a
      chunk still comes back truncated (512 ids — estimates can undershoot
      espeak's expansions), split it in half and redo just that chunk. */
-  const pending = kokoroChunkRanges(tokens);
+  const pending = kokoroChunkRanges(tokens, 300, forms);
   const parts = [];
   while (pending.length) {
     if (docGeneration !== S.docGeneration || speechGeneration !== S.speechGeneration)
       throw Object.assign(new Error('speech changed'), { name: 'EngineReset' });
     const [a, b] = pending.shift();
     const ctoks = tokens.slice(a, b);
-    const text = ctoks.map(spokenFor).join(' ').trim();
+    const text = forms.slice(a, b).join(' ').trim();
     /* nothing pronounceable (all muted, or only glyphs/punctuation): don't
        spend a model call to synthesise silence */
     if (!text || !/[\p{L}\p{N}]/u.test(text)) { parts.push({ a, b, audio: new Float32Array(3600), sr: 24000, pwords: null, silent: true }); continue; }
@@ -8109,13 +8142,13 @@ async function generateNeuralNow(
     else {
       spokenChunks++;
       cs = p.nativeTokens
-        ? alignNativeTokenStarts(ctoks, p.nativeTokens, dSec)
-        : p.pwords ? alignExactStarts(ctoks, p.pwords, dSec) : null;
+        ? alignNativeTokenStarts(ctoks, p.nativeTokens, dSec, forms.slice(p.a, p.b))
+        : p.pwords ? alignExactStarts(ctoks, p.pwords, dSec, forms.slice(p.a, p.b)) : null;
       if (cs) {
         exactChunks++;
         if (p.timing === 'model') modelChunks++;
       }
-      else cs = alignTimeline(ctoks, analyzeWave(p.audio, sr), dSec);
+      else cs = alignTimeline(ctoks, analyzeWave(p.audio, sr), dSec, forms.slice(p.a, p.b));
     }
     /* cs[] is in this chunk's own time base, so shift by where the chunk
        lands in the joined clip MINUS what was cut off its front */
@@ -8741,7 +8774,7 @@ function rsvpPlay(fromWord) {
     const msPerWord = 60000 / S.rsvp.wpm;
     /* phoneme-weighted flash duration: long words linger, short ones snap */
     let dur = msPerWord * Math.min(2.6, Math.max(0.55, wordCostMs(spokenOfWord(S.words[w])) / 330));
-    const pause = pauseAfterMs(tok, w === S.words.length - 1);
+    const pause = pauseAfterMs(tok, w === S.words.length - 1, neighborSpokenToken(S.words[w]), neighborSpokenToken(S.words[w], -1));
     if (pause >= 300) dur += msPerWord * 1.9 * S.breather;        // sentence end: breathe
     else if (pause > 0) dur += msPerWord * 0.9 * S.breather;      // clause break
     if (w === S.sentences[sIdx].end - 1 && paraBreakAfter(sIdx))
