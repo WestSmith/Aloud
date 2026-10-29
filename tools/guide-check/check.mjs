@@ -33,6 +33,18 @@ const mode = scope => scope.locator('button').filter({hasText:/\bmode\s*:/i}).fi
 const signature = locator => locator.evaluate(el => JSON.stringify([el.className,el.textContent,el.dataset.closed,el.parentElement.className,el.parentElement.dataset.done]));
 async function click(locator) {
   await locator.evaluate(el=>el.scrollIntoView({block:'center'}));
+  // A fixed guide control is visible in its tall iframe even when the outer
+  // reader is scrolled away. Bring that frame's top below Aloud's toolbar;
+  // keep a real pointer click so an actually obstructed control still fails.
+  if (await locator.evaluate(el => getComputedStyle(el).position === 'fixed')) {
+    const handle = await locator.elementHandle(), frame = await handle.ownerFrame();
+    await handle.dispose();
+    if (frame.parentFrame()) {
+      const host = await frame.frameElement();
+      await host.evaluate(el => window.scrollBy({ top: el.getBoundingClientRect().top - (document.getElementById('topbar')?.getBoundingClientRect().bottom || 0) - 16, behavior: 'instant' }));
+      await host.dispose();
+    }
+  }
   await locator.click({position:{x:8,y:8}});
 }
 async function revealAncestors(scope, locator) {
