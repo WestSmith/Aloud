@@ -145,6 +145,18 @@ const CASES = [
     durationSec: 1.5,
     nativeTokens: [tok('miz', ' ', 'mɪz', .2, .55), tok('Smith', '', 'smɪθ', .65, 1.1)],
   },
+  {
+    label: 'legal multiword abbreviation',
+    displayTokens: ['Prof.', 'Smith', 'cited', 'O.Reg.', '12.'],
+    groupCounts: [1, 1, 1, 2, 1],
+    durationSec: 3,
+    nativeTokens: [
+      tok('professor', ' ', 'prəfɛsɚ', .2, .6), tok('Smith', ' ', 'smɪθ', .7, 1),
+      tok('cited', ' ', 'saɪtɪd', 1.1, 1.4), tok('Ontario', ' ', 'ɑntɛɹioʊ', 1.5, 1.9),
+      tok('regulation', ' ', 'ɹɛɡjəleɪʃən', 2, 2.4), tok('12', '', 'twɛlv', 2.5, 2.8),
+      tok('.', '', '.', 2.8, 2.9),
+    ],
+  },
 ];
 
 function voiced(token) {

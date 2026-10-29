@@ -1,6 +1,6 @@
 /* Aloud service worker — offline app shell + CDN module caching.
    Bump VERSION on each release to roll the cache. */
-const VERSION = 'aloud-v6.44.2';
+const VERSION = 'aloud-v6.44.3';
 /* Multi-core neural voice. wasm threads need SharedArrayBuffer, which needs
    the document delivered with COOP/COEP. GitHub Pages cannot send headers,
    but a service worker can add them to every same-origin response. It is
