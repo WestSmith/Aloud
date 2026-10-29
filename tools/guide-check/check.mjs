@@ -310,10 +310,10 @@ async function checkPronunciation(page) {
   assert.match(await page.locator('#app-edit-note').textContent(),/only to numbered labels/);
   await page.locator('#app-edit-input').fill('Number');
   await page.locator('#app-edit-save').click();
-  await page.locator('#file-input').setInputFiles({name:'Public pronunciation.txt',mimeType:'text/plain',buffer:Buffer.from('A: No.\n\n12 people testified.\n\nFile No. 12\n\nExhibit No.105.\n\nAloud said no.\n\nMs. Smith has MS.')});
+  await page.locator('#file-input').setInputFiles({name:'Public pronunciation.txt',mimeType:'text/plain',buffer:Buffer.from('A: No.\n\n12 people testified.\n\nFile No. 12\n\nExhibit No.105.\n\nAloud said no.\n\nMs. Smith has MS.\n\nProf. Smith cited r. 7 and para.12 in Brown v. Jones.\n\nBrown v. Jones')});
   await page.waitForFunction(() => S.mode==='flow' && S.words.length>0);
   assert.deepEqual(await page.evaluate(() => S.words.map(w=>spokenOfWord(w))),
-    ['A:','No.','12','people','testified.','File','number','12','Exhibit','number one hundred five.','uh loud','said','no.','miz','Smith','has','MS.']);
+    ['A:','No.','12','people','testified.','File','number','12','Exhibit','number one hundred five.','uh loud','said','no.','miz','Smith','has','MS.','professor','Smith','cited','rule','7','and','paragraph twelve','in','Brown','versus','Jones.','Brown','versus','Jones']);
   assert(await page.evaluate(() => S.words.some(w=>w.text==='No.105.')), 'Pronunciation changed visible text');
   const requests=await page.evaluate(async () => {
     const warm=ensurePhonemes,worker=S.kokoro.workerGenerate,calls=[];
@@ -326,10 +326,17 @@ async function checkPronunciation(page) {
       for(let i=1200;i<22000;i++)audio[i]=.2*Math.sin(i/10);
       return {audio,sampling_rate:24000};
     };
-    try {await generateNeuralNow(S.sentences.findIndex(s=>s.text==='File No. 12'),'pronunciation-probe');return calls;}
-    finally {ensurePhonemes=warm;S.kokoro.workerGenerate=worker;}
+    try {
+      const results=[];
+      for(const text of ['File No. 12','Brown v. Jones']) {
+        first=true;calls.length=0;
+        await generateNeuralNow(S.sentences.findIndex(s=>s.text===text),'pronunciation-probe:'+text);
+        results.push([...calls]);
+      }
+      return results;
+    } finally {ensurePhonemes=warm;S.kokoro.workerGenerate=worker;}
   });
-  assert.deepEqual(requests,['File number 12','File number','12'],'Kokoro lost context at a chunk split');
+  assert.deepEqual(requests,[['File number 12','File number','12'],['Brown versus Jones','Brown versus','Jones']],'Kokoro lost context at a chunk split');
   await page.reload();
   assert.equal(await page.evaluate(() => S.dict.no),'Number');
   assert.equal(await page.evaluate(() => S.dict.aloud),'uh loud');
