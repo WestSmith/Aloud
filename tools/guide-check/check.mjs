@@ -125,9 +125,21 @@ async function checkPanels(page, viewport) {
   await page.locator('#settings-sheet .sheet-close').click();
   if (viewport.width <= 560) await page.locator('#btn-player-details').click();
   await page.locator('#btn-speed').click();
+  // Let the modal's scheduled initial focus finish before exercising its Tab cycle.
+  await page.waitForFunction(() => document.activeElement === document.querySelector('#speed-sheet .sheet-close'));
   assert(!await page.locator('#lag-chips').isVisible(), 'Timing controls should start folded');
   const summary = page.locator('#highlight-timing summary');
-  await summary.focus(); await summary.press('Enter');
+  await page.locator('#breather-chips button').last().focus();
+  await page.keyboard.press('Tab');
+  assert(await summary.evaluate(el => el === document.activeElement), 'Tab loop skipped the timing disclosure');
+  await page.keyboard.press('Tab');
+  assert(await page.locator('#speed-sheet .sheet-close').evaluate(el => el === document.activeElement), 'Timing disclosure escaped the modal Tab loop');
+  await page.keyboard.press('Shift+Tab');
+  assert(await summary.evaluate(el => el === document.activeElement), 'Reverse Tab skipped the timing disclosure');
+  await summary.press('Enter');
+  await summary.press('Space');
+  assert(!await page.locator('#lag-chips').isVisible());
+  await summary.press('Space');
   assert(await page.locator('#lag-chips').isVisible(), 'Timing disclosure is not keyboard operable');
   await page.locator('#lag-chips button').filter({hasText: /^160 ms$/}).click();
   assert.equal(await page.locator('#lag-summary').textContent(), '160 ms');

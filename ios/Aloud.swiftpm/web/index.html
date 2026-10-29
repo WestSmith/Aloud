@@ -9775,8 +9775,9 @@ document.addEventListener('keydown', e => {
   }
   if (sheet) {
     if (e.key === 'Tab') {
-      const focusable = [...sheet.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
-        .filter(el => el.getClientRects().length);
+      const focusable = [...sheet.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])')]
+        // Closed details can still report child rectangles; only their summary is tabbable.
+        .filter(el => el.getClientRects().length && !el.closest('details:not([open]) > :not(summary)'));
       const first = focusable[0], last = focusable[focusable.length - 1];
       if (first && last && !sheet.contains(document.activeElement)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
       else if (first && last && e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
