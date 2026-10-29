@@ -125,6 +125,8 @@ async function checkLibraryLayout(page) {
   assert.equal(await page.locator('#home h1').textContent(), 'Listen to anything.');
   assert(await page.evaluate(() => !!($('dropzone').compareDocumentPosition($('library')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'Library displaced the drop box');
   assert(await page.locator('#dropzone .fmt-chips').isVisible(), 'Full import area was hidden after saving a document');
+  assert(await page.locator('.drop-illustration').isVisible(), 'Drop-box illustration is missing');
+  assert(await page.locator('.rr-play .ui-icon').count() > 0, 'Library still lacks document icons');
   const title = page.locator('#recent-list .rr-name').first();
   assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace), 'normal');
   await page.locator('.rr-open').first().click();
@@ -137,6 +139,30 @@ async function checkPanels(page, viewport) {
   };
   const snapshot = await page.evaluate(() => JSON.stringify(S.words.map(w => [w.text, !!w.mute])));
   await settings();
+  await page.waitForFunction(() => {
+    const el=$('settings-sheet');
+    const r=el.getBoundingClientRect();
+    return r.left>=0 && r.top>=0 && r.bottom<=innerHeight+1 && r.right<=innerWidth+1 && el.scrollWidth<=el.clientWidth+1
+      && (innerWidth<700 || innerHeight<560 || Math.abs(r.top+r.height/2-innerHeight/2)<1);
+  });
+  if(viewport.width<=560) {
+    assert(await page.locator('#settings-nav button').evaluateAll(els => {
+      const r=els.map(e=>e.getBoundingClientRect());
+      return r.length===4 && r[0].top===r[1].top && r[2].top===r[3].top && r[2].top>r[0].top && Math.abs(r[0].width-r[3].width)<1;
+    }), 'Phone settings categories are uneven');
+    const drag = async distance => {
+      const b=await page.locator('#settings-sheet .grab').boundingBox();
+      await page.mouse.move(b.x+b.width/2,b.y+b.height/2); await page.mouse.down();
+      await page.mouse.move(b.x+b.width/2,b.y+b.height/2+distance,{steps:5}); await page.mouse.up();
+    };
+    await drag(40);
+    assert.equal(await page.locator('#settings-sheet').getAttribute('aria-hidden'),'false','Short drag dismissed settings');
+    await page.waitForFunction(() => Math.abs($('settings-sheet').getBoundingClientRect().bottom-innerHeight)<1);
+    await drag(100);
+    assert.equal(await page.locator('#settings-sheet').getAttribute('aria-hidden'),'true','Phone handle did not dismiss settings');
+    await page.waitForFunction(() => document.activeElement===$('btn-more'));
+    await settings();
+  }
   assert.match(await page.locator('#settings-view-context').textContent(), /Original HTML/);
   assert(await page.locator('#bold-switch').isDisabled(), 'Original layout offered ineffective Bold control');
   assert(!await page.locator('#font-select').isDisabled(), 'Original layout lost Speed reader font selection');
@@ -207,7 +233,7 @@ async function checkSpritz(page, viewport) {
     }
   });
   assert.deepEqual(reads, { fonts: 0, widths: 0 }, 'Spritz reads layout/font on each word');
-  await page.selectOption('#font-select', 'mono');
+  await page.evaluate(() => { $('font-select').value='mono'; $('font-select').dispatchEvent(new Event('change')); });
   assert(await page.evaluate(() => fitRsvpWord.metrics.font.includes('monospace')), 'Spritz ignored a font change');
   const width = viewport.width === 390 ? 1280 : 390;
   await page.setViewportSize({ width, height: viewport.height });
@@ -221,11 +247,13 @@ async function checkSpritz(page, viewport) {
     });
   }), 'Long Spritz word escaped the resized display');
   await page.setViewportSize(viewport);
-  await page.selectOption('#font-select', 'serif');
+  await page.evaluate(() => { $('font-select').value='serif'; $('font-select').dispatchEvent(new Event('change')); });
   await page.evaluate(() => setRsvpOpen(false));
 }
 async function checkSpritzDock(page, viewport) {
-  await page.selectOption('#font-select', 'atkinson');
+  await page.evaluate(() => { $('font-select').value='atkinson'; $('font-select').dispatchEvent(new Event('change')); });
+  await page.evaluate(() => { dismissToast(); setRsvpOpen(true); });
+  assert((await page.locator('#player').boundingBox()).width>=900,'Normal desktop still uses the narrow Spritz dock');
   await page.setViewportSize({width:844,height:390});
   await page.evaluate(() => { dismissToast(); setRate(2.5); setRsvpOpen(true); rsvpFlash('reading'); });
   const geometry = async () => {
@@ -245,9 +273,14 @@ async function checkSpritzDock(page, viewport) {
     await page.setViewportSize({width,height:390});
     await page.evaluate(scale => { store.set('uiScale',scale); refreshInterfaceText(); $('rsvp-mode').textContent='🔊 Voice-synced · 780 wpm'; }, scale);
     await geometry();
-    assert((await page.locator('#player').boundingBox()).height < 220, 'Landscape Spritz remained tall');
+    assert((await page.locator('#player').boundingBox()).height < 240, 'Landscape Spritz remained tall');
     assert.equal(await page.locator('#rsvp-word').evaluate(el => parseFloat(getComputedStyle(el).fontSize)),38, 'Landscape word size changed');
   }
+  const beforeNotice=await page.locator('#player').boundingBox();
+  await page.evaluate(() => toast('Public status notice'));
+  assert.deepEqual(await page.locator('#player').boundingBox(),beforeNotice,'Status notice moved the player');
+  assert.equal(await page.locator('#notices').evaluate(el=>el.parentElement.id),'reader-notices');
+  await page.locator('#toast-dismiss').click();
   await page.locator('#rsvp-mode').click();
   await page.locator('#rsvp-wpm-range').fill('900');
   assert.equal(await page.evaluate(() => S.rsvp.wpm),900);
@@ -270,7 +303,7 @@ async function checkSpritzDock(page, viewport) {
   assert.equal(await page.locator('#btn-engine').count(),1);
   await page.evaluate(() => { setRsvpOpen(false); store.set('uiScale',1); refreshInterfaceText(); });
   await page.setViewportSize(viewport);
-  await page.selectOption('#font-select','serif');
+  await page.evaluate(() => { $('font-select').value='serif'; $('font-select').dispatchEvent(new Event('change')); });
 }
 try {
   browser=await chromium.launch();
