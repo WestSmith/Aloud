@@ -162,7 +162,11 @@ MS acronyms or ms units, guarded personal titles, numbered legal references,
 case-name “v.”, the contextual “No.” rule, old No→Number entries, saved overrides,
 block/mute boundaries, pauses and native chunk mapping. The browser gate also
 checks saving/reloading that rule and forces Kokoro chunk splits between “No.”
-and its number and between a case-name “v.” and the following party. Resolved spoken forms are shared by synthesis
+and its number and between a case-name “v.” and the following party.
+The same check covers joined-hundred phoneme counts, parenthesized subsection
+numbers and leading punctuation-only model blobs. The audio ownership check
+also verifies that Chrome follows its real media clock through a synthesis stall
+while native and other-browser interpolation remain unchanged. Resolved spoken forms are shared by synthesis
 and timing so chunking cannot reinterpret the same abbreviation.
 
 ```sh

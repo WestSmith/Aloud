@@ -145,7 +145,7 @@ async function runSentence(tokens) {
 /* ---- real sentences from the Week 10 guide, incl. every spot reported ---- */
 const DETAIL = process.argv[2];
 const CASES = [
-  ['context: legal abbreviations', 'Prof. Smith Jr. cited para. 12 and r.7.01(2) in Brown v. Jones under O.Reg. 194/90.'],
+  ['context: legal abbreviations', 'Prof. Smith Jr. cited para. 12 and r.7.01(2) in Brown v. Jones under O.Reg. 194/90 and s.18(9).'],
   ['title: Ms Smith', 'Ms. Smith answered no about file No. 12.'],
   ['context: No answer and labels', 'A: No. 12 witnesses testified about document No. 12 and exhibit No.105.'],
   ['reported: money', 'Referral fee cap: 15% of the first $50,000 + 5% of the excess, max $25,000 — and it must never increase the client\'s total fee.'],

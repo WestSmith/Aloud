@@ -10,6 +10,31 @@ result is expected; use whole-text-selfcheck to measure the aligner's actual err
 The historical investigation below is retained as evidence, not a requirement to
 eliminate fusions or change the measured aligner.
 
+**v6.44.4, 2026-10-30: verify the browser normalizer too.** Real Chrome
+Kokoro 1.2.1 emits word boundaries that the raw phonemizer/CLI can omit:
+joined hundred phonemes need the same separator in the cache's word count.
+Plain subsection references such as 18(9) now spell out their two numbers before
+generation, and numeric groups take their onset from the first voiced model
+blob rather than a leading comma/quote pause. These were measured in the supplied
+guides, rather than inferred from the timing badge.
+
+Chrome can also move its media clock a few samples and then park during a
+synthesis/buffering stall. Extrapolating that movement painted the next word early
+at 3x; web Chrome now reads currentTime directly. Native and other-browser
+interpolation are unchanged. The focused model-free regressions live in
+pronunciation-selfcheck and neural-audio-ownership-selfcheck.
+
+A separate startup failure was in the test harness: fulfilling the 92 MB model
+through Playwright encoded it to 123 MB, exceeding Chrome's 100 MiB DevTools
+pipe buffer and disconnecting automation. Stream local weights over HTTP for
+browser tests; do not relay them as a giant route.fulfill body.
+Live Chrome 156 / Puck / Standard q8 checks covered three supplied guides at
+2x and 3x: nine sentences mapped at 0 ms model-onset error; six playback runs
+had no missed comparable words or Spritz mismatches, with display updates within
+15 ms. Fresh browser inference was exercised during the 3x runs. No application
+startup change was needed.
+
+
 The reader's report that opened all of it: with the Kokoro neural voice at
 **1.75×** and breathers on **Max**, the word highlight ran ahead of the
 audio — worst at the start of a sentence — plus intermittent distortion.

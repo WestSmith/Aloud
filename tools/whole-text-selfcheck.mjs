@@ -223,7 +223,7 @@ async function runSentence(tokens) {
 }
 
 const CASES = [
-  ['context: legal abbreviations', 'Prof. Smith Jr. cited para. 12 and r.7.01(2) in Brown v. Jones under O.Reg. 194/90.'],
+  ['context: legal abbreviations', 'Prof. Smith Jr. cited para. 12 and r.7.01(2) in Brown v. Jones under O.Reg. 194/90 and s.18(9).'],
   ['title: Ms Smith', 'Ms. Smith answered no about file No. 12.'],
   ['context: No answer and labels', 'A: No. 12 witnesses testified about document No. 12 and exhibit No.105.'],
   ['reported: withdrawal', 'Slide 7, verbatim: "If you have outstanding client matters that will not be completed before the closure of your practice, you are effectively withdrawing from representation " and must comply with the withdrawal rule.'],
