@@ -155,8 +155,25 @@ function testRetargetTickOwnership() {
   console.log('retarget karaoke tick              stale callback stays with old play identity');
 }
 
+function testChromeClockStall() {
+  const audio={currentTime:.250083,paused:false,ended:false,readyState:4,playbackRate:3,duration:10};
+  const clock=new Function('NA','NATIVE','navigator','performance',
+    extractNamedFunction(src,'naMediaPos')+';return naMediaPos;'
+  );
+  const state=()=>({lastCt:audio.currentTime,rolling:true,clock:{media:audio.currentTime,wall:0}});
+  const get=clock(audio,null,{userAgent:'Chrome/156.0.0.0'},{now:()=>100});
+  assert(get(state())===audio.currentTime,'Chrome extrapolated through a stalled media clock');
+  audio.currentTime=.6;
+  assert(get(state())===.6,'Chrome did not follow the resumed media clock');
+  const native=clock(audio,{}, {userAgent:'Chrome/156.0.0.0'},{now:()=>100});
+  assert(Math.abs(native(state())-.9)<1e-9,'Native interpolation changed');
+  const safari=clock(audio,null,{userAgent:'Version/18 Safari/605.1.15'},{now:()=>100});
+  assert(Math.abs(safari(state())-.9)<1e-9,'Other-browser interpolation changed');
+  console.log('Chrome clock stall                real media position held; resume follows audio');
+}
+
 let failed = false;
-for (const check of [testPreplayingTerminalOwnership, testRetargetTickOwnership]) {
+for (const check of [testPreplayingTerminalOwnership, testRetargetTickOwnership, testChromeClockStall]) {
   try { check(); }
   catch (error) { failed = true; console.error(`${check.name}: FAIL — ${error.stack}`); }
 }

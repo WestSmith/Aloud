@@ -41,6 +41,8 @@ const cases = [
   [['“s.”','5'],['“s.”','5']],
   [['R.','v.','Smith','and','Brown','v.','Jones'],['R.','versus','Smith','and','Brown','versus','Jones']],
   [['(v.)','Brown','V.','Jones','x','v.','y'],['(v.)','Brown','V.','Jones','x','v.','y']],
+  [['18(9),','(18(9)).','s.18(9)'],['eighteen nine,','(eighteen nine).','section eighteen nine']],
+  [['LAW','9039','A(9)','18(IX)'],['LAW','9039','A(9)','18(IX)']],
   [['No.'],['No.']],
   [['No.','I','did','not.'],['No.','I','did','not.']],
   [['No','thanks.'],['No','thanks.']],
@@ -71,6 +73,8 @@ S.dict={prof:'teacher','r.7.01(2)':'my rule',v:'against'};
 assert.equal(helpers.spokenFor('Prof.','Smith'),'teacher.');
 assert.equal(helpers.spokenFor('r.7.01(2)'),'my rule');
 assert.equal(helpers.spokenFor('v.','Jones','Smith'),'against.');
+S.dict={'18(9)':'eighteen subsection nine'};
+assert.equal(helpers.spokenFor('18(9)'),'eighteen subsection nine');
 S.dict={no:'Number'};
 assert.deepEqual(helpers.splitSentences('Under r. 7 and cls. 2–3, Rev. Smith testified.'),['Under r. 7 and cls. 2–3, Rev. Smith testified.']);
 assert.equal(helpers.pauseAfterMs('r.',false,'7'),40);
@@ -111,4 +115,39 @@ assert.equal(helpers.spokenOfWord(S.words[1]),'Jr.','Suffix used a skipped name'
 const no = {text:'number',whitespace:' ',phonemes:'n',startSec:.2};
 assert.deepEqual(helpers.alignNativeTokenStarts(['No.'],[no],1,['number']),[.2]);
 assert.equal(helpers.alignNativeTokenStarts(['No.'],[no],1),null);
+// The browser Kokoro normalizer separates joined "hundred" phonemes.
+// Exercise the production async cache and mapper, not a duplicate normalizer.
+const phoneCache=new Map();
+const rawPhones=new Map([
+  ['Page','pˈeɪdʒ'],['202','tˈuːhˈʌndɹɪd tˈuː'],['(fn','ˌɛfˈɛn'],
+  ['12,','twˈɛlv,'],['34).','θˈɜːɾi fˈɔːɹ).'],
+]);
+const phone=new Function('phonemeCache','phonemizeFn',
+  'const NATIVE=null;const phonemizerState="ready";const loadPhonemizer=async()=>{};' +
+  section('const IPA_VOWEL','function warmPhonemes(') +
+  section('const NONSPEECH_RE','function leadSilenceSec') +
+  section('function alignExactStarts','function audioBlobParts') +
+  ';return {phonemeWordCount,countPhones,ensurePhonemes,alignExactStarts};'
+)(phoneCache,async form=>[rawPhones.get([...rawPhones.keys()].find(k=>k.toLowerCase()===form))||'']);
+for(const [ph,count]of [
+  ['tˈuːhˈʌndɹɪd tˈuː',3],['tˈuː hˈʌndɹɪd tˈuː',3],
+  ['fˈɔːɹhˈʌndɹɪd',2],['twˈɛlv',1],['',0],[' . - ',0],
+])assert.equal(phone.phonemeWordCount(ph),count);
+const labels=[...rawPhones.keys()];
+await phone.ensurePhonemes(labels,1,labels);
+assert.equal(phoneCache.get('202').w,3,'Joined hundred was counted as one word');
+const weights=phone.countPhones(rawPhones.get('202'));
+assert.deepEqual({v:phoneCache.get('202').v,c:phoneCache.get('202').c},weights,'Phone weights changed');
+const blobs=[
+  ['pˈeɪdʒ',.2],['tˈuː',.5],['hˈʌndɹɪd',.7],['tˈuː',.9],
+  ['«ˌɛfˈɛn',1.1],['twˈɛlv,',1.3],['θˈɜːɾi',1.5],['fˈɔːɹ).',1.7],
+].map(([ph,t])=>({ph,t}));
+const expected=[.2,.5,1.1,1.3,1.5];
+assert.deepEqual(phone.alignExactStarts(labels,blobs,2,labels),expected,'Page number shifted the following footnote');
+phoneCache.get('202').w=2;
+assert.notDeepEqual(phone.alignExactStarts(labels,blobs,2,labels),expected,'Wrong browser count negative control was not detected');
+phoneCache.set('cite',phone.countPhones('sˈaɪt'));
+phoneCache.set('1934)',{v:9.5,c:13,w:4});
+const yearBlobs=[['sˈaɪt',.2],[',',.5],['nˈaɪntiːn',.6],['θˈɜːɾi',.8],['fˈoːɹ',1]].map(([ph,t])=>({ph,t}));
+assert.deepEqual(phone.alignExactStarts(['cite','1934)'],yearBlobs,1.4,['cite','1934)']),[.2,.6],'Numeric word started on a punctuation-only pause');
 console.log('pronunciation self-check: PASS (titles, acronyms/units, answers, labels, saved rules, blocks, mutes, pauses and chunk alignment)');
