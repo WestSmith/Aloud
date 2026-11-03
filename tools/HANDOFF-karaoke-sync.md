@@ -10,6 +10,37 @@ result is expected; use whole-text-selfcheck to measure the aligner's actual err
 The historical investigation below is retained as evidence, not a requirement to
 eliminate fusions or change the measured aligner.
 
+**v6.44.5, 2026-11-03: delayed sentence tails must outlive `ended`.**
+Chrome / Puck / 4x / 240ms output compensation could omit a sentence's final
+word entirely. The reported heading had correct model onsets; its final
+onset was 1.275s in a 2.225s clip. At 4x, 240ms is 0.960s of source media,
+so the last animation frame before `ended` could still select the preceding
+word. `ended` then discarded the whole timing map. Both karaoke and Spritz
+lost the same word; this was not a phoneme-alignment error.
+
+A bounded outgoing visual queue now drains the saved clip clock through its
+configured output delay while the next clip starts normally. It never seeks
+or changes the active transport sentence, and cannot overwrite a newer word.
+Only document/chapter stops wait for that final visual drain. Pause, manual
+seek, speech invalidation and engine changes cancel the queue, including an
+already-dispatched stale callback. The clock probe observes `ended` before
+source replacement and scores outgoing words against that independent saved
+clock, subtracting the configured output delay for both live and outgoing words.
+The audio-ownership self-check covers this
+at 4x/240ms with independent expected onset times, replacement clocks/rates,
+newer highlights, final completion and cancellation. Private chapter files
+and captures remain outside the repository.
+
+Real Chrome 156 / Puck Standard q8 clips reproduced both reported final-word
+omissions on the original build. The fixed build passed eight chapter playback
+cases: both passages at 4x with 240ms, zero and Auto compensation, and at 1x
+with 240ms. Both the actual chapter highlight and Spritz covered every comparable
+word, including both reported final words, with no display mismatches and at
+most 30ms late paint. Fused pairs with unrecoverable interior onsets were excluded
+from separate-paint coverage. Warm/cold and whole-text model alignment remained
+0ms, negative controls failed as required, and the 4x clock probe passed idle
+and eight-worker load cases. These checks do not measure physical AirPods latency.
+
 **v6.44.4, 2026-10-30: verify the browser normalizer too.** Real Chrome
 Kokoro 1.2.1 emits word boundaries that the raw phonemizer/CLI can omit:
 joined hundred phonemes need the same separator in the cache's word count.
