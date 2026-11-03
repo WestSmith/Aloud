@@ -38,7 +38,7 @@ function extractNamedFunction(source, name) {
 
 function makePreplayingTerminalHarness() {
   const listeners = new Map();
-  const calls = { advances: 0, failures: 0, revocations: 0, sentences: [] };
+  const calls = { advances: 0, failures: 0, revocations: 0, sentences: [], tails: [], next: 1, delay: false };
   class FakeAudio {
     constructor() {
       this.currentTime = 0;
@@ -62,6 +62,7 @@ function makePreplayingTerminalHarness() {
     playing: true,
     engine: 'neural',
     curSent: 0,
+    sleep: {mode: 'off'},
   };
   const ensureSource = extractNamedFunction(src, 'ensureNeuralAudio');
   const api = new Function(
@@ -75,6 +76,8 @@ function makePreplayingTerminalHarness() {
      const rsvpSilentActive = () => false;
      const batchNext = () => { throw new Error('unexpected hidden batch'); };
      const advanceAfterBreather = () => { calls.advances++; };
+     const seekPlayable = () => calls.next;
+     const queueNeuralTail = (play, done) => { calls.tails.push(done); return calls.delay; };
      const nativeKokoroError = message => new Error(message);
      const handleNeuralFailure = () => { calls.failures++; };
      ${ensureSource}
@@ -172,8 +175,89 @@ function testChromeClockStall() {
   console.log('Chrome clock stall                real media position held; resume follows audio');
 }
 
+function testEndTransitionPacing() {
+  const normal = makePreplayingTerminalHarness();
+  normal.calls.delay = true;
+  normal.install(normal.newPlay()); normal.audio.ended = true;
+  normal.audio.emit('ended');
+  assert(normal.calls.advances === 1 && normal.calls.tails.length === 1 && normal.calls.tails[0] === null,
+    'normal sentence transition waited for the visual tail');
+  const final = makePreplayingTerminalHarness();
+  final.calls.delay = true; final.calls.next = -1;
+  final.install(final.newPlay()); final.audio.ended = true;
+  final.audio.emit('ended');
+  assert(final.calls.advances === 0 && typeof final.calls.tails[0] === 'function',
+    'document stop discarded the delayed final words');
+  final.calls.tails[0]();
+  assert(final.calls.advances === 1, 'document did not finish after its final visual tail');
+  console.log('end transition pacing             next clip starts immediately; final stop drains');
+}
+
+function testDelayedFinalWords() {
+  const callbacks = new Map(), paints = [];
+  let now = 0, id = 0, stops = 0;
+  const S = { playing: true, engine: 'neural', neuralTails: [], neuralTailFrame: 0,
+    paintedWord: 0, curSent: 1, words: Array.from({length: 12}, () => ({el: {}})) };
+  const audio = { currentTime: 1, playbackRate: 4 };
+  const source = ['paintNeuralPosition', 'queueNeuralTail', 'tickNeuralTails', 'cancelNeuralTails']
+    .map(name => extractNamedFunction(src, name)).join('\n');
+  const api = new Function('S', 'NA', 'performance', 'requestAnimationFrame', 'cancelAnimationFrame',
+    'highlightWord', 'document', `
+    const karaokeLagSec = () => .24 * NA.playbackRate;
+    const heldWord = i => i;
+    const setSentence = () => { throw new Error('tail rewound the live transport'); };
+    const maybeScroll = () => {};
+    ${source}
+    return { queue: queueNeuralTail, cancel: cancelNeuralTails };
+  `)(S, audio, {now: () => now}, fn => { callbacks.set(++id, fn); return id; },
+    key => callbacks.delete(key),
+    wi => {S.paintedWord = wi; paints.push([now, wi]);}, {hidden: false});
+  const play = (base = 0) => ({shownAbs: -1,
+    segs: [{sentIdx: 0, sentStart: base, t0: 0, starts: [.1, .3, .5, .7]}]});
+  const frame = time => {
+    now = time;
+    const batch = [...callbacks.values()]; callbacks.clear();
+    for (const fn of batch) fn();
+  };
+  api.queue(play(), () => {stops++;});
+  // The previous implementation lost all three after the first word: the
+  // final media position minus 240ms at 4x is only .04 source seconds.
+  for (let t = 10; t <= 240; t += 10) frame(t);
+  assert(paints.map(p => p[1]).join() === '1,2,3', 'delayed final words were omitted or repeated');
+  for (const [time, wi] of paints) {
+    const expected = (.1 + wi * .2 - 1) / 4 * 1000 + 240;
+    assert(time >= expected - 5.01 && time <= expected + 10, 'tail word did not follow the output-delay clock');
+  }
+  assert(stops === 1 && callbacks.size === 0 && S.curSent === 1, 'final stop did not drain once');
+
+  // A new clip may already be running. Neither its clock/speed nor a newer
+  // painted word can pull an outgoing clip backwards.
+  S.paintedWord = 0; paints.length = 0; now = 300;
+  audio.currentTime = 1; audio.playbackRate = 4; api.queue(play());
+  audio.currentTime = 0; audio.playbackRate = 1;
+  frame(380);
+  assert(paints.at(-1)?.[1] === 1, 'replacement media clock/rate corrupted the old tail');
+  S.paintedWord = 9; frame(500);
+  assert(S.paintedWord === 9, 'old tail rewound a newer clip highlight');
+
+  // Pause/seek cancellation must also reject an already-dispatched callback.
+  now = 600; audio.currentTime = 1; audio.playbackRate = 4;
+  S.paintedWord = 0; api.queue(play(), () => {stops++;});
+  const stale = [...callbacks.values()][0];
+  api.cancel();
+  api.queue(play(4));
+  const owner = S.neuralTailFrame, before = paints.length;
+  stale();
+  assert(S.neuralTailFrame === owner && paints.length === before && stops === 1,
+    'cancelled callback claimed a replacement or completed an old stop');
+  api.cancel();
+  S.playing = false; api.queue(play()); frame(1000);
+  assert(callbacks.size === 0 && stops === 1, 'paused tail kept running');
+  console.log('delayed final words               4x / 240ms complete; next clip, stop and cancellation safe');
+}
+
 let failed = false;
-for (const check of [testPreplayingTerminalOwnership, testRetargetTickOwnership, testChromeClockStall]) {
+for (const check of [testPreplayingTerminalOwnership, testRetargetTickOwnership, testChromeClockStall, testEndTransitionPacing, testDelayedFinalWords]) {
   try { check(); }
   catch (error) { failed = true; console.error(`${check.name}: FAIL — ${error.stack}`); }
 }

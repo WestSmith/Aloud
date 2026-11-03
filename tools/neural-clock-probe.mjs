@@ -15,7 +15,8 @@
            node tools/neural-clock-probe.mjs 2.75 8      # CPU contention
    Read:   "lit-before-audio N" must be 0. The per-sentence map says where.
            "late" is the other side: mean/max of (audio position − onset)
-           at the moment a word lit; a large max means the highlight lags.
+           at the moment a word lit, after configured output compensation;
+           a large max means the highlight lags.
            "punctuation-only tokens painted" must be 0: every other test
            sentence ends in a detached " ." token, as markup that puts a
            period in its own text node produces (v6.33.0).
@@ -65,7 +66,7 @@ await page.evaluate(async t => { if (!await openFile(new File([t], 'clock-probe.
 await page.waitForFunction(() => S.sentences.length > 10);
 await page.evaluate(([ms, pause, next, rsvp]) => { window.__RUN_MS = ms; window.__PAUSE = pause; window.__NEXT = next; if(rsvp)setRsvpOpen(true); }, [+(process.env.RUN_MS || 9000), !!process.env.PAUSE, !!process.env.NEXT, !!process.env.RSVP]);
 const res = await page.evaluate(async ({ RATE, LOAD }) => {
-  const log = [], ev = [];
+  const log = [], ev = [], ends = new Map();
   const T0 = performance.now();
   const now = () => +(performance.now() - T0).toFixed(1);
   for (let k = 0; k < LOAD; k++) {
@@ -99,15 +100,24 @@ const res = await page.evaluate(async ({ RATE, LOAD }) => {
   window.loadKokoro = async () => {}; S.kokoro.state = 'ready'; setEngine('neural'); S.kokoro.state = 'ready'; S.breather = 0;
   setRate(RATE);
   const na = ensureNeuralAudio();
+  na.addEventListener('ended', () => {
+    const P = S.audioPlay;
+    if (P) for (const seg of P.segs) ends.set(seg.sentIdx, {
+      media: na.currentTime, wall: performance.now(), rate: na.playbackRate, lag: karaokeLagSec()
+    });
+  }, true); // observe the old source before production advances/replaces it
   ['loadedmetadata', 'play', 'playing', 'timeupdate', 'seeking', 'seeked', 'pause', 'ended', 'waiting'].forEach(e =>
-    na.addEventListener(e, () => ev.push({ t: now(), e, ct: +na.currentTime.toFixed(3), rs: na.readyState, rolling: !!S.audioPlay?.rolling })));
+    na.addEventListener(e, () => ev.push({ t: now(), e, ct: +na.currentTime.toFixed(3), rs: na.readyState, rolling: !!S.audioPlay?.rolling }), e === 'ended'));
   const origHl = highlightWord;
   window.highlightWord = (w, f) => {
     const P = S.audioPlay;
     const ws = S.words[w]; const sIdx = ws?.sent ?? S.curSent; const st = window.__starts?.[sIdx];
+    const end = ends.get(sIdx);
+    const ct = end ? end.media + (performance.now() - end.wall) / 1000 * end.rate : na.currentTime;
+    const heardCt = ct - (end ? end.lag : karaokeLagSec());
     // Observe real paints: Next may request the same word again after play().
     if (w !== S.paintedWord || f) log.push({ t: now(), w, sent: S.curSent, wsent: sIdx, text: ws?.text, onset: st ? st[w - S.sentences[sIdx].start] : null,
-      first: !!(st && w === S.sentences[sIdx].start), ct: +na.currentTime.toFixed(3), rolling: !!P?.rolling, paused: na.paused, rs: na.readyState,
+      first: !!(st && w === S.sentences[sIdx].start), ct: +ct.toFixed(3), heardCt: +heardCt.toFixed(3), outgoing: !!end, rolling: !!P?.rolling, paused: na.paused, rs: na.readyState,
       playingFired: !!P?._playingFired, ended: na.ended });
     const result = origHl(w, f);
     if (S.rsvp.open && ws && $('rsvp-pre').textContent + $('rsvp-orp').textContent + $('rsvp-post').textContent !== ws.text)
@@ -144,23 +154,25 @@ const res = await page.evaluate(async ({ RATE, LOAD }) => {
   return { log, ev, sentences: S.sentences.map(s => [s.start, s.end]), perFrame: window.__perFrame, curSent: S.curSent, playing: S.playing, paused: na.paused, ended: na.ended, src: !!na.src, lag: { det: detectOutputLatency(), base: audioLagCtx?.baseLatency, out: audioLagCtx?.outputLatency, state: audioLagCtx?.state, karaokeLag: S.karaokeLag } };
 }, { RATE, LOAD });
 await browser.close();
-// analyse: for each highlight, true media position at that instant is na.currentTime (live in Chrome).
-// starts[w-rel] > ct + 0.03 means the word was lit before its audio was reached.
+// Score live media directly, and completed clips from an independently observed
+// ended timestamp plus their finite output-buffer drain. The next source
+// may already be playing when an outgoing word paints. Both use heardCt,
+// which removes the configured output latency in source-media seconds.
 const W = 0.28, LEAD = 0.40;
-const isAhead = h => h.onset - h.ct > 0.03;
+const isAhead = h => h.onset - h.heardCt > 0.03;
+const firstIsEarly = h => h.first && ((!h.outgoing && (h.ended || h.paused)) || isAhead(h));
 let phantom = 0, bySent = {}, punctPaints = 0, firstEarly = 0;
 for (const h of res.log) {
   if (h.onset == null) continue;
   const rel = h.w - res.sentences[h.wsent][0];
-  const ahead = h.onset - h.ct;
   if (/^[^\p{L}\p{N}]+$/u.test(h.text || '')) punctPaints++;
   /* a first word painted while the element is still on the PREVIOUS clip (ended) or before its own onset */
-  if (h.first && (h.ended || h.paused || ahead > 0.03)) firstEarly++;
-  if (isAhead(h) && rel > 0 && !h.paused) { phantom++; bySent[h.wsent] = (bySent[h.wsent] || 0) + 1; }
+  if (firstIsEarly(h)) firstEarly++;
+  if (isAhead(h) && rel > 0 && (!h.paused || h.outgoing)) { phantom++; bySent[h.wsent] = (bySent[h.wsent] || 0) + 1; }
 }
-for (const h of res.log.filter(h => h.first && (h.ended || h.paused || (h.onset - h.ct) > 0.03))) console.log('  early-first', JSON.stringify(h));
+for (const h of res.log.filter(firstIsEarly)) console.log('  early-first', JSON.stringify(h));
 console.log(`punctuation-only tokens painted: ${punctPaints}; first words painted before their audio: ${firstEarly}; first words painted at all: ${res.log.filter(h => h.first).length} of ${res.curSent + 1} sentences`);
-const lates = res.log.filter(h => h.playingFired && !h.paused && h.onset != null && !h.first).map(h => +(h.ct - h.onset).toFixed(3));
+const lates = res.log.filter(h => (h.outgoing || h.playingFired && !h.paused) && h.onset != null && !h.first).map(h => +(h.heardCt - h.onset).toFixed(3));
 const mean = lates.reduce((a, b) => a + b, 0) / lates.length;
 console.log(`rate ${RATE} load ${LOAD} ${FILE}: highlights ${res.log.length}, lit-before-audio ${phantom}`, JSON.stringify(bySent), `late: mean ${mean.toFixed(3)}s max ${Math.max(...lates)}s min ${Math.min(...lates)}s`);
 const s1 = res.ev.findIndex(e => e.e === 'ended');
@@ -182,7 +194,7 @@ if (nextAt != null) {
 const resumeAt = res.ev.find(e => e.e === 'USER-RESUME')?.t;
 if (resumeAt != null) {
   const after = res.log.filter(h => h.t >= resumeAt && h.t < resumeAt + 1500 && h.onset != null);
-  const early = after.filter(h => h.onset - h.ct > 0.03);
+  const early = after.filter(isAhead);
   console.log(`after resume: ${after.length} paints, ${early.length} before their audio`, early.map(h => `${h.text}@ct${h.ct}/onset${h.onset}`).join(' '));
   for (const e of res.ev.filter(e => e.t >= resumeAt - 800 && e.t < resumeAt + 600)) console.log('  ', JSON.stringify(e));
 }
@@ -192,7 +204,7 @@ console.log(`ticks per frame: at 1s ${q(60).toFixed(1)}, at 5s ${q(300).toFixed(
 
 const measured = res.log.filter(h => Number.isFinite(h.onset) && Number.isFinite(h.ct) && !h.first);
 const unique = new Set(measured.map(h => h.w)).size;
-const negativeDetected = measured.some(h => isAhead({ ...h, onset: h.ct + 0.5 }));
+const negativeDetected = measured.some(h => isAhead({ ...h, onset: h.heardCt + 0.5 }));
 const resumes = resumeAt == null ? null : measured.filter(h => h.t >= resumeAt && h.t < resumeAt + 1500);
 const nextPaint = nextAt == null ? null : res.log.find(h => h.first && h.t >= nextAt - 20 && h.t < nextAt + 100);
 if (pageErrors.length || unique < 8 || !lates.length || !res.ev.some(e => e.e === 'ended') || !negativeDetected

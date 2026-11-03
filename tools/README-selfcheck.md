@@ -97,7 +97,9 @@ checks both vendored convolution overloads for local bias views (not native heap
 usage). The second extracts the production IndexedDB adapter and exercises open/
 transaction timeouts, one shared reconnect, stale/closed handles and bounded
 failure. The audio-ownership check extracts the production handlers and karaoke loop to
-check stale pre-playing terminal events and scheduled callback ownership. It
+check stale pre-playing terminal events and scheduled callback ownership.
+It also verifies delayed final-word coverage at 4x/240ms, outgoing visual-clock
+ownership across a new clip, and cancellation before pause/seek or final stop. It
 retains genuine pre-playing end/error controls; no fallback engine is involved.
 All five accept `ALOUD_ROOT=/path/to/checkout` to test another checkout. They do
 not establish audible timing or physical-device lifecycle behavior; run the
@@ -189,7 +191,10 @@ is an intentionally wrong alignment and must return a failing exit status.
 The fusion tool is a **diagnostic**: its known 1-of-4 result is expected, not a
 release failure. A fusion count cannot measure timing; use whole-text-selfcheck
 for that. It still fails if espeak fails or no actual phonemes were measured.
-The neural clock probe fails on early paints, page errors, inadequate measured
+The neural clock probe observes completed clips before source replacement,
+so delayed outgoing paints are measured on their own clip clock rather than
+the next audio source. It subtracts output compensation on both paths and
+fails on early paints, page errors, inadequate measured
 coverage, missing sentence boundaries and a failed early-paint negative control.
 Run it independently in a browser-capable environment; compilation alone does
 not establish playback timing.

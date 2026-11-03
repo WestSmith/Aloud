@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.44.4">
+<meta name="aloud-version" content="v6.44.5">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -3617,6 +3617,8 @@ const S = {
   sentences: [],       // [{start, end, text, span?}]
   curSent: -1,
   curWord: -1,
+  neuralTails: [],     // completed clips whose delayed highlights are still reaching the output
+  neuralTailFrame: 0,
   paintedWord: -1,     // the word carrying .speaking / shown in RSVP; trails curWord during a sentence-start hold
   playing: false,
   /* Kokoro is the fresh-install default on web and native. Keep saved choices. */
@@ -7082,6 +7084,7 @@ function clearNeuralCache() {
 }
 
 function invalidateNeuralSpeech() {
+  cancelNeuralTails();
   if (S.audio) S.audio.pause();
   if (S.audioPlay?.batchUrl) URL.revokeObjectURL(S.audioPlay.batchUrl);
   S.audioPlay = null;
@@ -8356,10 +8359,17 @@ function ensureNeuralAudio() {
        S.curSent through the batch — land on the batch's last sentence
        explicitly or the next batch would replay the same run */
     const lastSeg = P.segs[P.segs.length - 1];
-    if (lastSeg && lastSeg.sentIdx !== S.curSent) setSentence(lastSeg.sentIdx, true);
+    if (lastSeg && lastSeg.sentIdx !== S.curSent) setSentence(lastSeg.sentIdx, true, true);
     /* hidden (screen locked / app in background): stitch the generated
        runway into one clip so playback survives without a fresh play() */
     if (document.hidden && !rsvpSilentActive()) { batchNext(); return; }
+    /* The media element ends before the configured output delay has drained.
+       Keep painting that clip while the next one starts; waiting here on every
+       sentence would add an unwanted Bluetooth-sized pause to the audio. Only
+       a document/chapter stop waits for its final delayed words. */
+    const next = seekPlayable((lastSeg?.sentIdx ?? S.curSent) + 1, 1);
+    const stopping = next === -1 || (S.sleep.mode === 'chapter' && chapterOf(next) !== chapterOf(S.curSent));
+    if (queueNeuralTail(P, stopping ? () => advanceAfterBreather() : null) && stopping) return;
     advanceAfterBreather();
   });
   NA.addEventListener('error', () => {
@@ -8496,17 +8506,23 @@ function naTick(P) {
   /* what you are HEARING right now, which trails the audio clock by the
      output latency (see karaokeLagSec) */
   const ct = Math.max(0, naMediaPos(P) - karaokeLagSec());
+  paintNeuralPosition(P, ct);
+  if (!NA.paused && !NA.ended) requestAnimationFrame(() => naTick(P));
+  else P.ticking = false;
+}
+
+/* Shared selection for a live media clock and a finite output-buffer tail.
+   A tail may paint its old word while S.curSent is already generating/playing
+   the next clip; it must never rewind that transport or a newer word. */
+function paintNeuralPosition(P, ct, followSentence = true) {
   let seg = P.segs[0];
   for (const g of P.segs) { if (g.t0 <= ct + 0.02) seg = g; else break; }
-  if (seg.sentIdx !== S.curSent) setSentence(seg.sentIdx, true, true);
+  if (followSentence && seg.sentIdx !== S.curSent) setSentence(seg.sentIdx, true, true);
   let wi = -1;
   for (let i = 0; i < seg.starts.length; i++) { if (seg.starts[i] <= ct + 0.02) wi = i; else break; }
   /* before the first onset (lead-in, or the gap ahead of a stitched
      sentence): rest on whatever is lit rather than jump to word one */
-  if (wi < 0) {
-    if (!NA.paused && !NA.ended) requestAnimationFrame(() => naTick(P)); else P.ticking = false;
-    return;
-  }
+  if (wi < 0) return;
   /* a muted citation shares the onset of the word after it and a trailing
      punctuation token the onset of the word before it, so the scan can land
      on either. Nothing is spoken there — hold the last real word. */
@@ -8515,9 +8531,46 @@ function naTick(P) {
      than visibly rewind a word */
   if (wIdx < P.shownAbs) wIdx = P.shownAbs;
   P.shownAbs = wIdx;
+  if (!followSentence && wIdx <= S.paintedWord) return;
   if (wIdx !== S.paintedWord) { highlightWord(wIdx); maybeScroll(S.words[wIdx]?.el); }
-  if (!NA.paused && !NA.ended) requestAnimationFrame(() => naTick(P));
-  else P.ticking = false;
+}
+
+function cancelNeuralTails() {
+  if (S.neuralTailFrame) cancelAnimationFrame(S.neuralTailFrame);
+  S.neuralTailFrame = 0;
+  S.neuralTails = [];
+}
+
+function queueNeuralTail(P, onDone = null) {
+  if (document.hidden) return false;
+  const rate = Math.max(0.25, NA.playbackRate || 1), lag = karaokeLagSec();
+  const tail = { ...P, end: NA.currentTime, wall: performance.now(), rate, lag, onDone };
+  paintNeuralPosition(tail, Math.max(0, tail.end - lag), false);
+  if (!(lag > 0)) return false;
+  S.neuralTails.push(tail);
+  if (!S.neuralTailFrame) {
+    const pending = S.neuralTails;
+    S.neuralTailFrame = requestAnimationFrame(() => tickNeuralTails(pending));
+  }
+  return true;
+}
+
+function tickNeuralTails(pending) {
+  /* A cancelled callback cannot take ownership of a new playback's queue. */
+  if (pending !== S.neuralTails) return;
+  S.neuralTailFrame = 0;
+  if (!S.playing || S.engine !== 'neural') { cancelNeuralTails(); return; }
+  const now = performance.now();
+  while (pending.length) {
+    const tail = pending[0];
+    const ct = tail.end - tail.lag + Math.max(0, now - tail.wall) / 1000 * tail.rate;
+    paintNeuralPosition(tail, Math.max(0, Math.min(tail.end, ct)), false);
+    if (ct < tail.end) break;
+    pending.shift();
+    tail.onDone?.();
+    if (pending !== S.neuralTails) return;
+  }
+  if (pending.length) S.neuralTailFrame = requestAnimationFrame(() => tickNeuralTails(pending));
 }
 
 async function speakNeural(sentIdx, fromWord) {
@@ -8917,6 +8970,7 @@ function playCurrent(fromWord) {
 }
 
 function pauseAll() {
+  cancelNeuralTails();
   stopVoicePreview();
   S.playing = false;
   setPlayIcon(false);
@@ -9030,6 +9084,7 @@ function togglePlay() {
   if (!S.sentences.length) return;
   if (S.playing) {
     if (S.engine === 'neural' && S.audio && !S.audio.ended) {
+      cancelNeuralTails();
       S.playing = false; setPlayIcon(false); S.audio.pause(); $('btn-play').classList.remove('loading');
     } else pauseAll();
   } else {
