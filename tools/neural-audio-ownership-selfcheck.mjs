@@ -256,8 +256,67 @@ function testDelayedFinalWords() {
   console.log('delayed final words               4x / 240ms complete; next clip, stop and cancellation safe');
 }
 
+function testCompensatedPauseResume() {
+  const paints = [];
+  const audio = {
+    currentTime: 1.68,
+    playbackRate: 3,
+    paused: false,
+    ended: false,
+    src: 'blob:puck',
+    pause() { this.paused = true; },
+    play() { this.paused = false; return Promise.resolve(); },
+  };
+  const play = { shownAbs: -1, segs: [{ sentIdx: 0, sentStart: 0, t0: 0, starts: [.2, .99, 1.28] }] };
+  const S = { audio, audioPlay: play, rate: 3, playing: true, engine: 'neural',
+    karaokeLag: 240, sentences: [{}], curSent: 0, curWord: 1, paintedWord: 1, words: [{}, {}, {}] };
+  const source = ['togglePlay', 'karaokeLagSec', 'paintNeuralPosition']
+    .map(name => extractNamedFunction(src, name)).join('\n');
+  const api = new Function('S', 'NA', 'paints', `
+    const NATIVE = null;
+    let kokoroResumeOnForeground = false;
+    const cancelNeuralTails = () => {};
+    const setPlayIcon = () => {};
+    const $ = () => ({ classList: { remove() {} } });
+    const primeAudioGesture = () => {};
+    const rsvpSilentActive = () => false;
+    const playCurrent = () => { throw new Error('resume lost its clip'); };
+    const heldWord = i => i;
+    const highlightWord = wi => { S.paintedWord = wi; paints.push(wi); };
+    const maybeScroll = () => {};
+    ${source}
+    return { toggle: togglePlay, paint: ct => paintNeuralPosition(S.audioPlay, ct) };
+  `)(S, audio, paints);
+  const near = (a, b) => Math.abs(a - b) < 1e-9;
+  api.toggle();
+  assert(audio.paused && !S.playing, 'toggle did not pause the active clip');
+  api.toggle();
+  assert(!audio.paused && S.audioPlay === play && near(audio.currentTime, .96),
+    'resume skipped the part of the clip that was still pending at the output');
+  api.paint(.24);
+  api.paint(.95);
+  // A small clock rebase after seeking can resolve to the earlier word even
+  // once the resume position reaches the output. Keep the word already shown.
+  play.shownAbs = -1;
+  api.paint(.961);
+  api.paint(1.28);
+  assert(paints.join() === '2', 'resume painted an earlier word or skipped the final word');
+
+  // A rapid repeat pause at the new start must not seek farther back.
+  api.toggle();
+  api.toggle();
+  assert(near(audio.currentTime, .96), 'repeated pause rewound past the last resume');
+
+  S.karaokeLag = 0;
+  audio.currentTime = 1.3;
+  api.toggle();
+  api.toggle();
+  assert(near(audio.currentTime, 1.3), 'zero-delay resume changed the media position');
+  console.log('compensated pause and resume       pending audio replays; karaoke holds its place');
+}
+
 let failed = false;
-for (const check of [testPreplayingTerminalOwnership, testRetargetTickOwnership, testChromeClockStall, testEndTransitionPacing, testDelayedFinalWords]) {
+for (const check of [testPreplayingTerminalOwnership, testRetargetTickOwnership, testChromeClockStall, testEndTransitionPacing, testDelayedFinalWords, testCompensatedPauseResume]) {
   try { check(); }
   catch (error) { failed = true; console.error(`${check.name}: FAIL — ${error.stack}`); }
 }
