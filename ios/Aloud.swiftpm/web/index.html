@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.44.5">
+<meta name="aloud-version" content="v6.44.6">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -8515,6 +8515,9 @@ function naTick(P) {
    A tail may paint its old word while S.curSent is already generating/playing
    the next clip; it must never rewind that transport or a newer word. */
 function paintNeuralPosition(P, ct, followSentence = true) {
+  /* On a compensated resume, hold the paused word until the new audio
+     reaches the output. Earlier clip positions have already been read. */
+  if (ct < (P.resumeFloor ?? 0)) return;
   let seg = P.segs[0];
   for (const g of P.segs) { if (g.t0 <= ct + 0.02) seg = g; else break; }
   if (followSentence && seg.sentIdx !== S.curSent) setSentence(seg.sentIdx, true, true);
@@ -8527,6 +8530,9 @@ function paintNeuralPosition(P, ct, followSentence = true) {
      punctuation token the onset of the word before it, so the scan can land
      on either. Nothing is spoken there — hold the last real word. */
   let wIdx = heldWord(seg.sentStart + wi, seg.sentStart);
+  /* Seek and playing events reset shownAbs. Keep the paused or explicitly
+     selected word through those events, even on a rapid second pause. */
+  if (wIdx < (P.minWord ?? -1)) return;
   /* clock resyncs can land a hair behind the extrapolation — hold rather
      than visibly rewind a word */
   if (wIdx < P.shownAbs) wIdx = P.shownAbs;
@@ -8638,6 +8644,8 @@ async function speakNeural(sentIdx, fromWord) {
     ? leadTrimSec(entry)                                        // skip measured silence only
     : Math.max(0, (entry.starts[rel] ?? 0) - 0.06);              // tap-to-read: land on that word
   if (seekTo > 0.04 && seekTo < entry.durationSec * 0.9) {
+    P.resumeFloor = seekTo;
+    if (rel > 0) P.minWord = heldWord(startFrom, sent.start);
     na.addEventListener('loadedmetadata', () => { if (S.audioPlay === P) { na.currentTime = seekTo; P.lastCt = na.currentTime; } }, { once: true });
   }
   try {
@@ -9085,6 +9093,14 @@ function togglePlay() {
   if (S.playing) {
     if (S.engine === 'neural' && S.audio && !S.audio.ended) {
       cancelNeuralTails();
+      const play = S.audioPlay;
+      if (play && !S.audio.paused) {
+        /* The output delay can leave words pending when the media element
+           has already reached the clip's trailing silence. Resume from
+           the compensated position so those words are heard. */
+        play.resumeAt = Math.max(play.resumeFloor ?? 0, S.audio.currentTime - karaokeLagSec());
+        play.minWord = Math.max(play.minWord ?? -1, S.paintedWord);
+      }
       S.playing = false; setPlayIcon(false); S.audio.pause(); $('btn-play').classList.remove('loading');
     } else pauseAll();
   } else {
@@ -9096,6 +9112,12 @@ function togglePlay() {
       S.playing = true; setPlayIcon(true);
       S.audio.playbackRate = S.rate;
       const owner = S.neuralGenToken, audioPlay = S.audioPlay;
+      if (audioPlay.resumeAt != null) {
+        const resumeAt = audioPlay.resumeAt;
+        audioPlay.resumeAt = null;
+        audioPlay.resumeFloor = resumeAt;
+        if (resumeAt < S.audio.currentTime) S.audio.currentTime = resumeAt;
+      }
       S.audio.play().catch(() => {
         if (owner === S.neuralGenToken && S.playing && S.audioPlay === audioPlay && S.engine === 'neural') playCurrent(S.curWord);
       });
