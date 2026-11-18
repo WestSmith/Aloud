@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.44.6">
+<meta name="aloud-version" content="v6.45.0">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -702,6 +702,26 @@
   #rsvp-close:hover { background: var(--bg-elev2); }
   body.rsvp-on #player { box-shadow: 0 4px 18px rgba(0,0,0,.22); }
 
+  #rsvp-float:empty { display: none; }
+  #rsvp-float {
+    position: fixed; z-index: 41; top: 50%; left: 50%;
+    transform: translate(-50%, -50%); width: min(330px, calc(100% - 32px));
+    background: var(--bg-elev); border: 1px solid var(--border);
+    border-radius: 16px; box-shadow: var(--shadow);
+  }
+  #rsvp-float #rsvp-word {
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    height: clamp(52px, 10vh, 74px); border-radius: inherit;
+  }
+  /* Give even the first and last sentence room to reach the floating word. */
+  body.rsvp-centered #reader { padding-block: 50vh calc(50vh + 90px); overflow-anchor: none; }
+
+  body.rsvp-centered #player {
+    max-height: calc(50dvh - clamp(26px, 5vh, 37px) - 28px - env(safe-area-inset-bottom));
+    overflow-y: auto;
+  }
+  body.rsvp-centered #rsvp-body { margin: 0; padding: 0; border: none; }
+
   /* Desktop and landscape share a wide dock with recognition point and
      transport on the same centre line. Phones keep their stacked player. */
   @media (min-width: 900px), (min-width: 620px) and (max-height: 500px) {
@@ -726,6 +746,9 @@
     body.rsvp-on #progress-label { order: -1; }
     body.rsvp-on #progress-wrap { min-width: 0; flex: none; }
     body.rsvp-on #player-options { grid-area: options; }
+    body.document-open.rsvp-centered #player { grid-template-areas: "context context close" "progress transport options"; }
+    body.rsvp-centered #rsvp-context { flex-direction: row; align-items: center; gap: 8px; }
+    body.rsvp-centered #rsvp-wpm-row { flex-wrap: nowrap; }
   }
 
   ::selection { background: var(--accent-soft); }
@@ -991,6 +1014,7 @@
 
 <input type="file" id="file-input" accept=".epub,.pdf,.html,.htm,.xhtml,.txt,.md,.markdown,application/epub+zip,application/pdf,text/html,text/plain" hidden>
 
+<div id="rsvp-float"></div>
 <div id="player" class="controls-collapsed">
   <!-- speed reader (v6.26.0): a section of the player card that unfolds from
        its top edge, so it is one surface with the transport, not a second card -->
@@ -1120,6 +1144,10 @@
     <div class="lbl">Bold text<small id="bold-scope-note">Reading view only</small></div>
     <button class="switch" id="bold-switch" role="switch" aria-checked="false" aria-label="Bold text"></button>
   </div></div>
+  <div class="set-row">
+    <div class="lbl">Centered Spritz<small>Float the speed reader at screen center. With Auto-scroll on, the sentence sits just above it.</small></div>
+    <button class="switch" id="centered-spritz-switch" role="switch" aria-checked="false" aria-label="Centered Spritz"></button>
+  </div>
   <div class="set-row">
     <div class="lbl">Auto-scroll<small>Keep the spoken sentence in view</small></div>
     <button class="switch on" id="autoscroll-switch" role="switch" aria-checked="true" aria-label="Auto-scroll"></button>
@@ -3668,6 +3696,7 @@ const S = {
   costCum: null, costGen: 0,            // per-sentence cumulative speech-time (honest ETA)
   rsvp: {
     open: false,
+    centered: store.get('rsvpCentered', false),
     mode: store.get('rsvpMode', 'voice'),   // 'voice' (TTS-synced) | 'silent' (timer)
     wpm: store.get('rsvpWpm', 450),
     timer: null, token: 0, lastFlip: 0, avg: 0,
@@ -3701,9 +3730,18 @@ function syncPlayerHeight() {
   const p = $('player');
   if (p) document.documentElement.style.setProperty('--player-h', (p.offsetHeight || 0) + 'px');
 }
-function syncChromeMetrics() { invalidateReadingViewportBounds(); syncPlayerHeight(); }
+let centeredScrollFrame = 0;
+function refreshCenteredScroll() {
+  if (!S.rsvp.open || !S.rsvp.centered || centeredScrollFrame) return;
+  centeredScrollFrame = requestAnimationFrame(() => {
+    centeredScrollFrame = 0;
+    if (S.rsvp.open && S.rsvp.centered) maybeScroll(S.words[S.paintedWord]?.el);
+  });
+}
+function syncChromeMetrics() { invalidateReadingViewportBounds(); syncPlayerHeight(); refreshCenteredScroll(); }
 try {
   const readingViewportObserver = new ResizeObserver(syncChromeMetrics);
+  new ResizeObserver(refreshCenteredScroll).observe(content);
   ['topbar', 'topbar-actions', 'player'].forEach(id => { const el = $(id); if (el) readingViewportObserver.observe(el); });
 } catch {}
 window.addEventListener('resize', syncChromeMetrics);
@@ -3752,8 +3790,30 @@ function readerScrolledByHand() { glide.holdUntil = Date.now() + GLIDE_HOLD_MS; 
 ['wheel', 'touchmove'].forEach(ev => window.addEventListener(ev, readerScrolledByHand, { passive: true }));
 /* the keep-it-centred rule shared by the flow/PDF views and the HTML frame:
    `top`/`bottom` are the word's edges in viewport coordinates */
-function keepWordCentred(top, bottom, force) {
+// Native documents can position words independently (columns, SVG, PDF pages).
+// Measure visible word boxes rather than the boxes of intervening containers.
+function sentenceBounds(start, end, elementAt) {
+  let top = Infinity, bottom = -Infinity;
+  for (let i = start; i < end; i++) {
+    const r = elementAt(i).getBoundingClientRect();
+    if (r.height && r.width) { top = Math.min(top, r.top); bottom = Math.max(bottom, r.bottom); }
+  }
+  return bottom >= top ? { top, bottom } : null;
+}
+function keepWordCentred(top, bottom, force, sentence = null) {
   const band = readingViewportBounds();
+  if (sentence && S.rsvp.open && S.rsvp.centered) {
+    if (!force && Date.now() < glide.holdUntil) return;
+    const limit = Math.min(band.bottom, $('rsvp-float').getBoundingClientRect().top - 14);
+    // For a sentence taller than the available space, start at its first line
+    // and follow the spoken line once it reaches the lower edge.
+    const delta = sentence.bottom - sentence.top <= limit - band.top
+      ? sentence.bottom - limit
+      : Math.min(sentence.bottom - limit, Math.max(sentence.top - band.top, bottom - limit));
+    glideCancel();
+    if (Math.abs(delta) > 1) window.scrollTo({ top: window.scrollY + delta, behavior: 'instant' });
+    return;
+  }
   const h = Math.max(0, bottom - top);
   const middle = top + h / 2;
   if (REDUCED_MOTION) {
@@ -5218,7 +5278,7 @@ function ALOUD_LS_SHIM(saved) {
 
 /* The karaoke agent. Injected last, so it wraps the text the document's own
    scripts have already finished building. Serialized with toString(). */
-function ALOUD_FRAME_AGENT(cfg) {
+function ALOUD_FRAME_AGENT(cfg, sentenceBounds) {
   var CLS = 'aloud-w';
   var SVGNS = 'http://www.w3.org/2000/svg';
   var els = [], toks = [], blks = [], codes = [];
@@ -5830,7 +5890,10 @@ function ALOUD_FRAME_AGENT(cfg) {
       if (g) {
         reveal(g);
         var r = g.getBoundingClientRect();
-        post({ t: 'aloud:geom', word: m.geom, top: r.top + window.scrollY, bottom: r.bottom + window.scrollY, force: !!m.force });
+        var bounds = m.sentence && sentenceBounds(m.sentence.start, Math.min(els.length, m.sentence.end), i => els[i]);
+        if (bounds) { bounds.top += window.scrollY; bounds.bottom += window.scrollY; }
+        post({ t: 'aloud:geom', word: m.geom, top: r.top + window.scrollY, bottom: r.bottom + window.scrollY,
+          sentence: bounds, force: !!m.force });
       }
     }
   });
@@ -5868,7 +5931,9 @@ function frameFlushSoon() {
     if (!S.frame || S.frame !== f) return;
     f.flushQueued = false;
     if (!f.ops.length && f.geom === null) return;
-    frameSend({ t: 'aloud:apply', ops: f.ops, geom: f.geom, force: f.geomForce });
+    const sent = S.rsvp.open && S.rsvp.centered && S.sentences[S.words[f.geom]?.sent];
+    frameSend({ t: 'aloud:apply', ops: f.ops, geom: f.geom, force: f.geomForce,
+      sentence: sent ? { start: sent.start, end: sent.end } : null });
     f.ops = []; f.geom = null; f.geomForce = false;
   });
 }
@@ -6111,7 +6176,7 @@ function renderHtmlInteractive(htmlText, opts = {}) {
      DOMContentLoaded still has to render before we can wrap its words */
   const agent = doc.createElement('script');
   agent.textContent = '(function(c){var f=' + ALOUD_FRAME_AGENT.toString() + ';' +
-    'var go=function(){setTimeout(function(){f(c)},0)};' +
+    'var bounds=' + sentenceBounds.toString() + ';var go=function(){setTimeout(function(){f(c,bounds)},0)};' +
     'if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",go);else go();})(' +
     JSON.stringify({ skipCode: !!S.skipCode }) + ');';
   doc.body.appendChild(agent);
@@ -6160,6 +6225,7 @@ function renderHtmlInteractive(htmlText, opts = {}) {
       if (m.revision === S.zoom.revision) {
         S.zoom.applied = clampZoom(Number(m.scale) || S.zoom.applied);
         $('zoom-pct').textContent = Math.round(S.zoom.applied * 100) + '%';
+        refreshCenteredScroll();
       }
     } else if (m.t === 'aloud:anchor') {
       const ir = iframe.getBoundingClientRect();
@@ -6200,7 +6266,10 @@ function frameApplyScroll(m) {
   const ir = f.el.getBoundingClientRect();
   const top = ir.top + (m.top || 0);
   const bottom = ir.top + (m.bottom || 0);
-  keepWordCentred(top, bottom, !!m.force);
+  if (S.rsvp.open && S.rsvp.centered && (!m.sentence || S.words[m.word]?.sent !== S.words[S.paintedWord]?.sent)) return;
+  if (m.sentence && !(S.rsvp.open && S.rsvp.centered)) return;
+  const bounds = m.sentence && { top: ir.top + m.sentence.top, bottom: ir.top + m.sentence.bottom };
+  keepWordCentred(top, bottom, !!m.force, bounds);
 }
 
 function renderHtmlNative(htmlText, opts = {}) {
@@ -6684,7 +6753,12 @@ function maybeScroll(el, force = false) {
     return;
   }
   const r = el.getBoundingClientRect();
-  keepWordCentred(r.top, r.bottom, force);
+  let bounds = null;
+  if (S.rsvp.open && S.rsvp.centered) {
+    const sent = S.sentences[S.words[el.dataset.word]?.sent];
+    if (sent) bounds = sent.span?.getBoundingClientRect() || sentenceBounds(sent.start, sent.end, i => S.words[i].el);
+  }
+  keepWordCentred(r.top, r.bottom, force, bounds);
 }
 function updateProgress() {
   const pct = S.sentences.length ? Math.round(100 * S.curSent / Math.max(1, S.sentences.length - 1)) : 0;
@@ -8919,16 +8993,30 @@ function rsvpPlay(fromWord) {
   step();
 }
 
+function applyRsvpPlacement() {
+  const centered = S.rsvp.open && S.rsvp.centered;
+  const word = $('rsvp-word'), parent = $(centered ? 'rsvp-float' : 'rsvp-body');
+  document.body.classList.toggle('rsvp-centered', centered);
+  if (word.parentNode !== parent) {
+    const focused = document.activeElement === word;
+    parent.prepend(word);
+    if (focused && S.rsvp.open) word.focus({ preventScroll: true });
+  }
+  setSwitchState($('centered-spritz-switch'), S.rsvp.centered);
+  invalidateReadingViewportBounds();
+  refreshRsvpFit();
+  refreshCenteredScroll();
+}
 function setRsvpOpen(open) {
   S.rsvp.open = open;
   $('rsvp').inert = !open;
   $('rsvp').setAttribute('aria-hidden', String(!open));
   $('btn-rsvp').setAttribute('aria-pressed', String(open));
   $('btn-player-rsvp').setAttribute('aria-pressed', String(open));
-  if (!open && $('rsvp').contains(document.activeElement)) (matchMedia('(max-width: 560px)').matches ? $('btn-player-rsvp') : $('btn-rsvp').closest('.sheet') ? $('btn-more') : $('btn-rsvp')).focus({ preventScroll: true });
+  if (!open && ($('rsvp').contains(document.activeElement) || document.activeElement === $('rsvp-word'))) (matchMedia('(max-width: 560px)').matches ? $('btn-player-rsvp') : $('btn-rsvp').closest('.sheet') ? $('btn-more') : $('btn-rsvp')).focus({ preventScroll: true });
   document.body.classList.toggle('rsvp-on', open);
+  applyRsvpPlacement();
   arrangeSpritzControls();
-  invalidateReadingViewportBounds();
   /* the card is still unfolding; re-centre the current word once it settles */
   setTimeout(() => { invalidateReadingViewportBounds(); if (S.curWord >= 0) maybeScroll(S.words[S.curWord]?.el); }, 380);
   $('btn-rsvp').classList.toggle('rsvp-active', open);
@@ -9519,6 +9607,7 @@ function applyZoom(save = true, recaptureHtml = false) {
   $('zoom-fitw').setAttribute('aria-pressed', S.zoom.fit === 'width');
   $('zoom-fitp').setAttribute('aria-pressed', S.zoom.fit === 'page');
   $('zoom-fitp').style.display = S.mode === 'pdf' ? '' : 'none';
+  refreshCenteredScroll();
   const htmlText = S.mode === 'html';
   $('zoom-bar').setAttribute('aria-label', htmlText ? 'Document text size' : 'Zoom');
   $('zoom-in').title = htmlText ? 'Increase document text size (+)' : 'Zoom in (+)';
@@ -9999,6 +10088,12 @@ function refreshInterfaceText() {
 }
 $('ui-text-size').addEventListener('change', e => { store.set('uiScale', +e.target.value); refreshInterfaceText(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshInterfaceText(); });
+$('centered-spritz-switch').addEventListener('click', () => {
+  S.rsvp.centered = !S.rsvp.centered;
+  store.set('rsvpCentered', S.rsvp.centered);
+  applyRsvpPlacement();
+  if (S.rsvp.open && !S.rsvp.centered) maybeScroll(S.words[S.paintedWord]?.el);
+});
 $('autoscroll-switch').addEventListener('click', e => { S.autoScroll = !S.autoScroll; setSwitchState(e.currentTarget, S.autoScroll); store.set('autoScroll', S.autoScroll); });
 $('skim-switch').addEventListener('click', e => {
   S.skim = !S.skim;
@@ -10556,6 +10651,7 @@ function renderVoiceList() {
 applyAppearance();
 $('ui-text-size').value = String(store.get('uiScale', 1));
 refreshInterfaceText();
+setSwitchState($('centered-spritz-switch'), S.rsvp.centered);
 if (!store.get('autoScroll', true)) $('autoscroll-switch').classList.remove('on');
 /* crash-loop guard (see loadKokoro): a leftover sentinel means the last neural
    load never finished. On a phone with an explicit heavy tier that's almost

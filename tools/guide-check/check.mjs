@@ -1,4 +1,5 @@
 /* Tools-only live-browser gate. The app never imports this file. */
+import { checkCenteredSpritz } from './centered-spritz.mjs';
 import { chromium } from 'playwright';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -344,6 +345,8 @@ async function checkPronunciation(page) {
 }
 try {
   browser=await chromium.launch();
+  checking = 'Centered Spritz';
+  await checkCenteredSpritz(browser, origin);
   for(const viewport of [{width:1280,height:900},{width:390,height:844}])for(let index=0;index<files.length;index++){
     const file=files[index],strict=file.startsWith(fixtures+path.sep);
     const rawContext=await browser.newContext({viewport});const raw=await rawContext.newPage();await raw.goto(`${origin}/fixture/${index}`);
