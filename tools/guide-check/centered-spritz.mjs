@@ -1,5 +1,31 @@
 import assert from 'node:assert/strict';
 
+// Exercise both the usual reading size and words that must shrink to fit.
+async function checkFloatingWordSpacing(page) {
+  for (const token of ['I', 'understanding', 'counterrevolutionaries', 'W'.repeat(45)]) {
+    const layout = await page.evaluate(token => {
+      rsvpFlash(token);
+      const card = $('rsvp-float').getBoundingClientRect();
+      const word = $('rsvp-word');
+      const range = document.createRange();
+      range.selectNodeContents($('rsvp-pre'));
+      const left = range.getBoundingClientRect().left;
+      range.selectNodeContents($('rsvp-post'));
+      const right = range.getBoundingClientRect().right;
+      const pivot = $('rsvp-orp').getBoundingClientRect();
+      return {
+        left: (left || pivot.left) - card.left,
+        right: card.right - (right || pivot.right),
+        padding: parseFloat(getComputedStyle(word).paddingLeft),
+        offset: Math.abs(pivot.left + pivot.width / 2 - innerWidth / 2)
+      };
+    }, token);
+    assert(layout.padding >= 20 && Math.min(layout.left, layout.right) >= layout.padding - 1,
+      'Floating word intruded into side padding: ' + JSON.stringify(layout));
+    assert(layout.offset < 1, 'Floating recognition point moved');
+  }
+}
+
 // Use the same passage in all views. Printing it produces a real PDF with
 // selectable text and fixed line breaks for the PDF.js text-layer check.
 export async function checkCenteredSpritz(browser, origin) {
@@ -34,6 +60,7 @@ export async function checkCenteredSpritz(browser, origin) {
           if (!S.rsvp.open) setRsvpOpen(true);
         });
         await page.waitForTimeout(420); // Allow the player's existing open transition to finish.
+        if (mode === 'flow') await checkFloatingWordSpacing(page);
         const active = mode === 'interactive' ? await (await page.locator('#content iframe').elementHandle()).contentFrame() : page;
         const indices = await page.evaluate(() => [0, S.words.findIndex(w => w.text === 'waterline'), S.words.length-1]);
         for (const index of indices) {
