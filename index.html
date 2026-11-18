@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Aloud — Listen to anything</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="aloud-version" content="v6.45.0">
+<meta name="aloud-version" content="v6.45.1">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="icon-192.png">
 <meta name="theme-color" content="#12121a">
@@ -705,14 +705,25 @@
   #rsvp-float:empty { display: none; }
   #rsvp-float {
     position: fixed; z-index: 41; top: 50%; left: 50%;
-    transform: translate(-50%, -50%); width: min(330px, calc(100% - 32px));
+    transform: translate(-50%, -50%); width: min(410px, calc(100% - 32px));
     background: var(--bg-elev); border: 1px solid var(--border);
     border-radius: 16px; box-shadow: var(--shadow);
   }
   #rsvp-float #rsvp-word {
     grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    padding-inline: clamp(20px, 7%, 30px); letter-spacing: .008em;
     height: clamp(52px, 10vh, 74px); border-radius: inherit;
   }
+  #rsvp-float #rsvp-word, #rsvp-float #rsvp-word > span { transition-property: none; }
+  /* Anchor the fixation guides to the card, including when a long word scales down. */
+  #rsvp-float #rsvp-orp::before, #rsvp-float #rsvp-orp::after { content: none; }
+  #rsvp-float::before, #rsvp-float::after {
+    content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+    width: 2px; height: 7px; border-radius: 2px; pointer-events: none;
+    background: color-mix(in srgb, var(--text-dim) 55%, transparent);
+  }
+  #rsvp-float::before { top: 4px; }
+  #rsvp-float::after { bottom: 4px; }
   /* Give even the first and last sentence room to reach the floating word. */
   body.rsvp-centered #reader { padding-block: 50vh calc(50vh + 90px); overflow-anchor: none; }
 
@@ -8913,7 +8924,7 @@ function fitRsvpWord() {
   let metrics = fitRsvpWord.metrics;
   if (!metrics) {
     const font = getComputedStyle(el), base = window.innerWidth <= 560 ? 32 : 38;
-    const width = el.clientWidth;
+    const width = el.clientWidth - parseFloat(font.paddingLeft) - parseFloat(font.paddingRight);
     if (width <= 12) return; // Opening/hidden display: retry once it has a width.
     metrics = fitRsvpWord.metrics = { width, base, font: `${font.fontWeight} ${base}px ${font.fontFamily}` };
   }
